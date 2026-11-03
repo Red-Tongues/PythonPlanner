@@ -85,3 +85,9 @@ These take precedence over the text above where they conflict.
   - Concurrent claims; late or duplicate inbox results; approval races; branch replay; starvation; retry exhaustion.
   - A short randomised-fault soak (`orchestrator soak --ticks N --seed S`) that asserts progress and no duplicate effects.
 - **C7 Trust boundary** (documented in `docs/RUNBOOK.md`). On PostgreSQL the runtime role has no DDL rights (migrations use a separate role). Generated work and workbench consumers never receive DB credentials.
+- **C8 Pace and drift governor (CFO decision D14).** Implement PROJECT_PLAN §11.1:
+  - per-channel pace budgets (runs/hour, runs/day) with conservative defaults;
+  - key routing fields evaluated first; other fields lazily, re-evaluated only on input-hash change;
+  - a daily new-packet cap per objective; a confirmation for packets not traceable to an approved objective;
+  - low requirement-alignment on content evaluation pauses that branch;
+  - `orchestrator digest` and a GUI digest page (what advanced, what waits for the user, what is blocked and why).

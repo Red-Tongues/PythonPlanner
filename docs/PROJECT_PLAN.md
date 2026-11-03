@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Document** | Project Plan — replaces the draft `Python Planner.docx` (archived at `docs/archive/`) |
-| **Plan version** | 0.3 — living document, updated after every delivery round (v0.3 adds the R0 review-panel consensus) |
+| **Plan version** | 0.4 — living document, updated after every delivery round (v0.4 records the CFO's decisions on pace, Juggler and the v1 bar) |
 | **Product target** | v1.0.0.0 prototype of the Python Orchestrator (package version `1.0.0.0.devN` until acceptance) |
 | **Sponsor / CFO** | Sam (redtongues) |
 | **Project manager** | Claude (PM agent) |
@@ -253,6 +253,20 @@ A custom prompt (GUI or CLI) sets `control_state.paused`. No new channel runs st
 
 ---
 
+### 11.1 Pace and drift governor (CFO decision 2026-11-03)
+
+> *"Slow throughput is actually preferred, since it is running all day — I would rather it works slowly to avoid it going far off the rails, working down rabbit holes that I didn't foresee."*
+
+Deliberate pace is a feature, not a performance gap. The kernel enforces:
+
+- **Pace budgets** per channel — maximum runs per hour and per day (conservative defaults; editable in the GUI). Evaluation of key routing fields comes first; other fields are evaluated lazily and only re-evaluated when their inputs change (input-hash caching).
+- **Drift guards:**
+  - a daily cap on new packets per objective;
+  - `max_branch_depth` (2) and a descendant cap;
+  - a packet that cannot be traced to an approved objective needs confirmation;
+  - a low *requirement alignment* score on content evaluation pauses that branch and raises a confirmation instead of continuing.
+- **Daily digest** (GUI + CLI): what advanced, what is waiting for you, what was blocked and why — readable in two minutes (K4).
+
 ## 12. Administrative interface (GUI)
 
 - **Miller-column layout**, inspired by Juggler: Projects │ Objectives │ prioritised Tasks │ Packet detail.
@@ -267,7 +281,7 @@ A custom prompt (GUI or CLI) sets `control_state.paused`. No new channel runs st
 
 **Local LLMs.** Any OpenAI-compatible endpoint (Ollama default `http://localhost:11434/v1`; llama.cpp server and LM Studio also work). Models A and B stay resident on a dedicated 16 GB or 24 GB inference GPU; a separate GPU drives the display and the rest of the stack (MSI X870 board). Tests use a deterministic `FakeProvider`.
 
-**juggler.studio.** An open-source visual workbench for AI coding agents (branchable conversation trees stored on disk; Claude Code, Copilot, OpenAI, Gemini, Ollama and other providers; headless server with browser clients; JavaScript extension SDK). It has no documented REST API, so v1 uses a **file-drop workbench adapter** (`workbench/outbox` → `workbench/inbox`, Markdown + JSON) and specifies a Juggler extension for v1.1 that covers the draft's Tool Design list: conversation selection, model selection, prompt insertion, model outputs, error messages. **Licensing:** Juggler's core is AGPL-3.0 and its extension SDK is Apache-2.0. Keep the orchestrator decoupled (separate process; file/HTTP boundary) and take legal advice before any commercial distribution.
+**juggler.studio.** An open-source visual workbench for AI coding agents (branchable conversation trees stored on disk; Claude Code, Copilot, OpenAI, Gemini, Ollama and other providers; headless server with browser clients; JavaScript extension SDK). It has no documented REST API. M3 therefore ships a **file-drop workbench adapter** (`workbench/outbox` → `workbench/inbox`, Markdown + JSON). **M4 builds a Juggler extension** (`orchestrator-bridge`; spec in `docs/milestones/M4_juggler_bridge.md`) using the JavaScript SDK's slash commands, model-callable tools, loop strategies, info cards and pinboard tabs to cover the draft's Tool Design list: conversation selection, model selection, prompt insertion, model outputs, error messages. **Licensing:** Juggler's core is AGPL-3.0 and its SDK Apache-2.0. The system is for personal project development, so no licensing action is needed now; revisit if the stack starts producing products for sale (CFO, 2026-11-03).
 
 **Production repository.** A separate local git folder. The app writes only accepted artifacts to each packet's `repo_target_path`; commit messages carry the packet ref and run ID; corrections are new commits (reversible, with provenance).
 
@@ -291,6 +305,10 @@ A custom prompt (GUI or CLI) sets `control_state.paused`. No new channel runs st
 | D10 | Version scheme MAJOR.MINOR.PATCH.BUILD; package `1.0.0.0.devN` until acceptance | PEP 440 compliant | Proposed |
 | D11 | Versioned migrations (Alembic) own tables, triggers, views and seeds | Safe upgrades across milestones; identical schema on both dialects | Adopted (R0) |
 | D12 | Every milestone reviewed by a three-model panel with six-pass-style consensus | Independent, cross-checked review; mirrors the product's own design | Adopted (CFO request) |
+| D13 | v1.0.0.0 = a working prototype of the kernel, not a production system | Sets the acceptance bar for this phase | **Confirmed by CFO** 2026-11-03 |
+| D14 | Deliberate pace: pace budgets and drift guards over throughput (§11.1) | The system runs all day and must not go down unforeseen rabbit holes | **Confirmed by CFO** 2026-11-03 |
+| D15 | Juggler integration via an `orchestrator-bridge` extension (M4) | Turns the workbench into a real unattended consumer | **Confirmed by CFO** 2026-11-03 |
+| D16 | Personal-use licensing posture (Juggler AGPL acceptable) | No commercial distribution planned | **Confirmed by CFO** 2026-11-03 |
 
 ---
 
@@ -298,7 +316,9 @@ A custom prompt (GUI or CLI) sets `control_state.paused`. No new channel runs st
 
 **In scope:** everything in §3–§13 at prototype fidelity — ingestion, data model with immutability, field registry, six-pass evaluator, SQL consensus/statistics/thresholds/priority, branching, three channels with run contracts and retries, kernel loop with pause/interrupt, autonomy scopes and approval queue, repo writer, SonarQube client, file-drop workbench, local web GUI, CLI, end-to-end demo, CI.
 
-**Out of scope (v1.1+):** native Juggler extension; GPU residency and batching optimisation; SQL-driven dynamic pass counts per packet; frontier-model extraction provider beyond a stub; secrets scanner; multi-user auth; installer/packaging for end users; design-vision artwork.
+**Committed next (M4):** the Juggler `orchestrator-bridge` extension.
+
+**Out of scope (v1.1+):** GPU residency and batching optimisation; SQL-driven dynamic pass counts per packet; frontier-model extraction provider beyond a stub; secrets scanner; multi-user auth; installer/packaging for end users; design-vision artwork.
 
 ---
 
@@ -311,7 +331,8 @@ A custom prompt (GUI or CLI) sets `control_state.paused`. No new channel runs st
 | **M1** | Kernel foundation — packaging, contracts, field registry, schema with immutability triggers, lifecycle, deterministic ingestion, CLI, CI (+ R0 amendments A1–A7) | `docs/milestones/M1_foundation.md` | ⏳ In progress |
 | **M2** | Evaluation engine & SQL layer — providers, six-pass evaluator, consensus/statistics/threshold/priority views, branching, LLM extraction contract | `docs/milestones/M2_evaluation_engine.md` | Planned |
 | **M3** | Orchestration & interface — kernel loop, channels, workbench adapter, repo writer, SonarQube client, interruption, autonomy enforcement, GUI, demo | `docs/milestones/M3_orchestration_interface.md` | Planned |
-| **M4** | Hardening & v1.1 backlog | §15 out-of-scope list | Backlog |
+| **M4** | Juggler bridge extension — orchestrator queue API + `orchestrator-bridge` extension (commands, tools, strategy, info card) | `docs/milestones/M4_juggler_bridge.md` | Planned (CFO priority) |
+| **M5** | Hardening & v1.1 backlog — real-model benchmarks, multi-hour soak, GPU residency/batching, secrets scanner | §15 out-of-scope list | Backlog |
 
 **Definition of done (every milestone):** tests green locally and in CI; ruff clean; Copilot review triaged (accepted / deferred / declined, with reasons); `docs/PROGRESS.md` updated; PM verification in an independent environment; merged to `main`.
 
@@ -347,9 +368,9 @@ A custom prompt (GUI or CLI) sets `control_state.paused`. No new channel runs st
 | Small local models return unreliable structured output | High | High | Pydantic contracts + retries; JSON mode; coarse scales; dual-model consensus; evidence verification; exemplars |
 | Immutability blocks legitimate corrections | Medium | Medium | Supersede with a new version; never edit in place |
 | Juggler has no stable API | Medium | High | Adapter boundary; file-drop now; extension later |
-| AGPL licensing of Juggler core | Medium (if commercialised) | Medium | Separate process; legal advice before distribution |
+| AGPL licensing of Juggler core | Low (personal use) | Low | No action while personal; revisit before selling anything built on the stack |
 | SonarQube free edition analyses one branch only | Medium | Certain | Per-branch project keys; separate secrets scanner |
-| Runaway autonomy (wrong work, wasted time/cost) | High | Medium | Costly stages default to `confirm`; per-channel attempt limits; pause/kill switch; full event log |
+| Runaway autonomy — rabbit holes the user did not foresee | High | Medium | Pace budgets and drift guards (§11.1); costly stages default to `confirm`; per-channel attempt limits; pause/kill switch; daily digest; full event log |
 | Scope creep (the draft is broad) | High | High | Milestone specs; Key Idea filter; explicit backlog |
 | VRAM too small for two resident models | Medium | Medium | Small quantised models; measure; fall back to swap-loading |
 | Agent-written code quality | Medium | Medium | Tests, CI, Copilot review, independent PM verification |
@@ -376,12 +397,13 @@ No prices are quoted here; obtain current quotes before purchase.
 
 ## 20. Open questions and decisions for the CFO
 
+*Answered 2026-11-03:* v1 bar (D13), deliberate pace (D14), Juggler extension (D15), personal-use licensing (D16).
+
 1. **D3** — combined vs split evaluation passes (§7).
 2. Default autonomy modes (§11) — acceptable as a starting point?
 3. Score scale 0–10 — acceptable?
 4. GUI as a local web UI (D6) rather than a desktop app?
 5. Frontier model for messy-document extraction: which provider and what monthly budget?
-6. Commercial intent for anything built on juggler.studio (AGPL)?
 7. Design-vision images for GUI states — who produces them, and when?
 8. The draft's sentence "Both models stay loaded and …" is unfinished — assumed to mean *stay resident and serve stateless calls*.
 9. Which local models for A and B? (benchmark against ground-truth exemplars)
@@ -394,6 +416,7 @@ No prices are quoted here; obtain current quotes before purchase.
 |---|---|
 | 2026-11-03 | Plan v0.2 drafted from the CFO's draft; repository seeded (plan, agent guide, milestone specs, archived draft); M1 started with Claude Code. |
 | 2026-11-03 | Review R0. The three-model panel (Microsoft Copilot, Gemini, GitHub Copilot) raised 24 findings on the plan and specs; cross/self scoring adopted 20 (18 accepted, 2 accepted with amendments), 2 partially and deferred 2 already covered elsewhere. Amendments A1–A7 were sent to the engineer during M1; B1–B8 and C1–C7 were folded into the M2/M3 specs. Plan → v0.3. |
+| 2026-11-03 | CFO check-in: v1 bar confirmed (working prototype of the kernel); slow, deliberate pace preferred → pace and drift governor (§11.1); Juggler extension committed as M4; personal-use licensing. Plan → v0.4. |
 
 ---
 
