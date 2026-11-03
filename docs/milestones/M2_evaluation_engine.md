@@ -1,0 +1,54 @@
+# M2 — Evaluation engine and SQL layer
+
+**Goal:** packets get their candidate fields filled by the six-pass dual-model quickfire evaluation, and SQL turns the raw passes into consensus values, statistics, branch triggers and a unique priority queue.
+
+Serves requirements **A** (LLM extraction contract), **B**, **C** · Key Idea K1–K4. Builds on M1; do not change M1 behaviour except to fix bugs.
+
+## Deliverables
+
+### 1. LLM providers (`orchestrator.llm`)
+- `LLMProvider` protocol: `complete(prompt: str, *, model: str, max_tokens: int, temperature: float, json_mode: bool) -> LLMResponse` (`text`, `model`, `latency_ms`, `prompt_tokens`, `completion_tokens`).
+- `FakeProvider`: deterministic. Scripted responses by (model, prompt-pattern) **or** a rule-based default that derives plausible values from the prompt text, so a full evaluation runs with no network. Can be told to return invalid JSON N times to exercise retries.
+- `OpenAICompatibleProvider` (httpx): `base_url`, `api_key` (optional), timeouts, JSON mode when supported. Works with Ollama (`http://localhost:11434/v1`), llama.cpp server and LM Studio. Tests use `httpx.MockTransport` — never the network.
+- Settings: `model_a`, `model_b`, `model_c` (aggregator), provider URLs.
+
+### 2. Prompt templates (`orchestrator.evaluation.prompts`)
+- Templates for extraction, combined evaluation (score + evidence + reason) and, for the split plan, separate accuracy and evidence prompts — wording based on PROJECT_PLAN §7.
+- Each prompt is self-contained: field definition (label, kind, vocabulary or scale, `prompt_hint`), packet core fields, project core fields, and up to N exemplars from `exemplars` for that field if present. Output format instructions require JSON.
+
+### 3. Pass plan and evaluator (`orchestrator.evaluation`)
+- Default plan per PROJECT_PLAN §7: P1 A-extract, P2 B-extract, P3 A→value_b, P4 B→value_a, P5 A→value_a, P6 B→value_b. Plan is data (YAML or a settings row), so a `split` plan can be selected.
+- Contracts: `CandidateValue` (value or NULL, typed by field kind; tag sets restricted to the vocabulary; scores 0–10; text ≤ `max_chars`) and `PassEvaluation` (`accuracy_score` 0–10, `evidence: list[{quote, tag: SUPPORT|CONTRADICTION}]`, `reason` ≤ 280 chars).
+- Validation with retries: invalid output → retry with the validation error appended, up to the Quickfire Evaluation max attempts (default 4). Every attempt is recorded in `channel_runs` (`QE` run IDs) and every valid pass in `evaluation_passes` (append-only) with latency.
+- **Evidence verification:** each quote must be an exact (whitespace-normalised) substring of the source text; otherwise it is stored with `verified = false` and excluded from aggregation.
+- Text fields stop after 3 passes. `evaluations_count` on the packet is incremented through the governed update path.
+- `evaluate_packet(ref, fields=None)` and `evaluate_pending(limit)` (packets with missing or stale candidate values), batching calls by model.
+
+### 4. SQL layer (`orchestrator.sql`) — views on both SQLite and PostgreSQL
+- `v_field_consensus`: per packet × field → final value, `agreement` flag, `confidence` (weights from `settings`), supports, contradictions, unverified-evidence count, status `accepted` / `disputed` / `null` — rules exactly as PROJECT_PLAN §7. Tag sets are exploded so each tag is a toggle.
+- `v_packet_stats`: prompt word count, evaluation run count, cumulative evaluation time, lifecycle duration, scores above threshold, evidence item count, generation time (0 until M3).
+- `v_branch_stats` (federated, root packets with descendants): original creation timestamp, descendant count, score variance, revision count, failed/rejected run count, contradiction count, model usage distribution (as counts).
+- `v_branch_triggers`: packets × enabled `thresholds` rules that fire, with the action.
+- `v_queue`: unique deterministic priority per PROJECT_PLAN §8 with anti-starvation ageing; tie-break `created_at`, `ref`.
+- If a view is impractical in portable SQL, implement it as a parameterised query in Python **and** document why in `docs/PROGRESS.md`.
+
+### 5. Promotion and branching
+- `promote_consensus(packet)`: accepted consensus values feed master governance fields (e.g. `channel` routing suggestion, `priority_level`) according to the `candidate_promotion` autonomy scope (`auto` → apply + event; `confirm` → confirmation row).
+- `apply_branch_triggers()`: for `split` actions, create child packets (`parent_id`, `root_id`, `branch_reason`) from a `subtask_list` produced by the Local Generation model (FakeProvider in tests); the original packet is never removed. Respects the `branching` autonomy scope.
+- Disputed key fields go to the approval queue.
+
+### 6. LLM tree extraction contract (Part 1)
+- `extract_tree_with_llm(text, provider)` → validated `ProjectTree` (retries as above). Ingestion chooses deterministic vs LLM via a flag; both produce the same contract and go through the same confirmation flow.
+
+### 7. CLI
+`orchestrator evaluate [--packet REF] [--limit N]` · `consensus REF` · `stats [REF]` · `queue [--channel ...]` · `branch apply` · `confirmations list|approve ID|reject ID`.
+
+### 8. Tests (FakeProvider only)
+Full six-pass run on one packet; agreement, disagreement, dispute-margin and NULL consensus cases; tag-set toggles; evidence verification; retry on invalid JSON then success, and failure after max attempts; append-only enforcement on `evaluation_passes`; branch trigger creates linked children while the original remains; priority ordering is unique and ages correctly; autonomy scope `confirm` produces confirmation rows instead of changes; the same SQL tests run on PostgreSQL in CI.
+
+## Acceptance criteria
+1. `orchestrator ingest examples/sample_project_plan.md && orchestrator evaluate` (FakeProvider by default when no model endpoint is configured) fills candidate fields for every packet.
+2. `orchestrator consensus <ref>` shows the final value, confidence, status and evidence for each field.
+3. A packet with `task_parsability ≥ 7` produces child packets linked to the original.
+4. `orchestrator queue` lists packets in a unique, deterministic order.
+5. All tests pass on SQLite locally and on PostgreSQL in CI; ruff clean; `docs/PROGRESS.md` updated; PR lists each criterion ✅/❌.

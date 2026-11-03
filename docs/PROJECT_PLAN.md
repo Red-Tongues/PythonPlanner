@@ -1,0 +1,381 @@
+# PythonPlanner — Python Orchestrator · Project Plan
+
+| | |
+|---|---|
+| **Document** | Project Plan — replaces the draft `Python Planner.docx` (archived at `docs/archive/`) |
+| **Plan version** | 0.2 — living document, updated after every delivery round |
+| **Product target** | v1.0.0.0 prototype of the Python Orchestrator (package version `1.0.0.0.devN` until acceptance) |
+| **Sponsor / CFO** | Sam (redtongues) |
+| **Project manager** | Claude (PM agent) |
+| **Main engineer** | Claude Code (cloud session, GitHub-connected) |
+| **Code reviewer** | GitHub Copilot |
+| **Repository** | `github.com/redtongues/PythonPlanner` (private) |
+| **Last updated** | 2026-11-03 |
+
+---
+
+## 1. Executive summary
+
+The Python Orchestrator is the **custom Python kernel** at the centre of an autonomous software-development stack. It takes messy project-planning material, turns it into a standardised, governed database of **Project → Objective → Task (Prompt Packet)** records, and then keeps that work moving while the owner is at their day job:
+
+- small **local LLMs** continuously score and tag every packet (six-pass "quickfire" evaluation);
+- **SQL** turns those raw evaluations into deterministic decisions — consensus values, priority, routing, branching;
+- the **Python kernel** dispatches ready packets to the right channel — local generation for simple work, the **juggler.studio** workbench for complex agentic production — and writes accepted results into a separate **production repository** that **SonarQube** checks;
+- **completed work is locked**: the AI can never alter it; corrections become new versions.
+
+**v1.0.0.0** is a working prototype of that kernel. It runs end-to-end on an ordinary laptop with a deterministic fake model (no GPU, no network), and on the target stack (PostgreSQL + Ollama-served local models + SonarQube) when those are available. It deliberately stops short of production hardening, a native Juggler extension and GPU scheduling, which are planned for v1.1+.
+
+**Delivery approach.** Claude Code builds in three milestone rounds (M1 Foundation → M2 Evaluation engine → M3 Orchestration & interface). GitHub Copilot reviews every round; the PM accepts only suggestions that advance the Key Idea, merges to `main`, verifies independently, and keeps this plan current so any agent can pick up the work.
+
+---
+
+## 2. The Key Idea — the north star
+
+> *Build an autonomous project software dev stack with a custom Python kernel. It should be utilised for organising and advancing project work autonomously for the user while they are working their day job.*
+
+**Decision filter.** Every design choice, and every review suggestion, must serve at least one of these five properties — otherwise it is deferred to the backlog, however good it is in general:
+
+| # | Property | What it means in practice |
+|---|---|---|
+| K1 | **Advances work unattended** | The loop runs for hours without a human, survives crashes/restarts (all state in the DB), and never blocks on a single failure. |
+| K2 | **Governed, not freewheeling** | Every AI decision is recorded, scored, backed by evidence and gated by the user's autonomy settings. |
+| K3 | **Deterministic where possible** | LLMs produce *candidate* data; SQL and Python make the *decisions*. |
+| K4 | **Readable** | The user can open the GUI (or the database) at any moment and see what is happening and why. |
+| K5 | **Safe history** | Completed work is immutable; corrections create new versions, never edits. |
+
+---
+
+## 3. Requirements and traceability
+
+| ID | Requirement (from the draft) | How v1.0.0.0 meets it | Milestone | Acceptance evidence |
+|---|---|---|---|---|
+| **A** | Consolidate messy project planning documents into a standardised database | Ingestion pipeline (`.md`, `.txt`, `.docx`) → validated `ProjectTree` contract → Project / Objective / Packet tables. Deterministic parser first; LLM / Juggler extraction behind the same contract. | M1 parser · M2 LLM extraction | `orchestrator ingest` on sample docs creates the expected tree; tests |
+| **B** | Use LLMs in conjunction with SQL scripting to fill out the metadata | Six-pass dual-model quickfire evaluation fills candidate fields; SQL views aggregate them to consensus and promote to master governance fields. | M2 | `v_field_consensus` tests; end-to-end evaluation with the fake provider |
+| **C** | Autonomously evaluate and transform the database based on Scores and Tags | Threshold rules table → split / branch / route actions; priority computed in SQL; packets re-evaluated after change. | M2–M3 | Branching, routing and priority tests |
+| **D** | Operate continuously, creating and executing Complex Tasks autonomously on a readable workbench | Kernel loop with three channels (Quickfire Evaluation, Local Generation, Workbench Production), run-ID contracts with retries, crash-safe state; workbench outbox/inbox readable by humans and by Juggler. | M3 | `orchestrator run`, `orchestrator demo` |
+| **E** | Allow the user to configure manual input and agent independence scopes at each key stage | Autonomy scopes per stage (`manual` / `confirm` / `auto`) + approval queue; loop interruption with a custom prompt. | M1 schema · M3 enforcement + GUI | Scope enforcement tests; GUI approval queue |
+| **F** | Preserve completed work as immutable to the AI | Database triggers block UPDATE/DELETE on locked packets, accepted artifacts, evaluation and event logs (SQLite **and** PostgreSQL); application guard; supersede-by-new-version; git history in the production repo. | M1 | Trigger tests on both databases |
+
+---
+
+## 4. Glossary
+
+| Term | Definition |
+|---|---|
+| **Project / Objective / Task** | The three-level core tree. A Task *is* a Prompt Packet: `Project > Objective > Task (Prompt Packet)`. |
+| **Prompt Packet** | Federated task metadata recursively evaluated to fill and substantiate fields. New packets are created for new independent or parsed tasks. Parsed packets do not remove the original but create branches with a linked history. A packet carries three layers: **core fields** (authoritative definition), **master governance fields** (operational state) and **candidate fields** (evaluative layer). |
+| **Core fields** | The stable definition established at set-up: what the work is and where it belongs. |
+| **Master governance fields** | Fields Python and SQL use to manage a packet: unique ID, prompt description, response structure, channel, priority level, status, timestamps, evaluation count, repo target path, plus SQL statistics. |
+| **Candidate field** | Data-validated tags and scores filled by local-LLM evaluations and SQL. Consensus values may promote into master governance fields. |
+| **Tag** | Each allowed tag in a field's vocabulary is a toggle (on/off per packet). |
+| **Score** | Integer 0–10 (coarse scales are more reliable for small models). |
+| **Consensus value** | The SQL-aggregated final value of a candidate field after the six passes, with a confidence and a status (`accepted`, `disputed`, `null`). |
+| **Task branching** | Multiple tags or threshold scores in key candidate fields trigger new child packets linked to the original (the *trunk*). |
+| **Channel** | A routing stage: **Quickfire Evaluation**, **Local Generation**, **Workbench Production**. |
+| **Run ID contract** | One attempt to obtain a valid output from a channel, validated by Pydantic — e.g. `Local Generation is verifying #LG212 [attempt 2/3]`. |
+| **Response Structure** | The named schema / validation contract an output must satisfy. |
+| **Autonomy scope** | Per-stage setting: `manual` (user does it), `confirm` (agent prepares, user approves), `auto` (agent acts and logs). |
+| **Loop interruption** | A custom prompt that pauses queue delivery so core fields can be added or re-evaluated. |
+| **Workbench** | juggler.studio — used for complex agentic generation and production. |
+| **Production repository** | The local git folder, outside the app, where the emergent product is built. |
+| **Locked / immutable** | Completed or archived records that nothing in the app (and certainly not the AI) can change. A change means a new superseding version. |
+
+---
+
+## 5. Architecture
+
+![Stack overview — original flowchart](archive/stack_flowchart.png)
+
+### 5.1 Component map
+
+| Flowchart component | Role | v1 module(s) |
+|---|---|---|
+| **Python App** — prompt orchestration & administrative interface | Kernel loop, scheduling, channels, GUI, CLI | `orchestrator.kernel`, `orchestrator.channels`, `orchestrator.gui`, `orchestrator.cli` |
+| **Project Data** — PostgreSQL | System of record; SQL analytics; immutability triggers | `orchestrator.db` (SQLAlchemy 2.0; PostgreSQL target, SQLite for dev/tests) |
+| **Local LLMs — Quickfire Evaluations** | Stateless dual-model six-pass evaluation | `orchestrator.evaluation`, `orchestrator.llm` |
+| **Local LLMs — Simple Generations** | Low-complexity outputs | `orchestrator.channels.local_generation` |
+| **juggler.studio** — workbench | Complex agentic generation & production; tree extraction at set-up | `orchestrator.workbench` (file-drop adapter in v1; Juggler extension bridge in v1.1) |
+| **Repository** — local production folder | The emergent product, git-versioned | `orchestrator.repo` |
+| **SonarQube Community Build** | Objective quality signals → content-evaluation packets | `orchestrator.quality` |
+
+### 5.2 Data flow
+
+```mermaid
+flowchart LR
+  subgraph P1[Part 1 · Set-up / loop interruption]
+    DOC[Planning doc or manual prompt] --> GUI[GUI / CLI]
+    GUI --> EXT[Extraction: Juggler / frontier model / deterministic parser]
+    EXT --> TREE[ProjectTree contract → user confirms per autonomy scope]
+  end
+  TREE --> DB[(Project Data · PostgreSQL)]
+  subgraph P2[Part 2 · Automation loop]
+    DB --> QE[a · Quickfire evaluation · local models A+B · 6 passes]
+    QE --> SQL[b · SQL consensus · stats · thresholds · priority]
+    SQL --> ROUTE[c · Python routes ready packets]
+    ROUTE --> LG[Local Generation]
+    ROUTE --> WP[Workbench Production · juggler.studio]
+    LG --> REPO[(Production repo)]
+    WP --> REPO
+    REPO --> SQ[d · SonarQube scan]
+    SQ --> CE[Content-evaluation packets]
+    CE --> QE
+  end
+  SQL --> DB
+```
+
+**Part 1 — set-up / loop interruption.** (i) A planning document or manual prompt enters through the GUI/CLI. (ii) It is extracted to a standardised tree of Project, Objective and Task core fields (Juggler or a frontier model; deterministic parser as fallback), validated against the `ProjectTree` contract, and confirmed by the user according to the autonomy scope.
+
+**Part 2 — automation loop (each tick).** (a) Tiny local models evaluate packets whose candidate fields are missing or stale. (b) SQL aggregates consensus, statistics, thresholds and priority. (c) Python routes ready packets through channels, validates outputs with Pydantic and writes accepted artifacts to the production repo. (d) SonarQube scans the changed branches; its results, plus a content-evaluation packet for every new artifact, feed back into step (a).
+
+---
+
+## 6. Data model (v1)
+
+| Table | Purpose | Notes |
+|---|---|---|
+| `projects` | Project core fields: name, brief, industry, sectors, values, goals, scope, references | Used as context in every evaluation prompt |
+| `objectives` | Objective core fields (name, brief …) + tags/scores | LLM-generated values always need manual confirmation |
+| `packets` | Task = Prompt Packet: core + master governance fields | `ref`, `prompt_description`, `response_structure`, `channel`, `priority_level`, `status`, `created_at`, `evaluations_count`, `repo_target_path`, `completed_at`, `locked`, `version`, `supersedes_id`, `parent_id`, `root_id`, `branch_reason` |
+| `candidate_field_definitions` | Registry of evaluative fields | `name`, `level` (task/content), `kind` (tagset/score/text/bool), `vocabulary`, `scale`, `max_chars`, `max_passes`, `prompt_hint`, `is_key_field` — seeded from the draft's lists |
+| `evaluation_passes` | Every pass of every evaluation | **Append-only.** model, pass no., role, value, score, evidence, reason, attempt, latency, run id |
+| `thresholds` | Dynamic rules: field / operator / value → action | Drive branching and routing |
+| `settings` | Weights and tunables (aggregation, priority, attempts) | Editable in GUI |
+| `channel_runs` | Run-ID contracts: channel, attempt *k/n*, contract, status, error | Feeds the console |
+| `artifacts` | Generated outputs: path, sha256, accepted flag | **Immutable once accepted** |
+| `quality_reports` | SonarQube results per branch | Feeds content evaluation |
+| `autonomy_scopes` | Stage → mode | Requirement E |
+| `confirmations` | Approval queue | Requirement E |
+| `events` | Audit log of every state change | **Append-only** |
+| `control_state` | Paused flag, pending interrupt prompt | Loop interruption |
+| `exemplars` | Ground-truth examples per packet type | Few-shot prompts + accuracy checks for local models |
+
+**SQL views:** `v_field_consensus`, `v_packet_stats`, `v_branch_stats` (federated, for branched packets), `v_branch_triggers`, `v_queue`.
+
+**Immutability (Requirement F).** Database triggers on SQLite and PostgreSQL reject UPDATE and DELETE on locked packets and accepted artifacts, and on *any* row of `evaluation_passes` and `events`. The application layer checks first and raises `ImmutableRecordError`, but the database is the guarantee. A correction means a new packet version with `supersedes_id` pointing at the old one.
+
+---
+
+## 7. Six-pass quickfire evaluation
+
+**Design.** Two small, stateless local models (A and B) stay resident on the inference GPU. Every prompt is self-contained (field definition + packet core fields + relevant project context); there is no conversation history. Calls are batched by model with weighted prioritisation so important evaluations are not starved.
+
+| Pass | Model | Action | Output contract |
+|---|---|---|---|
+| 1 | A | Extract a value for the candidate field → `value_a` | `CandidateValue` |
+| 2 | B | Extract a value → `value_b` | `CandidateValue` |
+| 3 | A | Evaluate `value_b` (cross-check) | `PassEvaluation {accuracy 0–10, evidence[], reason}` |
+| 4 | B | Evaluate `value_a` (cross-check) | `PassEvaluation` |
+| 5 | A | Evaluate `value_a` (self-check) | `PassEvaluation` |
+| 6 | B | Evaluate `value_b` (self-check) | `PassEvaluation` |
+| (7) | C | Aggregate remaining free-text responses into one value per field | Set-up / loop interruption only |
+
+> **Reconciling the draft.** The draft lists two extractions followed by four evaluations, each returning `{evidence, accuracy_score, reason}` (cross then self), but its prompt mock-ups number accuracy as passes 3 & 5 and evidence as passes 4 & 6. v1 uses **combined** evaluation passes (one prompt returns score + evidence + reason), which keeps six calls per field. A **split** plan (separate accuracy and evidence prompts) is available by configuration. → Decision **D3** for the CFO. (The draft's `reason_a1` in B's self-check is read as `reason_b1`.)
+
+**Prompt templates** (from the draft, tightened):
+
+- *Extraction (passes 1–2):* "Read `project_document` and respond only with the most appropriate value for '`candidate_field`'. If insufficient information exists, return NULL. Respond only with a single '`candidate_value`'."
+- *Accuracy (in passes 3–6):* "Read `project_document` and determine the accuracy of '`candidate_value`' as a '`candidate_field`'. Consider applicability, relevance, prevalence of evidence, contradictions and ambiguity. The question is: 'Has the candidate value been accurately generated?' Respond only with a single estimated `accuracy_level` score."
+- *Evidence (in passes 3–6):* "Read `project_document` and identify the strongest evidence supporting or contradicting '`candidate_value`' as a value for '`candidate_field`'. Return only exact quotations from the document. Tag each SUPPORT or CONTRADICTION. If no relevant evidence exists, return NULL."
+
+**SQL aggregation (deterministic, weights configurable):**
+
+1. Normalise values (case, whitespace, tag order).
+2. `confidence_x = (0.6 × cross_score_x + 0.4 × self_score_x) / 10` for each model's value.
+3. **Agreement** (`value_a = value_b`) → final value, confidence = mean of both.
+4. **Disagreement** → the higher-confidence value wins; if the margin is below `dispute_margin` (0.15) the field is `disputed` and goes to the approval queue (or Pass 7).
+5. **Tag sets** → each tag is on if both models include it, or one includes it with confidence ≥ 0.7.
+6. **NULL** from both models → consensus `null` (insufficient information).
+7. **Evidence** → quotes must be exact substrings of the source; unverified quotes are discarded and counted. More contradictions than supports → `disputed`.
+8. **Free-text fields** → character-limited and capped at 3 passes (consensus on free text is less reliable).
+
+---
+
+## 8. Priority, routing, thresholds and branching
+
+**Priority (unique, deterministic, computed in `v_queue`):**
+`priority = w1·objective_priority + w2·age_hours (anti-starvation) + w3·(10 − ambiguity) + w4·manual_boost − w5·failed_runs`, ties broken by `created_at` then `ref`, so every packet has a unique position. Weights live in `settings`.
+
+**Default routing rules (editable in `thresholds`):**
+
+| Condition | Route |
+|---|---|
+| Candidate values missing or stale | Quickfire Evaluation |
+| `ambiguity_quotient ≥ 8` or any key field `disputed` | Approval queue before routing |
+| `coding_intensity ≥ 7` or `reasoning_intensity ≥ 7` or `context_volume ≥ 7` or `output_wordcount ≥ 8` | Workbench Production (Juggler) |
+| Otherwise, consensus accepted | Local Generation |
+
+**Branching:** `task_parsability ≥ 7` → split into independent subtasks (child packets generated through the `subtask_list` contract). The original packet is kept; children carry `parent_id` and `root_id`; federated statistics roll up to the trunk.
+
+---
+
+## 9. Channels and Pydantic run contracts
+
+| Channel | Run-ID prefix | Default max attempts | Executes with | Validates against |
+|---|---|---|---|---|
+| Quickfire Evaluation | `QE` | 4 | Local models A & B | `CandidateValue`, `PassEvaluation` |
+| Local Generation | `LG` | 3 | Local model | the packet's `response_structure` |
+| Workbench Production | `WP` | 2 | juggler.studio via adapter | the packet's `response_structure` |
+
+Up to three run contracts are being verified at any moment (one per channel); the console shows, for example, `Quickfire Evaluation is verifying #QE16709 [attempt 1/4]`. On validation failure the next attempt's prompt includes the validation error. After the last attempt the run is `failed`, counted in the statistics, and the packet is re-queued at lower priority or sent to the approval queue. Every response structure name maps to a registered Pydantic contract; unknown names are rejected at ingestion ("all possible response contracts need to be recognised").
+
+---
+
+## 10. Loop interruption and project set-up
+
+A custom prompt (GUI or CLI) sets `control_state.paused`. No new channel runs start (in-flight runs finish). The prompt is processed through the Part 1 set-up path: core fields are added or revised as **new versions**, affected packets are flagged for re-evaluation, and the loop resumes (manually or automatically, per autonomy scope). Initial project set-up is the same path starting from an empty project.
+
+---
+
+## 11. Autonomy scopes (Requirement E)
+
+| Stage | Default mode | Notes |
+|---|---|---|
+| Ingestion / tree extraction | `confirm` | User approves the extracted tree |
+| Objective-level LLM values | `confirm` (**fixed**) | Draft rule: LLM values at objective level must always be confirmed manually |
+| Candidate → master promotion | `auto` | Deterministic SQL |
+| Branching | `confirm` | |
+| Routing | `auto` | |
+| Local generation | `auto` | |
+| Workbench production | `confirm` | Costly/complex work |
+| Repo write | `confirm` | Until trust is established |
+| Quality scan | `auto` | |
+
+---
+
+## 12. Administrative interface (GUI)
+
+- **Miller-column layout**, inspired by Juggler: Projects │ Objectives │ prioritised Tasks │ Packet detail.
+- Every element is view/edit enabled; locked items are read-only with a *create new version* action.
+- Panels: candidate fields with consensus and per-pass evidence; approval queue; live console (three channel lines + recent events); controls (pause / resume / interrupt with prompt); autonomy settings; statistics.
+- Technology: FastAPI + Jinja2 + HTMX, served locally — no JavaScript build chain, fully testable.
+- **Open item:** design-vision images of GUI states (placeholder in the draft).
+
+---
+
+## 13. Integrations
+
+**Local LLMs.** Any OpenAI-compatible endpoint (Ollama default `http://localhost:11434/v1`; llama.cpp server and LM Studio also work). Models A and B stay resident on a dedicated 16 GB or 24 GB inference GPU; a separate GPU drives the display and the rest of the stack (MSI X870 board). Tests use a deterministic `FakeProvider`.
+
+**juggler.studio.** An open-source visual workbench for AI coding agents (branchable conversation trees stored on disk; Claude Code, Copilot, OpenAI, Gemini, Ollama and other providers; headless server with browser clients; JavaScript extension SDK). It has no documented REST API, so v1 uses a **file-drop workbench adapter** (`workbench/outbox` → `workbench/inbox`, Markdown + JSON) and specifies a Juggler extension for v1.1 that covers the draft's Tool Design list: conversation selection, model selection, prompt insertion, model outputs, error messages. **Licensing:** Juggler's core is AGPL-3.0 and its extension SDK is Apache-2.0. Keep the orchestrator decoupled (separate process; file/HTTP boundary) and take legal advice before any commercial distribution.
+
+**Production repository.** A separate local git folder. The app writes only accepted artifacts to each packet's `repo_target_path`; commit messages carry the packet ref and run ID; corrections are new commits (reversible, with provenance).
+
+**SonarQube Community Build** (formerly Community Edition). It analyses **one branch only**, with no pull-request decoration, secrets detection or taint analysis. v1 analyses each relevant branch as its own project key (`<project>__<branch>`) and pulls results through the Web API. A lightweight secrets scanner (v1.1) covers the "Security risk — exposed secrets" content field.
+
+---
+
+## 14. Technology decisions (ADR-lite)
+
+| ID | Decision | Rationale | Status |
+|---|---|---|---|
+| D1 | Python ≥ 3.11, `src/` layout, hatchling | Modern typing; standard packaging | Proposed |
+| D2 | SQLAlchemy 2.0; PostgreSQL target; SQLite for dev and tests | Runs anywhere; PostgreSQL proven in CI | Proposed |
+| D3 | Six passes = 2 extractions + 4 combined evaluations (cross, then self) | Matches the draft's listing; fewer calls | **Needs CFO confirmation** |
+| D4 | Scores are integers 0–10 | Small models are more reliable on coarse scales | Proposed |
+| D5 | Immutability enforced by DB triggers + app guard | The AI cannot bypass it through an app bug | Proposed |
+| D6 | GUI: FastAPI + Jinja2 + HTMX (local web UI) | No JS build; testable | Proposed |
+| D7 | Local models via OpenAI-compatible HTTP | Works with Ollama, llama.cpp, LM Studio | Proposed |
+| D8 | Juggler via file-drop adapter in v1 | No public API; avoids AGPL coupling | Proposed |
+| D9 | CLI with Typer | Scriptable; mirrors GUI actions | Proposed |
+| D10 | Version scheme MAJOR.MINOR.PATCH.BUILD; package `1.0.0.0.devN` until acceptance | PEP 440 compliant | Proposed |
+
+---
+
+## 15. v1.0.0.0 scope
+
+**In scope:** everything in §3–§13 at prototype fidelity — ingestion, data model with immutability, field registry, six-pass evaluator, SQL consensus/statistics/thresholds/priority, branching, three channels with run contracts and retries, kernel loop with pause/interrupt, autonomy scopes and approval queue, repo writer, SonarQube client, file-drop workbench, local web GUI, CLI, end-to-end demo, CI.
+
+**Out of scope (v1.1+):** native Juggler extension; GPU residency and batching optimisation; SQL-driven dynamic pass counts per packet; frontier-model extraction provider beyond a stub; secrets scanner; multi-user auth; installer/packaging for end users; design-vision artwork.
+
+---
+
+## 16. Milestones
+
+| Milestone | Content | Spec | Status |
+|---|---|---|---|
+| **M0** | Plan, agent guide and repo seeded | this document, `CLAUDE.md` | ✅ Done 2026-11-03 |
+| **M1** | Kernel foundation — packaging, contracts, field registry, schema with immutability triggers, lifecycle, deterministic ingestion, CLI, CI | `docs/milestones/M1_foundation.md` | ⏳ In progress |
+| **M2** | Evaluation engine & SQL layer — providers, six-pass evaluator, consensus/statistics/threshold/priority views, branching, LLM extraction contract | `docs/milestones/M2_evaluation_engine.md` | Planned |
+| **M3** | Orchestration & interface — kernel loop, channels, workbench adapter, repo writer, SonarQube client, interruption, autonomy enforcement, GUI, demo | `docs/milestones/M3_orchestration_interface.md` | Planned |
+| **M4** | Hardening & v1.1 backlog | §15 out-of-scope list | Backlog |
+
+**Definition of done (every milestone):** tests green locally and in CI; ruff clean; Copilot review triaged (accepted / deferred / declined, with reasons); `docs/PROGRESS.md` updated; PM verification in an independent environment; merged to `main`.
+
+---
+
+## 17. Ways of working
+
+| Role | Who | Responsibilities |
+|---|---|---|
+| CFO / sponsor | Sam | Approves decisions marked *Needs CFO*, budget and scope changes |
+| Project manager | Claude (PM agent) | Owns this plan and the milestone specs; prompts the engineer; triages reviews; merges; verifies |
+| Main engineer | Claude Code | Implements milestone specs on `claude/*` branches; opens PRs; keeps `docs/PROGRESS.md` current |
+| Reviewer | GitHub Copilot | Reviews each PR for bugs, security, design drift; proposes concrete changes |
+
+**Review triage.** Each Copilot suggestion is classed **Accept** (implement now), **Defer** (backlog) or **Decline** (with reason) using the Key Idea filter (§2), and logged in `docs/PROGRESS.md`.
+
+**Branching.** All code changes go through pull requests into `main` (squash merge). Only PM documentation may be committed to `main` directly.
+
+---
+
+## 18. Risks and mitigations
+
+| Risk | Impact | Likelihood | Mitigation |
+|---|---|---|---|
+| Small local models return unreliable structured output | High | High | Pydantic contracts + retries; JSON mode; coarse scales; dual-model consensus; evidence verification; exemplars |
+| Immutability blocks legitimate corrections | Medium | Medium | Supersede with a new version; never edit in place |
+| Juggler has no stable API | Medium | High | Adapter boundary; file-drop now; extension later |
+| AGPL licensing of Juggler core | Medium (if commercialised) | Medium | Separate process; legal advice before distribution |
+| SonarQube free edition analyses one branch only | Medium | Certain | Per-branch project keys; separate secrets scanner |
+| Runaway autonomy (wrong work, wasted time/cost) | High | Medium | Costly stages default to `confirm`; per-channel attempt limits; pause/kill switch; full event log |
+| Scope creep (the draft is broad) | High | High | Milestone specs; Key Idea filter; explicit backlog |
+| VRAM too small for two resident models | Medium | Medium | Small quantised models; measure; fall back to swap-loading |
+| Agent-written code quality | Medium | Medium | Tests, CI, Copilot review, independent PM verification |
+| AI subscription usage limits (Claude Pro) | Medium | Medium | Work in milestone-sized rounds; lighter models for routine work |
+
+---
+
+## 19. Budget and resources (for the CFO)
+
+No prices are quoted here; obtain current quotes before purchase.
+
+| Category | Items | Notes |
+|---|---|---|
+| Capital | Dedicated inference GPU (16 GB or 24 GB tier); display GPU; storage | Size the GPU after benchmarking candidate models A/B |
+| Software | PostgreSQL, SonarQube Community Build, Ollama, Python libraries | Free / open source |
+| Software (licence watch) | juggler.studio | AGPL-3.0 core; commercial terms via the author |
+| Subscriptions | Claude (Pro plan in use), GitHub Copilot | Usage limits affect delivery speed |
+| Optional usage costs | Frontier-model API for messy-document extraction | Budget cap to be set (open question) |
+| Running costs | Electricity for continuous local inference | Track via SQL statistics (evaluation time) |
+| Owner time | Decisions, approvals, review | Concentrated at milestone ends |
+
+---
+
+## 20. Open questions and decisions for the CFO
+
+1. **D3** — combined vs split evaluation passes (§7).
+2. Default autonomy modes (§11) — acceptable as a starting point?
+3. Score scale 0–10 — acceptable?
+4. GUI as a local web UI (D6) rather than a desktop app?
+5. Frontier model for messy-document extraction: which provider and what monthly budget?
+6. Commercial intent for anything built on juggler.studio (AGPL)?
+7. Design-vision images for GUI states — who produces them, and when?
+8. The draft's sentence "Both models stay loaded and …" is unfinished — assumed to mean *stay resident and serve stateless calls*.
+9. Which local models for A and B? (benchmark against ground-truth exemplars)
+
+---
+
+## 21. Progress log
+
+| Date | Event |
+|---|---|
+| 2026-11-03 | Plan v0.2 drafted from the CFO's draft; repository seeded (plan, agent guide, milestone specs, archived draft); M1 started with Claude Code. |
+
+---
+
+## 22. Handover notes for the next agent
+
+- **Read in this order:** `CLAUDE.md` → this plan → `docs/PROGRESS.md` → the milestone spec in progress.
+- The original draft is preserved, unedited, in `docs/archive/` — treat it as provenance, not as the spec.
+- Respect the Key Idea filter (§2) and the immutability rule (Requirement F) above all else.
+- Update §16 status, §21 progress log and `docs/PROGRESS.md` at the end of every session.
