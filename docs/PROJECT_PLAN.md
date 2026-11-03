@@ -101,26 +101,23 @@ The Python Orchestrator is the **custom Python kernel** at the centre of an auto
 ### 5.2 Data flow
 
 ```mermaid
-flowchart LR
-  subgraph P1[Part 1 · Set-up / loop interruption]
-    DOC[Planning doc or manual prompt] --> GUI[GUI / CLI]
-    GUI --> EXT[Extraction: Juggler / frontier model / deterministic parser]
-    EXT --> TREE[ProjectTree contract → user confirms per autonomy scope]
+flowchart TB
+  subgraph P1["Part 1 · Set-up / loop interruption"]
+    direction LR
+    DOC["Planning doc or<br/>manual prompt"] --> GUI["GUI / CLI"] --> EXT["Extraction: Juggler,<br/>frontier model or parser"] --> TREE["ProjectTree contract<br/>+ user confirmation"]
   end
-  TREE --> DB[(Project Data · PostgreSQL)]
-  subgraph P2[Part 2 · Automation loop]
-    DB --> QE[a · Quickfire evaluation · local models A+B · 6 passes]
-    QE --> SQL[b · SQL consensus · stats · thresholds · priority]
-    SQL --> ROUTE[c · Python routes ready packets]
-    ROUTE --> LG[Local Generation]
-    ROUTE --> WP[Workbench Production · juggler.studio]
-    LG --> REPO[(Production repo)]
+  TREE --> DB[("Project Data<br/>PostgreSQL")]
+  DB --> QE
+  subgraph P2["Part 2 · Automation loop (every tick)"]
+    direction LR
+    QE["a · Quickfire evaluation<br/>models A + B, six passes"] --> SQL["b · SQL consensus,<br/>stats, thresholds, priority"] --> ROUTE{"c · Python<br/>routes packet"}
+    ROUTE --> LG["Local Generation"]
+    ROUTE --> WP["Workbench Production<br/>juggler.studio"]
+    LG --> REPO[("Production repo")]
     WP --> REPO
-    REPO --> SQ[d · SonarQube scan]
-    SQ --> CE[Content-evaluation packets]
-    CE --> QE
+    REPO --> SQ["d · SonarQube scan"] --> CE["Content-evaluation<br/>packets"]
   end
-  SQL --> DB
+  CE -. "feeds back to (a)" .-> QE
 ```
 
 **Part 1 — set-up / loop interruption.** (i) A planning document or manual prompt enters through the GUI/CLI. (ii) It is extracted to a standardised tree of Project, Objective and Task core fields (Juggler or a frontier model; deterministic parser as fallback), validated against the `ProjectTree` contract, and confirmed by the user according to the autonomy scope.
