@@ -68,3 +68,15 @@ Serves requirements **A** (parser), **E** (schema), **F** (immutability) · Key 
 5. Every lifecycle transition produces an `events` row; `events` rows cannot be updated or deleted.
 6. All candidate fields from the draft are present in the registry.
 7. `docs/PROGRESS.md` is updated and the PR lists each criterion with ✅/❌.
+
+## R0 review amendments (adopted 2026-11-03 — see `docs/reviews/R0_consensus.md`)
+
+These were adopted by panel consensus while M1 was in progress. They are part of M1's definition of done.
+
+- **A1 Lock invariants in the DB.** Triggers on INSERT and UPDATE of `packets` (and `artifacts` for `accepted`): `status IN ('completed','archived')` requires `locked = true`, otherwise reject. A locked row rejects UPDATE/DELETE, and `locked` can never go from true to false. Raw-SQL tests on SQLite and PostgreSQL.
+- **A2 Versioned context.** `projects` and `objectives` gain `version`, `supersedes_id`, `locked` (+ the same triggers). `candidate_field_definitions` and `settings` carry a `version`. `supersede_*` never edits a locked row and never rewrites `parent_id` / `root_id`. Add a `v_packet_heads` view resolving the current head of each lineage via `supersedes_id`.
+- **A3 Schema for later milestones.** `packets`: `depth` (int, default 0), `packet_kind` (`task` | `content_eval`), `manual_boost` (int, default 0), `claimed_by`, `lease_expires_at`, `heartbeat_at`. `objectives`: `priority_level` (int, default 5). `evaluation_passes`: `eval_cycle_id`. `channel_runs`: `state`, `idempotency_key` (unique), `input_hash`, `output_hash`, `policy_revision`, `deadline_at`. Add unique constraints wherever a duplicate would mean duplicated work.
+- **A4 Versioned migrations.** Alembic (or an equivalent ordered runner with a `schema_version` table) owns tables, triggers, views and seed data. `init-db` runs migrations. Test: upgrade from an empty database reaches head on both dialects.
+- **A5 SQLite pragmas** on every connection: `journal_mode=WAL`, `busy_timeout=5000`, `foreign_keys=ON`.
+- **A6 Dual-dialect fixture.** Parametrise the DB fixture so every DB/SQL test runs on SQLite, and also on PostgreSQL when `ORCH_TEST_POSTGRES_URL` is set (CI sets it). Do not rely on a marker alone.
+- **A7 Strict contracts.** Pydantic models use `model_config = ConfigDict(extra="forbid", strict=True)` where practical; each contract exposes a `CONTRACT_VERSION` recorded wherever it is used.
