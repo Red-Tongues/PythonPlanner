@@ -23,7 +23,7 @@
 | M1 + M1.1 — kernel foundation | **Merged** (PR #1, 3068e35) after reviews R0 and R1 |
 | M2 — evaluation engine | **Merged** (PR #2, 1031665): M2 + the 12 M2.1 fixes from R2; 410 tests |
 | R2 — panel review of M2 code | Done: 25 findings → 21 accepted, 1 deferred (GE7 → M3), 2 declined. Engineer's 7 open notes ruled (all accepted) |
-| M3 — orchestration and interface | Spec reviewed *before* coding (R3: 46 findings, 43 adopted, 3 partial) and independently verified (V1–V11). Six scope cuts. State-machine reference D8. **Stage A in progress** (C22–C26), then a checkpoint review before Stage B |
+| M3 — orchestration and interface | Spec reviewed *before* coding (R3: 46 findings, 43 adopted, 3 partial) and independently verified (V1–V11). Six scope cuts. State-machine reference D8. **Stage A done** (draft PR #3, 560 tests); review R4 running; Stage B (loop, channels, digest, C27–C39) next |
 | M4 — Juggler bridge | Spec ready; now also owns the real `juggler run` CLI and worktrees (moved from M3) |
 ---|---|
 | Plan | v0.5 (this document) — CFO decisions D13–D16 recorded; D3 and §20 questions still open |
@@ -474,6 +474,7 @@ No prices are quoted here; obtain current quotes before purchase.
 | 2026-11-04 | PR #2 (M2) opened; CI green (350 tests). Review R2 on the M2 code: 25 findings. 21 accepted, 1 deferred (GE7 → M3), 2 declined (GE8 documented and tested; GE10 superseded by MC8 fail-closed). The M2.1 fix list (12 fixes, migration 0006) was sent to the engineer on PR #2. |
 | 2026-11-04 | Review R3: pre-implementation review of the M3 spec. 46 findings: 40 accepted, 3 accepted with amendments, 3 partial, 1 deferred, none declined. Six scope cuts agreed: real Juggler → M4; embedding divergence later; governor ladder → M5 (v1 is deterministic caps + holds); GUI read-only for settings; generated-code execution only through an isolated runner (default: blocked); live SonarQube optional. Written into M3 as amendments C22–C38. |
 | 2026-11-04 12:20 | PR #2 (M2 + M2.1) squash-merged by the CFO (1031665). M3 Stage A started in a fresh Claude Code session ("M3 orchestration foundations", branch `claude/elegant-davinci-hcny5t`). Stage A covers C22–C26: transition tables from D8, migration 0007, the transition guard, governance atomicity, fencing and the kernel lock. It ends with a stop-and-report checkpoint before channels, loop, GUI and integrations (Stage B). |
+| 2026-11-04 13:40 | **M3 Stage A checkpoint:** draft PR #3. Transition guard (D8 + E1–E11 + D9-R1 + D10 Q14) enforced in code *and* in the DB; migration 0007; C25 gate bumps; C26 fencing, pause serialisation and kernel lease lock; runs module; C38 race tests. 560 tests (up from 410); CI green. 7 deviations and 17 judgement calls, all provisionally accepted by the PM. Design references added this session: D9 (mobile digest, Argon), D10 (kernel loop, GPT-6.1, with rulings Q1–Q16), P1 (product brainstorm and second opinion). CFO decisions Q-P1..P6 recorded; C39 placeholder flagging added. Review R4 of PR #3 started. |
 | 2026-11-03 | CFO check-in: v1 bar confirmed (working prototype of the kernel); slow, deliberate pace preferred → pace and drift governor (§11.1); Juggler extension committed as M4; personal-use licensing. Plan → v0.4. |
 
 ---
