@@ -358,7 +358,7 @@ def _backfill_legacy_cycles() -> None:
                 "INSERT INTO evaluation_cycles (id, packet_id, packet_version, phase, target_hash,"
                 " pass_plan, models, state, created_at, updated_at) VALUES (:id, :pid, :v, 'pre',"
                 " 'legacy', 'legacy', '{}', 'legacy', :now, :now)"
-            ),
+            ).bindparams(sa.bindparam("now", type_=sa.DateTime(timezone=True))),
             {"id": cycle_id, "pid": packet_id, "v": version, "now": now},
         )
 

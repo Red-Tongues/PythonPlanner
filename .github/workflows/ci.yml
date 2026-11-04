@@ -35,6 +35,10 @@ jobs:
           orchestrator init-db
           orchestrator ingest examples/sample_project_plan.md
           orchestrator tree
+          orchestrator evaluate --limit 3
+          orchestrator consensus PP-000001
+          orchestrator queue
+          orchestrator status
 
   postgres:
     name: pytest (PostgreSQL 16)
