@@ -108,3 +108,31 @@
 - **R3 Optional-scan rejection (new; adopted).** Rejecting an optional-scan ERROR confirmation → `held` with the reason, consistent with C27. → C30.
 - **R4 `accepted → stale` (new; adopted).** `accepted` is final only once the write and commit are recorded. Before that, a fencing/gate change, a moved HEAD or a `modifies` base mismatch makes the run stale. → C24.
 - **R5 Already fixed:** the unconditional stale reset (fixed by V2) and the NoRunner deadlock (fixed by V5: a hard gate unless the contract names it soft; otherwise blocked or closed_unverified).
+
+## 6. Errata E1–E11 (independent GPT-6.1 evaluation, 2026-11-04; all adopted, binding)
+These override the rows above.
+- **E1 Promotion approval exit.** Add `awaiting_confirmation → evaluating_pre` (candidate-promotion approval). The confirmation targets the current version and context; apply the promotion and the C25 gate bump atomically; recompute readiness. A stale approval doesn't apply.
+- **E2 Exit-3 rejection keeps the run parked.** On rejection the packet goes to `held` (with a reason) and the run *stays* `awaiting_confirmation`. That rejection is excluded from the generic "non-approval governance change → stale" rule; later unrelated changes still stale it. `awaiting_confirmation → failed` happens only on explicit cancellation.
+- **E3 One dispatch guard for retries and resumes.** Before *any* retry or resume effect (exit 1/4 retry, validation retry, exit-3 resume), the run:
+  - revalidates version, F, G, H and the lease;
+  - authorises dispatch atomically against pauses (C26);
+  - reserves channel and token capacity (C36);
+  - persists the operation ID and the attempt row.
+  A refused reservation leaves packet and run state unchanged. Exit-3 resume additionally applies R1, and resumes the same conversation exactly once.
+- **E4 Repo-write approval uses the full publication guard.** `awaiting_confirmation → evaluating_post` (repo_write) requires everything `running → evaluating_post` requires:
+  - accepted run; F current; H and G match (R1 for the targeted run);
+  - expected HEAD; C32 ownership and base hash; write authorised;
+  - an idempotent write and commit; M and the commit SHA recorded before entering `evaluating_post`.
+  A mismatch stales the run.
+- **E5 Completion guards (both completion rows).**
+  - Every required field has a complete, accepted, current post-evaluation for M, from C29-verified evaluators.
+  - The scan is bound to the recorded commit SHA. All hard gates are satisfied, and no hold or block applies.
+  - An optional-scan approval covers only that gate ERROR, never a hard constraint.
+- **E6 Required-scan outcomes split.**
+  - Scanner unavailable, or execution/report retrieval failed → `blocked`.
+  - A returned gate `ERROR` (bound to the commit SHA) → `needs_review` + a confirmation.
+- **E7 Stale reset requires run ownership.** `running → evaluating_pre` only if the packet's active run ID **and** F match this run, the packet is still `running`, and no hold, block, pause or confirmation applies.
+- **E8 `accepted → stale` also on an H mismatch or a superseded version**, before the commit is recorded. Publication is prohibited, and only unused reservations are released.
+- **E9 Admission and claim run the single pure readiness predicate (C12)**, after recomputing H. Matching H and G alone is not enough.
+- **E10 Split rows (auto and confirmed)** check depth < 2, the descendant and fan-out caps, atomic capacity reservation, and B5 idempotency on (packet id + version, rule id, rule version). The confirmed split also validates the confirmation and applies C25.
+- **E11 Deadline expiry counts as a timeout failure** (equivalent to exit 4), recorded once per operation ID, in `dispatched`/`awaiting_result`. A retry goes only through E3; on exhaustion the run → `failed`, and the owning packet → `failed` with `failed_runs` + 1 exactly once. Late results never revive an expired attempt.
