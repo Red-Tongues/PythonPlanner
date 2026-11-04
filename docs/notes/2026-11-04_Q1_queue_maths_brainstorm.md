@@ -42,3 +42,11 @@ How the hybrid works:
 5. **Explain every choice:** why this, why now, and what would change it.
 
 **Rule:** eligibility, priority, routing and repo inclusion stay separate. A high score never buys its way past a hard constraint.
+
+## Step 2 (Gemini 3.5 Flash-Lite; Argon/Flash/Pro quota exhausted until 23:58; treated as raw input)
+- **Agrees with the hybrid shape.** Tie capacity allocation explicitly to local hardware (VRAM residency of the 6-pass evaluation models) and the CFO's pace governor, rather than abstract resource pools.
+- **Benefit, without AI judgement:** from graph topology. Count the dependent tasks and objectives a success would unblock, combined with critical-path position.
+- **Human attention, without AI judgement:** the approval backlog (count and age of items awaiting confirmation or review). As it grows, throttle work that needs human validation and shift capacity to self-contained work.
+- **Missed ideas:**
+  1. **VRAM / model-residency contention:** switching costs between local evaluation, local drafting and Juggler runs.
+  2. **Objective health:** boost work that targets or unblocks objectives with rising failure/review indicators, so blocked areas don't silently rot while the loop does easy peripheral tasks.
