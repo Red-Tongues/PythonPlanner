@@ -60,3 +60,27 @@ Confirm "never re-run automatically" for workbench/generation runs. The genPacke
 - Use short, conversational, one-topic exchanges with panel models (and with Sam) for clarification work. Save the long structured prompts for reviews of code or specs that are already settled.
 - Before generating more design, run a **confusion check**: ask a model what is unclear or contradictory, and bring those points to Sam as plain questions.
 - Label every decision and document as **PRODUCT** (how the orchestrator behaves) or **BUILD PROCESS** (how our team builds it).
+
+## Part D — CFO answers to the PM (21:11) — authoritative
+- **Understanding confirmed.** The PM's restatement is correct: prompt window = front door that pauses and branches; genPacket = the task, with fields that fill over its life; eva_packet = the 6-pass job filling one field; no "re-run" decision, only queue maths.
+- **Open theory problem (team to propose, CFO to review): post-generation processing vs immutability.**
+  - Subjectively generated genPacket fields must be **amendable** so the project can develop.
+  - Old values must be **preserved in the same packet** (immutability), which can make packets balloon.
+  - That's acceptable *if* the history is tracked efficiently and doesn't turn into chaos.
+  - The theory must start from the **kinds of generated content** genPackets deliver, and how.
+- **Federating parent tasks.** Many objectives have high job parsability. They produce **parent tasks whose explicit job is to federate (spawn) further tasks**. Those children are parsed only *when the database/repo holds enough context* to parse them accurately. **The parent archives itself once complete.** This applies especially after genesis, but throughout too.
+- **Q1 product vs build-process vocabulary:** no formal glossary required. The PM decides; the job is to keep the team from being misled. *PM decision:* no new terminology. Watch for it in prompts and evaluations, and say "in the product…" or "in our build process…" whenever ambiguity is possible.
+- **Q2 queue maths is the only judge.**
+  - It should become sophisticated and smart. The team brainstorms and develops it first; then the CFO contributes.
+  - **Repeated failures:** an **exponentially weighted failure indicator**. Past a threshold, the algorithm assigns a special status meaning *the genPacket job itself needs review*; this can extend to the **objective** when several linked genPackets are failing.
+  - **"Failure" must be deliberated and defined comprehensively** (a failure taxonomy).
+  - This replaces the "failure budget → awaiting_confirmation" behaviour as the governing concept.
+- **Q3 Juggler is the sole arbiter between genPackets and the production (frontier) models.**
+  - **Local models** produce *draft* or "simple" generations, fed by **another type of eva_packet**. Results are stored under **`locally_drafted_examples`** fields.
+  - Drafts are not required, but genPackets with certain tags are **penalised more heavily in the queue** when no examples exist.
+  - **Building the Juggler add-on that effectively "exposes an API" is a vital next step.** Without it we would be rebuilding Juggler's ability to expose and edit the LLM's full thought process from scratch.
+- **Q4 build-process tidy: approved.**
+  - one master schema definition;
+  - squash/clean migrations while there is no live data (the product rule that completed work is immutable is unchanged);
+  - fold final decisions into the master docs and archive the debate files;
+  - tests named by capability.
