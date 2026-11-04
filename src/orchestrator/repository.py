@@ -61,6 +61,8 @@ EDITABLE_PACKET_FIELDS: frozenset[str] = frozenset(
         "branch_reason",
     }
 )
+#: Fields evaPackets read: changing them invalidates the evaluation set (B9).
+CORE_PACKET_FIELDS: frozenset[str] = frozenset({"title", "prompt_description"})
 #: ORM column → ProjectCore field.
 PROJECT_FIELDS: dict[str, str] = {
     "name": "name",
@@ -221,9 +223,21 @@ def update_packet(
     actor: Actor,
     reason: str | None = None,
 ) -> Packet:
-    """Edit an unlocked head packet in place. Locked/superseded → ``ImmutableRecordError``."""
+    """Edit an unlocked head packet in place. Locked/superseded → ``ImmutableRecordError``.
+
+    Core fields (what evaPackets read) may change in place only while the packet is a draft;
+    after evaluation has started an edit is a new version (B9: ``supersede_packet``).
+    """
     assert_mutable(packet, session)
     cleaned = _validate_packet_changes(packet, changes)
+    core_changed = sorted(
+        f for f in CORE_PACKET_FIELDS & set(cleaned) if cleaned[f] != getattr(packet, f)
+    )
+    if core_changed and PacketStatus(packet.status) is not PacketStatus.DRAFT:
+        raise ImmutableRecordError(
+            f"{packet.ref} is {PacketStatus(packet.status).value}: editing {core_changed} "
+            "creates a new version — use supersede_packet (B9)"
+        )
     before = packet_snapshot(packet)
     for name, value in cleaned.items():
         setattr(packet, name, value)

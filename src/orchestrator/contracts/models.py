@@ -23,7 +23,7 @@ from orchestrator.contracts.enums import FieldKind, FieldLevel
 
 DEFAULT_RESPONSE_STRUCTURE = "markdown_document"
 SCORE_SCALE = "0-10"
-TEXT_MAX_PASSES = 3
+TEXT_MAX_PASSES = 4  # B3: P1 A-extract, P2 B-extract, P3 A→b, P4 B→a
 DEFAULT_MAX_PASSES = 6
 
 NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]

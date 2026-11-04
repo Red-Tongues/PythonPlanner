@@ -7,14 +7,14 @@ from sqlalchemy import Engine, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
-from orchestrator.contracts import AutonomyMode, PacketStatus, Stage
+from orchestrator.contracts import AutonomyMode, Stage
 from orchestrator.db.ddl import is_immutability_violation
 from orchestrator.db.models import Artifact, AutonomyScope, EvaluationPass, Event, utcnow
 from orchestrator.errors import ImmutableRecordError
 from orchestrator.events import record_event
-from orchestrator.lifecycle import transition
 from orchestrator.repository import delete_packet, get_packet, lock_record, update_packet
-from tests.conftest import USER
+from tests.conftest import USER, make_cycle
+from tests.evafixtures import complete_with_evidence
 
 
 def raw(engine: Engine, sql: str, **params: object) -> None:
@@ -31,7 +31,7 @@ def assert_db_rejects(engine: Engine, sql: str, **params: object) -> None:
 @pytest.fixture
 def completed(tree, session: Session):  # type: ignore[no-untyped-def]
     packet = tree.packets[0]
-    transition(packet, PacketStatus.COMPLETED, USER, "done")
+    complete_with_evidence(session, packet, USER)  # the gated way (M2.1 fix 5)
     session.commit()
     return packet
 
@@ -162,7 +162,7 @@ def test_evaluation_passes_are_append_only(engine, session: Session, tree) -> No
         role="extract",
         value=7,
         score=None,
-        eval_cycle_id="cycle-1",
+        eval_cycle_id=make_cycle(session, tree.packets[0].id),
     )
     session.add(ev)
     session.commit()

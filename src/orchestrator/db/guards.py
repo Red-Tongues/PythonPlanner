@@ -22,32 +22,58 @@ from typing import Any
 from sqlalchemy import event, inspect, select
 from sqlalchemy.orm import ORMExecuteState, Session
 
+from orchestrator.contracts import EVA_TERMINAL_STATES
+from orchestrator.db.ddl import CYCLE_BINDINGS, EVA_IDENTITY
 from orchestrator.db.models import (
     Artifact,
     AutonomyScope,
+    BranchApplication,
     CandidateFieldDefinitionRow,
     ChannelRun,
     Confirmation,
     ControlState,
+    EvaluationCycle,
     EvaluationPass,
+    EvaluationPassItem,
+    EvaPacket,
+    EvaPreset,
     Event,
     Exemplar,
     FieldRegistryRevision,
+    GenerationRun,
     Objective,
     Packet,
+    PacketDependency,
     Project,
     QualityReport,
+    QueueAdmission,
+    QueueOverride,
+    Revocation,
     Setting,
     Threshold,
+    Waiver,
 )
 from orchestrator.errors import ImmutableRecordError, UnauditedWriteError
 
-APPEND_ONLY_MODELS: tuple[type, ...] = (EvaluationPass, Event, FieldRegistryRevision)
+APPEND_ONLY_MODELS: tuple[type, ...] = (
+    EvaluationPass,
+    EvaluationPassItem,
+    Event,
+    FieldRegistryRevision,
+    EvaPreset,
+    QueueOverride,
+    Waiver,
+    Revocation,
+    QueueAdmission,
+    BranchApplication,
+    PacketDependency,  # M2.1 fix 6: changes go through revocations
+)
 LOCKABLE_MODELS: tuple[type, ...] = (Project, Objective, Packet)
-VERSIONED_MODELS: tuple[type, ...] = (Setting, CandidateFieldDefinitionRow)
+VERSIONED_MODELS: tuple[type, ...] = (Setting, CandidateFieldDefinitionRow, Threshold)
 
 #: Domain models whose every write must be evented → the ``entity_type`` used in events.
-#: ``EvaluationPass`` and ``Event`` are themselves append-only records and are exempt.
+#: ``EvaluationPass``, ``EvaluationPassItem`` and ``Event`` are themselves append-only records
+#: and are exempt.
 ENTITY_TYPES: dict[type, str] = {
     Project: "project",
     Objective: "objective",
@@ -63,6 +89,16 @@ ENTITY_TYPES: dict[type, str] = {
     Exemplar: "exemplar",
     ChannelRun: "channel_run",
     QualityReport: "quality_report",
+    EvaluationCycle: "evaluation_cycle",
+    EvaPreset: "eva_preset",
+    EvaPacket: "eva_packet",
+    QueueOverride: "queue_override",
+    Waiver: "waiver",
+    Revocation: "revocation",
+    PacketDependency: "packet_dependency",
+    GenerationRun: "generation_run",
+    QueueAdmission: "queue_admission",
+    BranchApplication: "branch_application",
 }
 
 
@@ -103,6 +139,17 @@ def assert_mutable(obj: Any, session: Session | None = None) -> None:
             raise ImmutableRecordError(f"{describe(obj)} is superseded; history is never edited")
     if isinstance(obj, Artifact) and _committed_value(obj, "accepted"):
         raise ImmutableRecordError(f"{describe(obj)} is accepted and immutable")
+    if isinstance(obj, EvaPacket) and _committed_value(obj, "state") in EVA_TERMINAL_STATES:
+        raise ImmutableRecordError(f"{describe(obj)} is finished and immutable")
+    frozen = {EvaPacket: EVA_IDENTITY, EvaluationCycle: CYCLE_BINDINGS}.get(type(obj))
+    if frozen is not None:  # M2.1 fix 6: identity / binding columns never change after insert
+        changed = [a for a in frozen if inspect(obj).attrs[a].history.has_changes()]
+        if changed and inspect(obj).persistent:
+            raise ImmutableRecordError(f"{describe(obj)}: {changed} are frozen from insert")
+    if isinstance(obj, GenerationRun):
+        for attr in ("evaluation_snapshot", "packet_id", "packet_version", "input_hash"):
+            if inspect(obj).attrs[attr].history.has_changes():
+                raise ImmutableRecordError(f"{describe(obj)}: the evaluation snapshot is frozen")
 
 
 def assert_deletable(obj: Any, session: Session | None = None) -> None:

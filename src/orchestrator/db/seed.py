@@ -1,7 +1,8 @@
-"""Candidate-field registry sync and registry revisions.
+"""Default seeds, candidate-field registry sync and registry revisions.
 
-Default settings, scopes, thresholds and control state are seeded by the frozen migration
-``0003`` (R1 fix 4). The field registry is synced from YAML by ``init-db`` (the YAML is the source
+Default settings, scopes, thresholds, control state and evaPacket presets are seeded by the
+frozen migrations ``0003`` and ``0005`` (R1 fix 4) and re-ensured on every ``init-db`` (GE6).
+The field registry is synced from YAML by ``init-db`` (the YAML is the source
 of truth for definitions, per the M1 spec): changed fields are updated with a version bump,
 removed ones disabled, and every change is evented. Each distinct registry content is also
 snapshotted as an append-only ``field_registry_revisions`` row (R1 fix 12), which M2 evaluation
@@ -19,7 +20,16 @@ from sqlalchemy.orm import Session
 
 from orchestrator.actors import Actor
 from orchestrator.contracts import CandidateFieldDefinition
-from orchestrator.db.models import CandidateFieldDefinitionRow, FieldRegistryRevision, new_id
+from orchestrator.db.models import (
+    AutonomyScope,
+    CandidateFieldDefinitionRow,
+    ControlState,
+    EvaPreset,
+    FieldRegistryRevision,
+    Setting,
+    Threshold,
+    new_id,
+)
 from orchestrator.events import record_event
 
 SYSTEM_ACTOR = Actor.system("init-db")
@@ -136,3 +146,265 @@ def record_registry_revision(
     )
     session.flush()
     return row
+
+
+# --------------------------------------------------------------------------- default seeds (GE6)
+# Live copies of the defaults the frozen migrations 0003 and 0005 seed. ``ensure_defaults`` runs
+# on every ``init-db`` and re-inserts any that are missing, so a deleted default comes back. It
+# never overwrites a row that exists (user edits survive). ``tests/test_seed_defaults.py`` asserts
+# these equal what the migrations seed, so the two copies cannot drift.
+
+# (stage, mode, is_fixed, description) — PROJECT_PLAN §11
+AUTONOMY_SCOPES = (
+    ("ingestion", "confirm", False, "User approves the extracted tree"),
+    (
+        "objective_llm_values",
+        "confirm",
+        True,
+        "LLM values at objective level must always be confirmed manually (fixed)",
+    ),
+    ("candidate_promotion", "auto", False, "Deterministic SQL"),
+    ("branching", "confirm", False, "Splitting packets into children"),
+    ("routing", "auto", False, "Channel selection"),
+    ("local_generation", "auto", False, "Simple local-model generation"),
+    ("workbench_production", "confirm", False, "Costly/complex work"),
+    ("repo_write", "confirm", False, "Until trust is established"),
+    ("quality_scan", "auto", False, "SonarQube scan"),
+)
+
+# (key, value, description)
+SETTINGS_M1 = (
+    ("aggregation.cross_weight", 0.6, "Weight of the cross-check score in model confidence"),
+    ("aggregation.self_weight", 0.4, "Weight of the self-check score in model confidence"),
+    (
+        "aggregation.dispute_margin",
+        0.15,
+        "Confidence margin below which a disagreement is disputed",
+    ),
+    ("attempts.quickfire_evaluation", 4, "Max attempts per Quickfire Evaluation run (QE)"),
+    ("attempts.local_generation", 3, "Max attempts per Local Generation run (LG)"),
+    ("attempts.workbench_production", 2, "Max attempts per Workbench Production run (WP)"),
+)
+
+SETTINGS_M2 = (
+    ("consensus.agreement_min", 0.6, "Agreement is accepted at or above this confidence (B2)"),
+    ("consensus.winner_min", 0.7, "A disagreement winner needs at least this confidence (B2)"),
+    ("consensus.one_sided_min", 0.7, "A one-sided (other NULL) value needs this confidence (B2)"),
+    ("consensus.min_supports", 1, "Verified SUPPORT quotes needed for acceptance (B2)"),
+    ("evaluation.repair_attempts", 1, "Targeted repairs per call before escalation (B12)"),
+    ("evaluation.max_escalations", 1, "Split-plan re-runs per field before needs_review (B12)"),
+    ("evaluation.num_ctx", 4096, "Context window sent explicitly to the evaluator (B11)"),
+    ("evaluation.max_tokens", 512, "Max completion tokens per evaluation call"),
+    ("evaluation.max_exemplars", 3, "Exemplars per field included in a prompt"),
+    ("priority.w_objective", 0.3, "Priority weight: objective priority (0-1)"),
+    ("priority.w_age", 0.25, "Priority weight: capped age (0-1)"),
+    ("priority.w_ambiguity", 0.15, "Priority weight: clarity = (10 - ambiguity) / 10"),
+    ("priority.w_boost", 0.2, "Priority weight: manual boost (0-1)"),
+    ("priority.w_failures", 0.1, "Priority weight (subtracted): failed runs / budget"),
+    ("priority.max_age_hours", 72, "Ageing saturates after this many hours (B4)"),
+    ("queue.max_wait_hours", 48, "Eligible packets older than this are served next (B4)"),
+    ("queue.failure_budget", 3, "Lifetime failed runs before awaiting_confirmation (B4)"),
+    ("queue.retry_backoff_minutes", 30, "Minimum wait after a failed run (B4)"),
+    ("queue.fair_admission_every", 3, "Reserve one normal admission per N forced/pinned (B9)"),
+    ("queue.lease_minutes", 30, "Claim lease length"),
+    ("branching.max_depth", 2, "Maximum branch depth (B5)"),
+    ("branching.max_descendants", 12, "Maximum descendants per trunk (B5)"),
+    ("stats.score_threshold", 7, "Scores at or above this count as 'above threshold'"),
+)
+
+SETTINGS = SETTINGS_M1 + SETTINGS_M2
+
+# (name, field_name, operator, value, action, precedence, description) — PROJECT_PLAN §8
+THRESHOLDS = (
+    (
+        "approval_high_ambiguity",
+        "ambiguity_quotient",
+        ">=",
+        "8",
+        "require_approval",
+        10,
+        "Highly ambiguous prompts go to the approval queue before routing",
+    ),
+    (
+        "approval_key_field_disputed",
+        "@key_fields",
+        "status_is",
+        "disputed",
+        "require_approval",
+        10,
+        "Any disputed key field goes to the approval queue before routing",
+    ),
+    (
+        "split_high_parsability",
+        "task_parsability",
+        ">=",
+        "7",
+        "split",
+        20,
+        "Split into independent subtasks (child packets via subtask_list)",
+    ),
+    (
+        "workbench_coding_intensity",
+        "coding_intensity",
+        ">=",
+        "7",
+        "route_workbench_production",
+        30,
+        "Code-heavy work goes to the workbench",
+    ),
+    (
+        "workbench_reasoning_intensity",
+        "reasoning_intensity",
+        ">=",
+        "7",
+        "route_workbench_production",
+        30,
+        "Complex reasoning goes to the workbench",
+    ),
+    (
+        "workbench_context_volume",
+        "context_volume",
+        ">=",
+        "7",
+        "route_workbench_production",
+        30,
+        "Large-context work goes to the workbench",
+    ),
+    (
+        "workbench_output_wordcount",
+        "output_wordcount",
+        ">=",
+        "8",
+        "route_workbench_production",
+        30,
+        "Lengthy outputs go to the workbench",
+    ),
+)
+
+# field → (phase, tier, required, hard, gate_operator, gate_value)
+PRESETS: dict[str, tuple[str, int, bool, bool, str | None, str | None]] = {
+    "safety_clear": ("pre", 1, True, True, "=", "true"),
+    "ambiguity_quotient": ("pre", 1, True, False, None, None),
+    "task_parsability": ("pre", 1, True, False, None, None),
+    "artifact_request_classes": ("pre", 2, True, False, None, None),
+    "tools_needed": ("pre", 2, True, False, None, None),
+    "coding_intensity": ("pre", 2, True, False, None, None),
+    "reasoning_intensity": ("pre", 2, True, False, None, None),
+    "context_volume": ("pre", 2, True, False, None, None),
+    "output_wordcount": ("pre", 2, True, False, None, None),
+    "representation_formats": ("pre", 3, False, False, None, None),
+    "repository_roles": ("pre", 3, False, False, None, None),
+    "domains": ("pre", 3, False, False, None, None),
+    "styles": ("pre", 3, False, False, None, None),
+    "context_independence": ("pre", 3, False, False, None, None),
+    "web_independence": ("pre", 3, False, False, None, None),
+    "requirement_alignment": ("post", 1, True, False, ">=", "6"),
+    "correctness": ("post", 1, True, False, ">=", "6"),
+    "security_risk": ("post", 1, True, True, "<=", "6"),
+    "testability": ("post", 3, False, False, None, None),
+    "internal_consistency": ("post", 3, False, False, None, None),
+    "functional_completeness": ("post", 3, False, False, None, None),
+    "repo_consistency": ("post", 3, False, False, None, None),
+    "maintainability": ("post", 3, False, False, None, None),
+    "duplication_quotient": ("post", 3, False, False, None, None),
+    "technical_debt": ("post", 3, False, False, None, None),
+    "acceptance_criteria_coverage": ("post", 3, False, False, None, None),
+    "dependency_validity": ("post", 3, False, False, None, None),
+    "determinism": ("post", 3, False, False, None, None),
+    "observability": ("post", 3, False, False, None, None),
+    "reversibility": ("post", 3, False, False, None, None),
+    "documentation_adequacy": ("post", 3, False, False, None, None),
+    "performance_risk": ("post", 3, False, False, None, None),
+    "portability": ("post", 3, False, False, None, None),
+    "data_integrity_risk": ("post", 3, False, False, None, None),
+    "privacy_risk": ("post", 3, False, False, None, None),
+    "licence_and_provenance_risk": ("post", 3, False, False, None, None),
+}
+
+
+def ensure_defaults(session: Session, actor: Actor = SYSTEM_ACTOR) -> dict[str, list[str]]:
+    """Insert every missing default row (never overwrite one); one event per table (GE6)."""
+    inserted: dict[str, list[str]] = {}
+    with session.no_autoflush:  # rows and their events must reach one flush together (fix 7)
+
+        def note(entity: str, key: str, row: object) -> None:
+            session.add(row)
+            inserted.setdefault(entity, []).append(key)
+
+        present = {
+            s.stage.value if hasattr(s.stage, "value") else s.stage
+            for s in session.scalars(select(AutonomyScope))
+        }
+        for stage, mode, fixed, description in AUTONOMY_SCOPES:
+            if stage not in present:
+                note(
+                    "autonomy_scope",
+                    stage,
+                    AutonomyScope(stage=stage, mode=mode, is_fixed=fixed, description=description),
+                )
+        present = set(session.scalars(select(Setting.key)))
+        for key, value, description in SETTINGS:
+            if key not in present:
+                note(
+                    "setting",
+                    key,
+                    Setting(key=key, value=value, description=description, version=1),
+                )
+        present = set(session.scalars(select(Threshold.name)))
+        for name, field_name, operator, value, action, precedence, description in THRESHOLDS:
+            if name not in present:
+                note(
+                    "threshold",
+                    name,
+                    Threshold(
+                        id=new_id(),
+                        name=name,
+                        field_name=field_name,
+                        operator=operator,
+                        value=value,
+                        action=action,
+                        precedence=precedence,
+                        enabled=True,
+                        description=description,
+                        version=1,
+                    ),
+                )
+        if session.get(ControlState, 1) is None:
+            note("control_state", "1", ControlState(id=1, paused=False))
+        present = {
+            (p.field_name, p.phase.value if hasattr(p.phase, "value") else p.phase)
+            for p in session.scalars(select(EvaPreset))
+        }
+        for field_name, (phase, tier, required, hard, gate_op, gate_value) in PRESETS.items():
+            if (field_name, phase) not in present:
+                note(
+                    "eva_preset",
+                    field_name,
+                    EvaPreset(
+                        id=new_id(),
+                        field_name=field_name,
+                        phase=phase,
+                        revision=1,
+                        tier=tier,
+                        required=required,
+                        hard=hard,
+                        gate_operator=gate_op,
+                        gate_value=gate_value,
+                        plan="combined",
+                        prompt_template="quickfire.v1",
+                        schema_version="1.0",
+                        policy_version="1.0",
+                        enabled=True,
+                    ),
+                )
+        for entity, keys in inserted.items():
+            record_event(
+                session,
+                actor=actor,
+                action="seed.defaults",
+                entity_type=entity,
+                after={"inserted": keys},
+                reason="init-db re-seeded missing defaults",
+            )
+    session.flush()
+    return inserted

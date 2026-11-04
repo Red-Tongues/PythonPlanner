@@ -100,7 +100,9 @@ def test_registry_contains_every_draft_field() -> None:
     defs = {d.name: d for d in load_candidate_fields()}
     expected = set(DRAFT_TASK_TAGSETS) | DRAFT_TASK_SCORES | DRAFT_CONTENT_SCORES
     assert expected <= set(defs)
-    assert len(defs) == len(expected) == 35
+    # M2 adds one gate field beyond the draft (D1 tier 1 "safety"): safety_clear.
+    assert set(defs) - expected == {"safety_clear"}
+    assert len(defs) == len(expected) + 1 == 36
 
     for name, vocabulary in DRAFT_TASK_TAGSETS.items():
         d = defs[name]
@@ -135,7 +137,7 @@ def test_key_fields_cover_routing_and_branching_rules() -> None:
 
 def test_fields_for_level() -> None:
     defs = load_candidate_fields()
-    assert len(fields_for_level(defs, FieldLevel.TASK)) == 14
+    assert len(fields_for_level(defs, FieldLevel.TASK)) == 15
     assert len(fields_for_level(defs, FieldLevel.CONTENT)) == 21
 
 
@@ -157,7 +159,7 @@ def test_invalid_registry_yaml(tmp_path) -> None:  # type: ignore[no-untyped-def
 
 def test_init_db_synced_registry_into_db(session: Session) -> None:
     rows = list(session.scalars(select(CandidateFieldDefinitionRow)))
-    assert len(rows) == 35
+    assert len(rows) == 36
     assert all(r.version == 1 and r.contract.startswith("CandidateFieldDefinition@") for r in rows)
 
 

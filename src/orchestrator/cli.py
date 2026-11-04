@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -31,6 +32,10 @@ app = typer.Typer(
 )
 packet_app = typer.Typer(help="Inspect and manage individual Prompt Packets.", no_args_is_help=True)
 app.add_typer(packet_app, name="packet")
+branch_app = typer.Typer(help="Task branching (split rules).", no_args_is_help=True)
+app.add_typer(branch_app, name="branch")
+confirm_app = typer.Typer(help="The approval queue.", no_args_is_help=True)
+app.add_typer(confirm_app, name="confirmations")
 
 #: The CLI is a trusted boundary: a person at a terminal (R1 fix 11).
 CLI_ACTOR = Actor.user("cli")
@@ -124,12 +129,21 @@ def ingest(
     project_name: Annotated[
         str | None, typer.Option("--project-name", help="Override the project name.")
     ] = None,
+    llm: Annotated[
+        bool, typer.Option("--llm", help="Extract the tree with the LLM instead of the parser.")
+    ] = False,
 ) -> None:
     """Parse a planning document into Project > Objective > Task (draft packets)."""
     from orchestrator.ingest import ingest_file
 
     with _session() as session:
-        result = ingest_file(session, path, project_name=project_name, actor=CLI_ACTOR)
+        result = ingest_file(
+            session,
+            path,
+            project_name=project_name,
+            actor=CLI_ACTOR,
+            provider=_provider() if llm else None,
+        )
         typer.echo(
             f"created {result.project.ref} '{result.project.name}': "
             f"{len(result.objectives)} objectives, {len(result.packets)} draft packets"
@@ -267,7 +281,8 @@ def packet_complete(
         str, typer.Option("--reason", help="Why the packet is complete.")
     ] = "completed manually via CLI",
 ) -> None:
-    """Mark a packet completed. This LOCKS it: it can never be edited again, only superseded."""
+    """Mark a packet completed. Only allowed when the completion gate passes (post-evaluation of
+    its newest artifact, or all children completed); otherwise use `packet close`. LOCKS it."""
     from orchestrator.lifecycle import transition
     from orchestrator.repository import get_packet
 
@@ -275,6 +290,340 @@ def packet_complete(
         packet = get_packet(session, ref)
         transition(packet, PacketStatus.COMPLETED, CLI_ACTOR, reason)
         typer.echo(f"{packet.ref} v{packet.version} completed and locked")
+
+
+@packet_app.command("close")
+def packet_close(
+    ref: Annotated[str, typer.Argument(help="Packet ref, e.g. PP-000001.")],
+    reason: Annotated[str, typer.Option("--reason", help="Why it is closed (required).")],
+) -> None:
+    """Close a packet WITHOUT a passing evaluation (closed_unverified). LOCKS it; never counts
+    as completed."""
+    from orchestrator.lifecycle import transition
+    from orchestrator.repository import get_packet
+
+    with _session() as session:
+        packet = get_packet(session, ref)
+        transition(packet, PacketStatus.CLOSED_UNVERIFIED, CLI_ACTOR, reason)
+        typer.echo(f"{packet.ref} v{packet.version} closed (unverified) and locked")
+
+
+# --------------------------------------------------------------------------- M2 commands
+
+
+def _provider():  # type: ignore[no-untyped-def]
+    from orchestrator.llm import make_provider
+
+    return make_provider(get_settings())
+
+
+def _fmt_conf(value: Any) -> str:
+    return "-" if value is None else f"{float(value):.2f}"
+
+
+@app.command()
+def evaluate(
+    packet: Annotated[
+        str | None, typer.Option("--packet", help="Evaluate one packet (REF).")
+    ] = None,
+    limit: Annotated[
+        int | None, typer.Option("--limit", min=1, help="At most N pending packets.")
+    ] = None,
+) -> None:
+    """Run the six-pass quickfire evaluation (FakeProvider unless a model endpoint is set)."""
+    from orchestrator.evaluation import evaluate_packet, evaluate_pending
+    from orchestrator.repository import get_packet
+
+    provider = _provider()
+    with _session() as session:
+        if packet:
+            reports = [evaluate_packet(session, get_packet(session, packet), provider)]
+        else:
+            reports = evaluate_pending(session, provider, limit=limit)
+        if not reports:
+            typer.echo("nothing to evaluate — every packet has a current evaluation set")
+        for r in reports:
+            states = list(r.fields.values())
+            summary = ", ".join(f"{states.count(s)} {s}" for s in sorted(set(states)))
+            extra = f"; reused {len(r.reused)}" if r.reused else ""
+            extra += f"; escalated {', '.join(r.escalated)}" if r.escalated else ""
+            stale = " (stale: the packet changed)" if r.stale else ""
+            typer.echo(
+                f"{r.packet_ref} v{r.packet_version} → {r.status or '-'}: {summary}{extra} "
+                f"[{r.calls} calls]{stale}"
+            )
+
+
+@app.command()
+def consensus(
+    ref: Annotated[str, typer.Argument(help="Packet ref, e.g. PP-000001.")],
+    evidence: Annotated[
+        bool, typer.Option("--evidence/--no-evidence", help="Show verified quotes.")
+    ] = True,
+) -> None:
+    """Show each field's final value, confidence, status and evidence (v_field_consensus)."""
+    from sqlalchemy import text
+
+    from orchestrator.repository import get_packet
+
+    with _session() as session:
+        packet = get_packet(session, ref)
+        rows = (
+            session.execute(
+                text(
+                    "SELECT * FROM v_field_consensus WHERE packet_id = :id "
+                    "ORDER BY phase DESC, field_name, item_key"
+                ),
+                {"id": packet.id},
+            )
+            .mappings()
+            .all()
+        )
+        typer.secho(f"{packet.ref} v{packet.version}  [{_status_label(packet)}]", bold=True)
+        if not rows:
+            typer.echo("no evaluation yet — run `orchestrator evaluate --packet " + ref + "`")
+        shown_tags: dict[str, list[str]] = {}
+        for r in rows:
+            if r["kind"] == "tagset" and r["status"] == "null":
+                continue  # tags neither model chose
+            name = r["field_name"] + (f"[{r['item_key']}]" if r["item_key"] else "")
+            value = r["final_value"] if r["final_value"] is not None else "-"
+            typer.echo(
+                f"  {r['phase']:<4} {name:<46} {r['status']:<9} conf {_fmt_conf(r['confidence'])}"
+                f"  value {value}  (S{r['supports']}/C{r['contradictions']}"
+                f"{'/U' + str(r['unverified']) if r['unverified'] else ''})"
+            )
+            if evidence and r["eva_packet_id"] not in shown_tags.setdefault(r["field_name"], []):
+                shown_tags[r["field_name"]].append(r["eva_packet_id"])
+                quotes = session.execute(
+                    text(
+                        "SELECT pass_no, evidence FROM evaluation_passes "
+                        "WHERE eva_packet_id = :e AND pass_no >= 3 ORDER BY pass_no"
+                    ),
+                    {"e": r["eva_packet_id"]},
+                ).all()
+                seen: set[str] = set()
+                for _pass_no, ev in quotes:
+                    for item in (json.loads(ev) if isinstance(ev, str) else ev) or []:
+                        if item.get("verified") and item["quote"] not in seen:
+                            seen.add(item["quote"])
+                            typer.echo(f'        {item["tag"]}: "{item["quote"]}"')
+
+
+@app.command()
+def stats(
+    ref: Annotated[
+        str | None, typer.Argument(help="Packet ref (default: all head packets).")
+    ] = None,
+) -> None:
+    """Packet statistics (v_packet_stats) and federated branch statistics (v_branch_stats)."""
+    from sqlalchemy import text
+
+    with _session() as session:
+        sql = (
+            "SELECT s.* FROM v_packet_stats s WHERE NOT EXISTS "
+            "(SELECT 1 FROM packets n WHERE n.supersedes_id = s.packet_id)"
+        )
+        params: dict[str, Any] = {}
+        if ref:
+            sql += " AND s.packet_ref = :ref"
+            params["ref"] = ref.split("@")[0]
+        typer.echo(
+            f"{'packet':<12} {'words':>5} {'evals':>5} {'calls':>5} {'eval ms':>8} "
+            f"{'hours':>7} {'>=thr':>5} {'evid':>5}"
+        )
+        for r in session.execute(text(sql + " ORDER BY s.packet_ref"), params).mappings():
+            typer.echo(
+                f"{r['packet_ref']:<12} {r['prompt_word_count']:>5} {r['evaluation_runs']:>5} "
+                f"{r['evaluation_attempts']:>5} {r['evaluation_ms']:>8} "
+                f"{float(r['lifecycle_hours']):>7.2f} {r['scores_above_threshold']:>5} "
+                f"{r['evidence_items']:>5}"
+            )
+        branches = session.execute(text("SELECT * FROM v_branch_stats ORDER BY root_ref"))
+        for b in branches.mappings():
+            variance = b["score_variance"]
+            typer.echo(
+                f"branch {b['root_ref']}: {b['descendant_count']} descendants, "
+                f"{b['revision_count']} revisions, {b['failed_runs']} failed runs, "
+                f"{b['contradiction_count']} contradictions, "
+                f"score variance {_fmt_conf(variance)}, {b['distinct_models']} models"
+            )
+
+
+@app.command()
+def queue(
+    channel: Annotated[
+        str | None, typer.Option("--channel", help="Only packets routed to this channel.")
+    ] = None,
+    all_rows: Annotated[
+        bool, typer.Option("--all", help="Include ineligible packets with the reason.")
+    ] = False,
+) -> None:
+    """The generation queue: unique deterministic order (v_queue)."""
+    from orchestrator.queue import queue_rows
+
+    with _session() as session:
+        rows = queue_rows(session)
+        if channel:
+            wanted = {p.id for p in session.query(Packet).filter(Packet.channel == channel)}
+            rows = [r for r in rows if r.packet_id in wanted]
+        shown = [r for r in rows if r.eligible or all_rows]
+        if not shown:
+            typer.echo("the queue is empty — evaluate packets first (`orchestrator evaluate`)")
+        for r in shown:
+            position = f"{r.position:>3}" if r.position is not None else "  -"
+            note = "" if r.eligible else f"  ({r.ineligible_reason})"
+            typer.echo(
+                f"{position}  {r.packet_ref} v{r.packet_version}  {r.status:<7} "
+                f"{r.queue_class:<8} priority {r.priority:.4f}  age {r.age_hours:.1f}h{note}"
+            )
+
+
+@branch_app.command("apply")
+def branch_apply() -> None:
+    """Apply fired split rules (respects the branching autonomy scope and B5 limits)."""
+    from orchestrator.branching import apply_branch_triggers, rollup_trunks
+
+    with _session() as session:
+        outcomes = apply_branch_triggers(session, _provider(), actor=CLI_ACTOR)
+        if not outcomes:
+            typer.echo("no split rule fires on any packet")
+        for o in outcomes:
+            detail = ", ".join(o.children) if o.children else o.reason
+            typer.echo(f"{o.packet_ref}  {o.rule}: {o.action}  {detail}")
+        for ref in rollup_trunks(session, actor=CLI_ACTOR):
+            typer.echo(f"{ref}: all children completed → trunk completed")
+
+
+@confirm_app.command("list")
+def confirmations_list(
+    all_rows: Annotated[bool, typer.Option("--all", help="Include decided ones.")] = False,
+) -> None:
+    """Pending approvals (oldest first)."""
+    from orchestrator.confirmations import list_confirmations
+
+    with _session() as session:
+        rows = list_confirmations(session, pending_only=not all_rows)
+        if not rows:
+            typer.echo("nothing waiting for you")
+        for c in rows:
+            typer.echo(f"{c.id[:8]}  {c.stage.value:<20} {c.status.value:<8} {c.summary}")
+
+
+@confirm_app.command("approve")
+def confirmations_approve(
+    confirmation_id: Annotated[str, typer.Argument(help="Id (or unique prefix).")],
+    reason: Annotated[str | None, typer.Option("--reason")] = None,
+) -> None:
+    """Approve and carry out a confirmation."""
+    from orchestrator.confirmations import approve
+
+    with _session() as session:
+        outcome = approve(
+            session, confirmation_id, actor=CLI_ACTOR, provider=_provider(), reason=reason
+        )
+        typer.echo(f"approved: {outcome or 'recorded'}")
+
+
+@confirm_app.command("reject")
+def confirmations_reject(
+    confirmation_id: Annotated[str, typer.Argument(help="Id (or unique prefix).")],
+    reason: Annotated[str, typer.Option("--reason")] = "rejected via CLI",
+) -> None:
+    """Reject a confirmation."""
+    from orchestrator.confirmations import reject
+
+    with _session() as session:
+        reject(session, confirmation_id, actor=CLI_ACTOR, reason=reason)
+        typer.echo("rejected")
+
+
+@app.command()
+def waive(
+    ref: Annotated[str, typer.Argument(help="Packet ref.")],
+    field: Annotated[str, typer.Argument(help="Soft candidate field to accept.")],
+    reason: Annotated[str, typer.Option("--reason", help="Why (required).")],
+) -> None:
+    """Accept a disputed/low-confidence SOFT field for this packet version only (B9)."""
+    from orchestrator.governance import grant_waiver
+
+    with _session() as session:
+        w = grant_waiver(session, ref, field, actor=CLI_ACTOR, reason=reason)
+        typer.echo(f"waiver {w.id[:8]}: {field} on {w.packet_ref} v{w.target_version}")
+
+
+@app.command()
+def override(
+    ref: Annotated[str, typer.Argument(help="Packet ref.")],
+    kind: Annotated[str, typer.Argument(help="block | hold | force | pin | reorder")],
+    reason: Annotated[str, typer.Option("--reason", help="Why (required).")],
+    scope: Annotated[str, typer.Option("--scope", help="version | lineage")] = "version",
+    value: Annotated[float | None, typer.Option("--value", help="REORDER delta")] = None,
+) -> None:
+    """Change dispatch order or stop a packet. FORCE is priority only, never a waiver."""
+    from orchestrator.governance import add_override
+
+    with _session() as session:
+        o = add_override(
+            session, ref, kind, actor=CLI_ACTOR, reason=reason, scope=scope, value=value
+        )
+        typer.echo(f"override {o.id[:8]}: {o.kind.value} on {o.packet_ref} ({o.scope.value})")
+
+
+@app.command()
+def revoke(
+    target_type: Annotated[str, typer.Argument(help="waiver | override")],
+    target_id: Annotated[str, typer.Argument(help="Its id.")],
+    reason: Annotated[str, typer.Option("--reason")] = "revoked via CLI",
+) -> None:
+    """Revoke a waiver or override (recorded; the original is never edited)."""
+    from orchestrator.governance import revoke as do_revoke
+
+    with _session() as session:
+        do_revoke(session, target_type, target_id, actor=CLI_ACTOR, reason=reason)
+        typer.echo("revoked")
+
+
+@app.command()
+def status() -> None:
+    """Schema revision, evaluator models and their pinning, and packet counts."""
+    from sqlalchemy import func, select
+
+    from orchestrator.db.models import Event
+    from orchestrator.llm import model_specs
+
+    settings = get_settings()
+    with _session() as session:
+        typer.echo(f"schema revision {current_revision(session.get_bind())}")
+        provider = _provider()
+        typer.echo(f"provider: {provider.name}")
+        for role, spec in model_specs(settings).items():
+            typer.echo(f"  model {role}: {spec.name}  digest {spec.digest or '-'}")
+        last = session.scalar(
+            select(Event)
+            .where(
+                Event.action.in_(
+                    [
+                        "evaluation.model_pinning_failed",
+                        "evaluation.models_verified",
+                        "evaluation.fake_provider",
+                    ]
+                )
+            )
+            .order_by(Event.created_at.desc())
+            .limit(1)
+        )
+        if last is not None:
+            mark = {
+                "evaluation.models_verified": "OK (digests verified)",
+                "evaluation.fake_provider": "not applicable (FakeProvider)",
+            }.get(last.action, "REFUSED")
+            detail = (last.after or {}).get("error", "")
+            typer.echo(f"model pinning: {mark} at {last.created_at:%Y-%m-%d %H:%M} {detail}")
+        counts = session.execute(
+            select(Packet.status, func.count()).group_by(Packet.status).order_by(Packet.status)
+        ).all()
+        typer.echo("packets: " + ", ".join(f"{PacketStatus(s).value} {n}" for s, n in counts))
 
 
 if __name__ == "__main__":  # pragma: no cover

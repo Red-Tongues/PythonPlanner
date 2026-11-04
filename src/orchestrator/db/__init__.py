@@ -8,7 +8,7 @@ from typing import Any
 from sqlalchemy import Engine
 
 from orchestrator.db import migrate
-from orchestrator.db.seed import record_registry_revision, sync_candidate_fields
+from orchestrator.db.seed import ensure_defaults, record_registry_revision, sync_candidate_fields
 from orchestrator.db.session import make_engine, make_session_factory, session_scope
 
 log = logging.getLogger(__name__)
@@ -18,7 +18,8 @@ def init_db(engine: Engine) -> dict[str, Any]:
     """Bring the database to the head revision and sync the candidate-field registry.
 
     Migrations (A4) create the tables, install the dialect-specific triggers and views from
-    ``orchestrator.db.ddl`` and seed defaults. Idempotent: safe to run on every start.
+    ``orchestrator.db.ddl`` and seed defaults; then missing defaults are re-seeded (GE6).
+    Idempotent: safe to run on every start.
     """
     from orchestrator.fields import load_candidate_fields
 
@@ -27,6 +28,7 @@ def init_db(engine: Engine) -> dict[str, Any]:
     factory = make_session_factory(engine)
     definitions = load_candidate_fields()
     with session_scope(factory) as session:
+        reseeded = ensure_defaults(session)
         fields = sync_candidate_fields(session, definitions)
         registry = record_registry_revision(session, definitions)
         registry_revision = registry.revision
@@ -35,6 +37,7 @@ def init_db(engine: Engine) -> dict[str, Any]:
         "revision": after,
         "fields": fields,
         "registry_revision": registry_revision,
+        "reseeded": reseeded,
     }
     log.info("database initialised: %s", summary)
     return summary

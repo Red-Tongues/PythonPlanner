@@ -102,3 +102,31 @@ def tree(session: Session):  # type: ignore[no-untyped-def]
     result = persist_tree(session, ProjectTree.model_validate(SMALL_TREE), actor=USER)
     session.commit()
     return result
+
+
+def make_cycle(session: Session, packet_id: str, cycle_id: str | None = None) -> str:
+    """An evaluation cycle row (evented) so raw ``EvaluationPass`` rows satisfy the 0005 FK."""
+    from orchestrator.db.models import EvaluationCycle, Packet, new_id
+    from orchestrator.events import record_event
+
+    packet = session.get(Packet, packet_id)
+    assert packet is not None
+    cycle = EvaluationCycle(
+        id=cycle_id or new_id(),
+        packet_id=packet_id,
+        packet_version=packet.version,
+        phase="pre",
+        target_hash="test",
+        pass_plan="test",
+        models={},
+    )
+    session.add(cycle)
+    record_event(
+        session,
+        actor=KERNEL,
+        action="test.cycle",
+        entity_type="evaluation_cycle",
+        entity_id=cycle.id,
+    )
+    session.flush()
+    return cycle.id

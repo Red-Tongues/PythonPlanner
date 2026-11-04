@@ -30,7 +30,7 @@ def test_uninitialised_database_is_explained(db_url: str) -> None:
 def test_end_to_end(db_url: str) -> None:
     result = cli(db_url, "init-db")
     assert result.exit_code == 0, result.output
-    assert "35 inserted" in result.output
+    assert "36 inserted" in result.output
     assert "0 inserted" in cli(db_url, "init-db").output  # idempotent
 
     result = cli(db_url, "ingest", str(SAMPLE))
@@ -49,13 +49,16 @@ def test_end_to_end(db_url: str) -> None:
     assert result.exit_code == 0, result.output
     assert "Barcode scanning" in result.output and "draft" in result.output
 
+    # M2.1 fix 5: completing needs evidence; closing without it is closed_unverified
     result = cli(db_url, "packet", "complete", "PP-000001")
+    assert result.exit_code == 1 and "cannot complete yet" in result.output
+    result = cli(db_url, "packet", "close", "PP-000001", "--reason", "done by hand")
     assert result.exit_code == 0, result.output
-    assert "locked" in result.output
-    result = cli(db_url, "packet", "complete", "PP-000001")
+    assert "closed (unverified) and locked" in result.output
+    result = cli(db_url, "packet", "close", "PP-000001", "--reason", "again")
     assert result.exit_code == 1
     assert "locked" in result.output
-    assert "[completed, locked]" in cli(db_url, "tree").output
+    assert "[closed_unverified, locked]" in cli(db_url, "tree").output
 
     result = cli(db_url, "events", "--limit", "3")
     assert result.exit_code == 0
@@ -68,7 +71,7 @@ def test_end_to_end(db_url: str) -> None:
 def test_fields_listing(db_url: str) -> None:
     # works from the YAML seed before init-db, and from the DB after
     result = cli(db_url, "fields")
-    assert result.exit_code == 0 and "35 fields" in result.output
+    assert result.exit_code == 0 and "36 fields" in result.output
     cli(db_url, "init-db")
     result = cli(db_url, "fields", "--level", "content")
     assert result.exit_code == 0

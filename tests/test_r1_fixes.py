@@ -47,7 +47,8 @@ from orchestrator.repository import (
     supersede_project,
     update_packet,
 )
-from tests.conftest import KERNEL, SMALL_TREE, USER
+from tests.conftest import KERNEL, SMALL_TREE, USER, make_cycle
+from tests.evafixtures import complete_with_evidence
 from tests.test_migrations_frozen import MANIFEST, fingerprint
 
 LLM = Actor.llm("model-a")
@@ -73,6 +74,7 @@ def row_of(engine: Engine, table: str, row_id: str) -> dict[str, Any]:
 def insert_row(engine: Engine, table: str, values: dict[str, Any]) -> None:
     columns = ", ".join(values)
     params = ", ".join(f":{c}" for c in values)
+    values = {k: json.dumps(v) if isinstance(v, dict | list) else v for k, v in values.items()}
     raw(engine, f"INSERT INTO {table} ({columns}) VALUES ({params})", **values)
 
 
@@ -198,7 +200,7 @@ def test_fix3_insert_or_replace_cannot_bypass_delete_triggers(engine, session, t
         assert connection.execute(text("PRAGMA recursive_triggers")).scalar() == 1
 
     packet = tree.packets[0]
-    transition(packet, PacketStatus.COMPLETED, USER, "done")
+    complete_with_evidence(session, packet, USER)
     session.commit()
     locked = row_of(engine, "packets", packet.id)
     replacement = {
@@ -232,7 +234,7 @@ def test_fix3_insert_or_replace_cannot_bypass_delete_triggers(engine, session, t
 
     ev = EvaluationPass(
         packet_id=tree.packets[1].id,
-        eval_cycle_id="c1",
+        eval_cycle_id=make_cycle(session, tree.packets[1].id),
         field_name="styles",
         model="fake-a",
         pass_no=1,
@@ -274,6 +276,7 @@ def _pass(packet_id: str, cycle: str | None = "c1") -> EvaluationPass:
 
 def test_fix5_evaluation_pass_uniqueness_includes_packet(session: Session, tree) -> None:
     a, b = tree.packets[0].id, tree.packets[1].id
+    make_cycle(session, a, "c1")
     session.add_all([_pass(a), _pass(b)])  # same cycle/field/pass on two packets: fine
     session.commit()
     session.add(_pass(a))
@@ -477,13 +480,16 @@ def test_fix11_only_users_complete_or_archive_by_hand(session: Session, tree) ->
         transition(tree.packets[0], PacketStatus.COMPLETED, "user:cli")  # type: ignore[arg-type]
     with pytest.raises(TypeError):
         record_event(session, actor="user:cli", action="x", entity_type="x")  # type: ignore[arg-type]
-    transition(tree.packets[0], PacketStatus.COMPLETED, USER, "by hand")
+    # M2.1 fix 5: by hand, a user closes unverified work (completion needs evidence)
+    with pytest.raises(InvalidTransitionError, match="cannot complete yet"):
+        transition(tree.packets[0], PacketStatus.COMPLETED, USER, "by hand")
+    transition(tree.packets[0], PacketStatus.CLOSED_UNVERIFIED, USER, "by hand")
     assert tree.packets[0].locked
 
 
 def test_fix11_llm_cannot_skip_the_pipeline_from_any_state(session: Session, tree) -> None:
     packet = tree.packets[0]
-    for status in (PacketStatus.QUEUED, PacketStatus.EVALUATING, PacketStatus.READY):
+    for status in (PacketStatus.EVALUATING_PRE, PacketStatus.READY, PacketStatus.QUEUED):
         transition(packet, status, KERNEL)
         with pytest.raises(InvalidTransitionError):
             transition(packet, PacketStatus.COMPLETED, LLM)
@@ -494,7 +500,7 @@ def test_fix11_llm_cannot_skip_the_pipeline_from_any_state(session: Session, tre
 
 def test_fix12_registry_revision_recorded_and_versioned(engine, session: Session) -> None:
     first = current_registry_revision(session)
-    assert first is not None and first.revision == 1 and first.field_count == 35
+    assert first is not None and first.revision == 1 and first.field_count == 36
     assert init_db(engine)["registry_revision"] == 1  # unchanged YAML → same revision
 
     changed: list[CandidateFieldDefinition] = [
@@ -503,7 +509,7 @@ def test_fix12_registry_revision_recorded_and_versioned(engine, session: Session
     ]
     second = record_registry_revision(session, changed, actor=USER)
     session.commit()
-    assert (second.revision, second.field_count) == (2, 35)
+    assert (second.revision, second.field_count) == (2, 36)
     assert second.sha256 != first.sha256
     assert any(d["label"] == "Styles (renamed)" for d in second.definitions)
     event = session.scalar(

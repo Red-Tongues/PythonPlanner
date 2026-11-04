@@ -124,6 +124,45 @@ EXPECTED_SETTINGS = {
     ("attempts.quickfire_evaluation", 4),
     ("attempts.local_generation", 3),
     ("attempts.workbench_production", 2),
+    # 0005 (M2)
+    ("consensus.agreement_min", 0.6),
+    ("consensus.winner_min", 0.7),
+    ("consensus.one_sided_min", 0.7),
+    ("consensus.min_supports", 1),
+    ("evaluation.repair_attempts", 1),
+    ("evaluation.max_escalations", 1),
+    ("evaluation.num_ctx", 4096),
+    ("evaluation.max_tokens", 512),
+    ("evaluation.max_exemplars", 3),
+    ("priority.w_objective", 0.3),
+    ("priority.w_age", 0.25),
+    ("priority.w_ambiguity", 0.15),
+    ("priority.w_boost", 0.2),
+    ("priority.w_failures", 0.1),
+    ("priority.max_age_hours", 72),
+    ("queue.max_wait_hours", 48),
+    ("queue.failure_budget", 3),
+    ("queue.retry_backoff_minutes", 30),
+    ("queue.fair_admission_every", 3),
+    ("queue.lease_minutes", 30),
+    ("branching.max_depth", 2),
+    ("branching.max_descendants", 12),
+    ("stats.score_threshold", 7),
+}
+#: 0005 eva presets: (field, phase, tier, required, hard, gate operator, gate value)
+EXPECTED_GATING_PRESETS = {
+    ("safety_clear", "pre", 1, True, True, "=", "true"),
+    ("ambiguity_quotient", "pre", 1, True, False, None, None),
+    ("task_parsability", "pre", 1, True, False, None, None),
+    ("artifact_request_classes", "pre", 2, True, False, None, None),
+    ("tools_needed", "pre", 2, True, False, None, None),
+    ("coding_intensity", "pre", 2, True, False, None, None),
+    ("reasoning_intensity", "pre", 2, True, False, None, None),
+    ("context_volume", "pre", 2, True, False, None, None),
+    ("output_wordcount", "pre", 2, True, False, None, None),
+    ("requirement_alignment", "post", 1, True, False, ">=", "6"),
+    ("correctness", "post", 1, True, False, ">=", "6"),
+    ("security_risk", "post", 1, True, True, "<=", "6"),
 }
 EXPECTED_THRESHOLDS = {
     ("approval_high_ambiguity", "ambiguity_quotient", ">=", "8", "require_approval", 10),
@@ -168,4 +207,21 @@ def test_seeds_after_empty_to_head_are_exact(engine) -> None:  # type: ignore[no
     assert settings == EXPECTED_SETTINGS
     assert {tuple(t) for t in thresholds} == EXPECTED_THRESHOLDS
     assert [(r.id, bool(r.paused)) for r in control] == [(1, False)]
-    assert sorted(seed_events) == ["autonomy_scope", "control_state", "setting", "threshold"]
+    assert sorted(seed_events) == [
+        "autonomy_scope",
+        "control_state",
+        "eva_preset",
+        "setting",
+        "setting",
+        "threshold",
+    ]
+    with engine.connect() as c:
+        presets = c.execute(
+            text(
+                "SELECT field_name, phase, tier, required, hard, gate_operator, gate_value, plan, "
+                "revision FROM eva_presets"
+            )
+        ).all()
+    assert len(presets) == 36 and {(p.plan, p.revision) for p in presets} == {("combined", 1)}
+    gating = {(p[0], p[1], p[2], bool(p[3]), bool(p[4]), p[5], p[6]) for p in presets if p[2] < 3}
+    assert gating == EXPECTED_GATING_PRESETS

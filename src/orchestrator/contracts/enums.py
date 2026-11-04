@@ -9,21 +9,40 @@ from enum import StrEnum
 
 
 class PacketStatus(StrEnum):
+    """genPacket lifecycle (B9): draft → evaluating_pre → ready → queued → running →
+    evaluating_post → completed (locked), with side states needs_review, held, blocked, failed,
+    awaiting_confirmation and waiting_for_children (B4/B5).
+
+    ``evaluating``, ``in_progress`` and ``processed`` are M1 values kept so legacy rows stay
+    valid; they only have exits into the B9 lifecycle.
+    """
+
     DRAFT = "draft"
-    QUEUED = "queued"
-    EVALUATING = "evaluating"
+    EVALUATING_PRE = "evaluating_pre"
     READY = "ready"
-    IN_PROGRESS = "in_progress"
-    AWAITING_CONFIRMATION = "awaiting_confirmation"
-    PROCESSED = "processed"
+    QUEUED = "queued"
+    RUNNING = "running"
+    EVALUATING_POST = "evaluating_post"
     COMPLETED = "completed"
-    ARCHIVED = "archived"
+    NEEDS_REVIEW = "needs_review"
+    HELD = "held"
+    BLOCKED = "blocked"
     FAILED = "failed"
+    AWAITING_CONFIRMATION = "awaiting_confirmation"
+    WAITING_FOR_CHILDREN = "waiting_for_children"
+    ARCHIVED = "archived"
+    #: M2.1 fix 5: closed by a user without a passing evaluation — terminal, locked, and never
+    #: counted as a success (``completed`` always means the completion gate passed).
+    CLOSED_UNVERIFIED = "closed_unverified"
+    # legacy (M1)
+    EVALUATING = "evaluating"
+    IN_PROGRESS = "in_progress"
+    PROCESSED = "processed"
 
 
 #: Statuses that lock a packet (Requirement F). Kept in sync with ``orchestrator.db.ddl``.
 LOCKING_STATUSES: frozenset[PacketStatus] = frozenset(
-    {PacketStatus.COMPLETED, PacketStatus.ARCHIVED}
+    {PacketStatus.COMPLETED, PacketStatus.ARCHIVED, PacketStatus.CLOSED_UNVERIFIED}
 )
 
 
@@ -100,3 +119,74 @@ class ConfirmationStatus(StrEnum):
     PENDING = "pending"
     APPROVED = "approved"
     REJECTED = "rejected"
+
+
+class EvaPhase(StrEnum):
+    PRE = "pre"  # evaluates the genPacket before generation
+    POST = "post"  # evaluates the generated output before the genPacket locks
+
+
+class EvaState(StrEnum):
+    """evaPacket lifecycle (B9)."""
+
+    PLANNED = "planned"
+    EXTRACTING = "extracting"  # P1–P2
+    CROSS_SCORING = "cross_scoring"  # P3–P6
+    CONSENSUS = "consensus"
+    DISPUTED = "disputed"
+    FAILED = "failed"
+    SUPERSEDED = "superseded"
+
+
+#: evaPacket states after which the row never changes (DB-enforced).
+EVA_TERMINAL_STATES: frozenset[EvaState] = frozenset(
+    {EvaState.CONSENSUS, EvaState.DISPUTED, EvaState.FAILED, EvaState.SUPERSEDED}
+)
+
+
+class CycleState(StrEnum):
+    OPEN = "open"
+    COMPLETE = "complete"
+    SUPERSEDED = "superseded"
+    LEGACY = "legacy"  # backfilled by migration 0005 for pre-M2 pass rows
+
+
+class PassPlanName(StrEnum):
+    COMBINED = "combined"  # 6 calls: 2 extractions + 4 combined evaluations (D3/B12 canonical)
+    SPLIT = "split"  # 10 calls: 2 extractions + 4 accuracy + 4 evidence prompts
+
+
+class ConsensusStatus(StrEnum):
+    ACCEPTED = "accepted"
+    DISPUTED = "disputed"
+    NULL = "null"
+    PENDING = "pending"
+
+
+class OverrideKind(StrEnum):
+    """Human queue overrides, in precedence order (B9): BLOCK > HOLD > FORCE > PIN > REORDER."""
+
+    BLOCK = "block"
+    HOLD = "hold"
+    FORCE = "force"
+    PIN = "pin"
+    REORDER = "reorder"
+
+
+OVERRIDE_PRECEDENCE: dict[OverrideKind, int] = {k: i + 1 for i, k in enumerate(OverrideKind)}
+
+
+class OverrideScope(StrEnum):
+    VERSION = "version"  # lapses when the packet is revised
+    LINEAGE = "lineage"  # BLOCK/HOLD only: survives revisions until revoked
+
+
+class DependencyKind(StrEnum):
+    FINISH_TO_START = "finish_to_start"  # depends_on must be completed first
+
+
+class GenerationRunState(StrEnum):
+    CLAIMED = "claimed"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    ABANDONED = "abandoned"

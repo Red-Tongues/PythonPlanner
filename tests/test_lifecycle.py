@@ -10,16 +10,17 @@ from orchestrator.db.models import Event
 from orchestrator.errors import ImmutableRecordError, InvalidTransitionError
 from orchestrator.lifecycle import ALLOWED_TRANSITIONS, can_transition, transition
 from tests.conftest import KERNEL, USER
+from tests.evafixtures import complete_with_evidence
 
 S = PacketStatus
+# B9 lifecycle up to evaluating_post; completing from there needs post-phase consensus (see
+# tests/test_readiness.py), so the happy path here ends with a user completing by hand.
 HAPPY_PATH = [
-    S.QUEUED,
-    S.EVALUATING,
+    S.EVALUATING_PRE,
     S.READY,
-    S.IN_PROGRESS,
-    S.AWAITING_CONFIRMATION,
-    S.PROCESSED,
-    S.COMPLETED,
+    S.QUEUED,
+    S.RUNNING,
+    S.EVALUATING_POST,
 ]
 
 
@@ -47,31 +48,45 @@ def test_happy_path_writes_one_event_per_transition(session: Session, tree) -> N
     assert [e.after["status"] for e in events] == [s.value for s in HAPPY_PATH]
     assert events[0].before["status"] == "draft"
     assert all(e.actor == str(KERNEL) for e in events)
+    with pytest.raises(InvalidTransitionError, match="cannot complete yet"):
+        transition(packet, S.COMPLETED, KERNEL)  # no artifact or post-phase consensus yet
+    with pytest.raises(InvalidTransitionError, match="cannot complete yet"):
+        transition(packet, S.COMPLETED, USER, "accepted by hand")  # users too (M2.1 fix 5)
+    complete_with_evidence(session, packet, KERNEL)
     assert packet.locked and packet.completed_at is not None
+    assert packet.status is S.COMPLETED
 
 
 def test_illegal_transition_raises_and_writes_nothing(session: Session, tree) -> None:
     packet = tree.packets[0]
     count = session.scalar(select(func.count()).select_from(Event))
-    with pytest.raises(InvalidTransitionError, match="draft → in_progress"):
-        transition(packet, S.IN_PROGRESS, KERNEL)
+    with pytest.raises(InvalidTransitionError, match="draft → running"):
+        transition(packet, S.RUNNING, KERNEL)
     with pytest.raises(InvalidTransitionError):
         transition(packet, S.COMPLETED, KERNEL)  # the kernel cannot skip the pipeline
     assert session.scalar(select(func.count()).select_from(Event)) == count
     assert packet.status is S.DRAFT
 
 
-def test_user_may_complete_or_archive_by_hand(session: Session, tree) -> None:
-    assert can_transition(S.DRAFT, S.COMPLETED, Actor.user("cli"))
-    assert not can_transition(S.DRAFT, S.COMPLETED, KERNEL)
-    transition(tree.packets[0], S.COMPLETED, Actor.user("cli"), "done by hand")
+def test_user_closes_unverified_work_but_completion_needs_evidence(session: Session, tree) -> None:
+    """M2.1 fix 5 (reverses M2 judgement call #9)."""
+    user = Actor.user("cli")
+    assert can_transition(S.DRAFT, S.COMPLETED, user)  # the table allows it…
+    with pytest.raises(InvalidTransitionError, match="cannot complete yet"):
+        transition(tree.packets[0], S.COMPLETED, user, "done by hand")  # …the gate does not
+    transition(tree.packets[0], S.CLOSED_UNVERIFIED, user, "done by hand")
+    assert tree.packets[0].locked and tree.packets[0].status is S.CLOSED_UNVERIFIED
+    assert not can_transition(S.DRAFT, S.CLOSED_UNVERIFIED, KERNEL)  # only a person closes
     transition(tree.packets[1], S.ARCHIVED, KERNEL, "dropped")
-    assert tree.packets[0].locked and tree.packets[1].locked
+    assert tree.packets[1].locked
+    # with evidence a user may complete from any non-terminal status (here: draft)
+    complete_with_evidence(session, tree.packets[2], user)
+    assert tree.packets[2].status is S.COMPLETED
 
 
 def test_terminal_packets_are_immutable(session: Session, tree) -> None:
     packet = tree.packets[0]
-    transition(packet, S.COMPLETED, USER)
+    transition(packet, S.CLOSED_UNVERIFIED, USER)
     with pytest.raises(ImmutableRecordError):
         transition(packet, S.QUEUED, USER)
     with pytest.raises(ImmutableRecordError):
@@ -80,6 +95,6 @@ def test_terminal_packets_are_immutable(session: Session, tree) -> None:
 
 def test_failed_packets_can_retry(session: Session, tree) -> None:
     packet = tree.packets[0]
-    for status in [S.QUEUED, S.EVALUATING, S.FAILED, S.QUEUED]:
+    for status in [S.EVALUATING_PRE, S.FAILED, S.EVALUATING_PRE]:
         transition(packet, status, KERNEL)
-    assert packet.status is S.QUEUED and not packet.locked
+    assert packet.status is S.EVALUATING_PRE and not packet.locked
