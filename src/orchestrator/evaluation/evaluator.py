@@ -968,7 +968,10 @@ class Evaluator:
         self.session.flush()
         verdict = evaluation_verdict(self.session, packet, EvaPhase.PRE)
         if verdict.ok and not unresolved_tier1:
+            from orchestrator.branching import promote_consensus
+
             self._transition(packet, PacketStatus.READY, "evaluation set complete and accepted")
+            promote_consensus(self.session, packet, actor=self.actor)
         elif verdict.needs_review or unresolved_tier1:
             self._transition(
                 packet,
