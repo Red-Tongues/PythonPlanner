@@ -4,6 +4,60 @@ Newest entries first. Every agent session appends an entry: what changed, decisi
 
 ---
 
+## 2026-11-04 — M1.1 checkpoint (paused for the usage limit) (Claude Code)
+
+Working from the fix list in `docs/reviews/R1_consensus.md`, on the PR #1 branch (`claude/optimistic-allen-ts03d8`). origin/main was merged in at c8dc3d3, which added `docs/reviews/R1_*`. MC2 and MC8 are verified false positives and will **not** be acted on; GH6 and GE6 are deferred to M2.
+
+### Status of the 12 fixes
+| # | Fix | Status |
+|---|---|---|
+| 1 | Superseded history is immutable in the DB, and the ORM guard checks head status | ⏳ to do |
+| 2 | Lineage invariants in the DB (keep ref, version+1, immutable ancestry, refuse deleting successors or rows with dependents) | ⏳ to do |
+| 3 | SQLite `recursive_triggers = ON`, plus `INSERT OR REPLACE` tests | ⏳ to do |
+| 4 | Frozen migrations, with per-revision assertions and exact seeds | ✅ done (commit 02fb8f2) |
+| 5 | Downgrade and constraint hygiene | 🟡 partly done: 0002's downgrade now drops all its triggers, functions and views (frozen as part of fix 4). The evaluation-pass uniqueness change and the downgrade → re-upgrade test remain. |
+| 6 | Atomic ref allocation (counter table, two-writer test) | ⏳ to do |
+| 7 | Evented writes only (enforced in the flush layer) | ⏳ to do |
+| 8 | `supersede_packet` keyword collision, plus a test | ⏳ to do |
+| 9 | Ingestion degrades gracefully (untitled fallback, over-long descriptions) | ⏳ to do |
+| 10 | Missing tests (artifact INSERT with `accepted` and no `accepted_at`, plus the tests for fixes 1, 5 and 8) | ⏳ to do |
+| 11 | Typed `Actor` (user / system / llm) | ⏳ to do |
+| 12 | Registry revision hash plus an event on change | ⏳ to do |
+
+### What fix 4 changed
+- `0002` now holds literal SQL for both dialects: 21 SQLite and 18 PostgreSQL statements, identical to what the generator in `ddl.py` produced, so databases already at 0003 stay valid. Its downgrade drops every trigger, function and view it created.
+- `0003` holds literal seed rows, written through local `sa.table` definitions. It inserts only missing rows and writes one `seed.defaults` event per table, as before. Its downgrade is a deliberate no-op: seed rows are governance state, and re-upgrading is idempotent.
+- `tests/test_migrations_frozen.py` checks three things:
+  - revisions import nothing from `orchestrator`;
+  - upgrading empty → each revision yields exactly the trigger, view and function fingerprints in `tests/migration_manifest.json` (whitespace-normalised SHA-256, both dialects);
+  - the seeds after empty → head are exact.
+- `ddl.py` is now the **authoring reference** only; revisions never import it. Judgement call: this is how I read golden rule 7 ("dialect-specific DDL in one module") alongside fix 4.
+- Long literal SQL lines in revision files are exempt from E501 (`pyproject.toml` per-file-ignores).
+- Suite at this checkpoint: SQLite 79 passed / 39 skipped (PostgreSQL params); with PostgreSQL 16, 117 passed / 1 skipped. Ruff is clean.
+
+### Plan for resuming (decided, not yet built)
+- **One new revision `0004` ("M1.1 governance hardening")** carries all remaining schema work, so databases already at 0003 can upgrade. 0001–0003 are never edited again.
+  - Fixes 1 and 2: per-table lineage triggers on projects, objectives and packets, for SQLite and a PL/pgSQL function per table.
+    - A row with a successor rejects UPDATE and DELETE.
+    - DELETE is refused when `supersedes_id IS NOT NULL` or when the row has dependents (packets referenced through `parent_id`/`root_id` other than themselves, objectives with packets, projects with objectives), with the message "archive instead".
+    - INSERT requires `version = 1` without a predecessor; with one, the predecessor must have the same ref and `version + 1`, and the same `parent_id` / `root_id` / `project_id` / `objective_id` (same `project_id` for objectives).
+    - UPDATE may not change ref, version, `supersedes_id` or ancestry.
+  - Fix 5: `evaluation_passes.eval_cycle_id` becomes NOT NULL, with unique `(packet_id, eval_cycle_id, field_name, pass_no, attempt)` via `batch_alter_table`. **Note:** a SQLite batch rebuild drops the table's triggers, so 0004 must recreate `evaluation_passes`' append-only triggers on SQLite, and its downgrade must recreate 0002's versions. Add a head → base → head test on both dialects.
+  - Fix 6: a `ref_counters(name PK, value)` table, initialised in 0004 from existing max refs. Allocate with `INSERT … ON CONFLICT DO NOTHING` followed by `UPDATE … RETURNING`. Two-writer test using threads, relying on PostgreSQL row locks and SQLite's `busy_timeout`.
+  - Fix 12: an append-only `field_registry_revisions(id, revision, sha256, definitions JSON, created_at)` table, with a new row and an event whenever the YAML hash changes.
+  - Widen `events.entity_id` to 128 characters so setting keys fit (needed for fix 7). This is also a batch rebuild on SQLite, so recreate the `events` triggers too.
+  - After 0004, regenerate the manifest and add per-revision expectations.
+- **Fix 3:** add `recursive_triggers = ON` to `SQLITE_PRAGMAS` in `db/session.py`. Tests use `INSERT OR REPLACE` on a locked packet, an event and an evaluation pass.
+- **Fix 7:** `before_flush` rejects (new `UnauditedWriteError`) any insert, update or delete of a domain row unless the same flush contains a new `Event` for that entity type, either with its id or as a batch event with `entity_id IS NULL`. Settings and field definitions must also bump their version. A `do_orm_execute` hook rejects ORM bulk update/delete on domain models.
+  - Repository, lifecycle and ingestion must add their event **before** flushing, and `persist_tree` must assign ids up front.
+  - Tests that edit rows directly need evented helpers: `set_autonomy_mode` in the repository, and events for test artifacts.
+- **Fix 8:** in `supersede_packet`, drop the explicit `response_contract=` keyword and take it from the merged dict. Add a test that changes `response_structure`.
+- **Fix 9:** use an "Untitled task" fallback for empty titles. Descriptions over 20,000 characters are split at paragraph boundaries into "Title (part i/n)" packets, each with a note (judgement call: split rather than raise, so unattended ingestion keeps going and loses nothing). Any remaining `ValidationError` is wrapped in `IngestionError`.
+- **Fix 11:** a frozen `Actor` dataclass (`kind` ∈ user | system | llm, plus `id`), built with `Actor.user("cli")`, `Actor.system(...)` and `Actor.llm(...)`. `str(actor)` is what goes into `events.actor`. Only `kind == user` may complete or archive outside the table. All repository, lifecycle and ingestion signatures take an `Actor`.
+- Then add an M1.1 entry here, update the PR #1 description checklist with the 12 fixes, and confirm CI is green on all three jobs.
+
+---
+
 ## 2026-11-03 — M1: kernel foundation, including R0 amendments A1–A7 (Claude Code)
 
 Branch `claude/optimistic-allen-ts03d8`; `origin/main` merged in at 29cd714 (R0 amendments) partway through the session.
