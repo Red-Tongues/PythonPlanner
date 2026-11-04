@@ -1,0 +1,239 @@
+# Candidate-field registry seed.
+#
+# Source: docs/archive/Python_Planner_v0_draft.md — "Candidate Fields: For Quickfire Evaluations"
+# (task level) and "Additional Candidate Fields for Quickfire Content Evaluation" (content level).
+# Every field listed in the draft is here. Tag vocabularies are the draft's examples in snake_case
+# plus `other`, because every draft list ends in "etc".
+#
+# Keys: name, label, level (task|content), kind (tagset|score|text|bool), vocabulary (tagset),
+# scale (score: "0-10"), max_chars / max_passes (text; capped at 3 passes), prompt_hint (the
+# draft's one-line description), is_key_field (drives routing/branching/approval; PROJECT_PLAN §8).
+#
+# The loader validates this file against orchestrator.contracts.CandidateFieldDefinition and
+# `orchestrator init-db` syncs it into the candidate_field_definitions table.
+
+fields:
+  # --------------------------------------------------------------- task level · tag sets
+  - name: artifact_request_classes
+    label: Artifact request classes
+    level: task
+    kind: tagset
+    vocabulary: [source_code, configuration, documentation, test, dataset, schema, prompt, other]
+    prompt_hint: "The classes of artifact the task requests: Source Code, Configuration, Documentation, Test, Dataset, Schema, Prompt, etc."
+  - name: representation_formats
+    label: Representation formats
+    level: task
+    kind: tagset
+    vocabulary: [plain_text, markdown, json, yaml, xml, csv, sql, binary, other]
+    prompt_hint: "The formats the output is represented in: Plain Text, Markdown, JSON, YAML, XML, CSV, SQL, Binary, etc."
+  - name: repository_roles
+    label: Repository roles
+    level: task
+    kind: tagset
+    vocabulary: [executable, declarative, reference, validation, build, deployment, other]
+    prompt_hint: "The role the output plays in the repository: Executable, Declarative, Reference, Validation, Build, Deployment, etc."
+  - name: domains
+    label: Fields (domains)
+    level: task
+    kind: tagset
+    vocabulary: [education, data_analysis, software_development, it_generic, law, start_up, music, care, other]
+    prompt_hint: "The fields (subject domains) the task belongs to: Education, Data Analysis, Software Development, IT Generic, Law, Start up, Music, Care, etc."
+  - name: styles
+    label: Styles
+    level: task
+    kind: tagset
+    vocabulary: [creative, brainstorm, technical, draft, prototype, analysis, corrective, plan, production, other]
+    prompt_hint: "The style of work requested: Creative, Brainstorm, Technical, Draft, Prototype, Analysis, Corrective, Plan, Production, etc."
+  - name: tools_needed
+    label: Tools needed
+    level: task
+    kind: tagset
+    vocabulary: [natural_language, csv_creation, csv_extraction, python, json_parse, other]
+    prompt_hint: "The tools needed to complete the task: Natural Language, CSV creation, CSV extraction, Python, JSON parse, etc."
+
+  # --------------------------------------------------------------- task level · scores 0-10
+  - name: task_parsability
+    label: Task parsability
+    level: task
+    kind: score
+    scale: "0-10"
+    prompt_hint: "This task should be split up into independent subtasks."
+    is_key_field: true
+  - name: context_volume
+    label: Context volume
+    level: task
+    kind: score
+    scale: "0-10"
+    prompt_hint: "This task requests evaluation of a large amount of context."
+    is_key_field: true
+  - name: context_independence
+    label: Context independence
+    level: task
+    kind: score
+    scale: "0-10"
+    prompt_hint: "Text prompt output quality without context."
+  - name: web_independence
+    label: Web independence
+    level: task
+    kind: score
+    scale: "0-10"
+    prompt_hint: "Task output quality without online research."
+  - name: coding_intensity
+    label: Coding intensity
+    level: task
+    kind: score
+    scale: "0-10"
+    prompt_hint: "This task involves writing lots of code."
+    is_key_field: true
+  - name: reasoning_intensity
+    label: Reasoning intensity
+    level: task
+    kind: score
+    scale: "0-10"
+    prompt_hint: "This task involves complex multistep problem solving."
+    is_key_field: true
+  - name: output_wordcount
+    label: Output wordcount
+    level: task
+    kind: score
+    scale: "0-10"
+    prompt_hint: "This task requires a lengthy response."
+    is_key_field: true
+  - name: ambiguity_quotient
+    label: Ambiguity quotient
+    level: task
+    kind: score
+    scale: "0-10"
+    prompt_hint: "The prompt is highly ambiguous."
+    is_key_field: true
+
+  # --------------------------------------------------------------- content level · scores 0-10
+  - name: testability
+    label: Testability
+    level: content
+    kind: score
+    scale: "0-10"
+    prompt_hint: "The content can be verified through deterministic tests or defined acceptance criteria."
+  - name: requirement_alignment
+    label: Requirement alignment
+    level: content
+    kind: score
+    scale: "0-10"
+    prompt_hint: "The content satisfies the associated task, objective and project requirements."
+    is_key_field: true
+  - name: correctness
+    label: Correctness
+    level: content
+    kind: score
+    scale: "0-10"
+    prompt_hint: "The content is technically and logically accurate."
+    is_key_field: true
+  - name: internal_consistency
+    label: Internal consistency
+    level: content
+    kind: score
+    scale: "0-10"
+    prompt_hint: "The content contains no conflicting claims, structures or behaviours."
+  - name: functional_completeness
+    label: Functional completeness
+    level: content
+    kind: score
+    scale: "0-10"
+    prompt_hint: "The content contains all components needed to perform its intended function."
+  - name: repo_consistency
+    label: Repo consistency
+    level: content
+    kind: score
+    scale: "0-10"
+    prompt_hint: "The content is compatible with the surrounding repository, conventions and dependencies."
+  - name: maintainability
+    label: Maintainability
+    level: content
+    kind: score
+    scale: "0-10"
+    prompt_hint: "The content is clear, modular and practical to modify."
+  - name: security_risk
+    label: Security risk
+    level: content
+    kind: score
+    scale: "0-10"
+    prompt_hint: "The content introduces unsafe behaviour, exposed secrets or avoidable vulnerabilities."
+    is_key_field: true
+  - name: duplication_quotient
+    label: Duplication quotient
+    level: content
+    kind: score
+    scale: "0-10"
+    prompt_hint: "The content unnecessarily reproduces existing repository material or logic."
+  - name: technical_debt
+    label: Technical debt
+    level: content
+    kind: score
+    scale: "0-10"
+    prompt_hint: "The content includes techniques and processes that will make future work difficult."
+  - name: acceptance_criteria_coverage
+    label: Acceptance-criteria coverage
+    level: content
+    kind: score
+    scale: "0-10"
+    prompt_hint: "The proportion of explicit acceptance criteria addressed by verifiable output evidence."
+  - name: dependency_validity
+    label: Dependency validity
+    level: content
+    kind: score
+    scale: "0-10"
+    prompt_hint: "Referenced libraries, files, interfaces and upstream artifacts exist and are compatible."
+  - name: determinism
+    label: Determinism
+    level: content
+    kind: score
+    scale: "0-10"
+    prompt_hint: "Repeated execution under the same declared inputs produces acceptably stable results."
+  - name: observability
+    label: Observability
+    level: content
+    kind: score
+    scale: "0-10"
+    prompt_hint: "The content provides sufficient logging, errors, metrics or trace points for diagnosis."
+  - name: reversibility
+    label: Reversibility
+    level: content
+    kind: score
+    scale: "0-10"
+    prompt_hint: "Changes can be rolled back without losing prior valid state or provenance."
+  - name: documentation_adequacy
+    label: Documentation adequacy
+    level: content
+    kind: score
+    scale: "0-10"
+    prompt_hint: "Required usage, configuration and maintenance information accompanies the artifact."
+  - name: performance_risk
+    label: Performance risk
+    level: content
+    kind: score
+    scale: "0-10"
+    prompt_hint: "The content introduces avoidable latency, memory, storage or compute costs."
+  - name: portability
+    label: Portability
+    level: content
+    kind: score
+    scale: "0-10"
+    prompt_hint: "The artifact avoids unjustified environment-specific assumptions."
+  - name: data_integrity_risk
+    label: Data integrity risk
+    level: content
+    kind: score
+    scale: "0-10"
+    prompt_hint: "The content may corrupt, silently discard or inconsistently transform governed data."
+  - name: privacy_risk
+    label: Privacy risk
+    level: content
+    kind: score
+    scale: "0-10"
+    prompt_hint: "The content exposes or mishandles personal, confidential or restricted information."
+  - name: licence_and_provenance_risk
+    label: Licence and provenance risk
+    level: content
+    kind: score
+    scale: "0-10"
+    prompt_hint: "Dependencies or incorporated material lack acceptable origin, licence or attribution evidence."

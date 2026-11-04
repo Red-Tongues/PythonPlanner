@@ -1,0 +1,56 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pythonplanner-orchestrator"
+dynamic = ["version"]
+description = "Python Orchestrator: governed kernel of an autonomous project/software-development stack"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "redtongues" }]
+dependencies = [
+    "pydantic>=2",
+    "pydantic-settings>=2",
+    "sqlalchemy>=2",
+    "typer>=0.12",
+    "python-docx>=1",
+    "pyyaml>=6",
+    "alembic>=1.13",
+]
+
+[project.optional-dependencies]
+postgres = ["psycopg[binary]>=3"]
+dev = ["pytest>=8", "pytest-cov", "ruff"]
+
+[project.scripts]
+orchestrator = "orchestrator.cli:app"
+
+[tool.hatch.version]
+path = "src/orchestrator/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/orchestrator"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra"
+markers = [
+    "postgres: runs only when ORCH_TEST_POSTGRES_URL points at a PostgreSQL database",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+# Frozen migration revisions carry literal SQL; long lines keep each statement greppable.
+"src/orchestrator/db/migrations/versions/*.py" = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["orchestrator"]
