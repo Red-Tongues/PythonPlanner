@@ -101,3 +101,16 @@ These take precedence over the text above where they conflict.
 - **Scheduling.** Tiered lazy gating; content-addressed reuse; all model-A passes, then all model-B passes; single-model concurrency by default; pace budgets (D14).
 - **Guards.** Stale writes are rejected by input hash. Superseded in-flight work never blocks the current version. Every override, waiver and state change is evented.
 - **Tests** (both dialects): edit during evaluation and just before claim; dispute deadlock → `needs_review` with no loop; waiver lapses on edit; FORCE cannot bypass hard gates; reserved fair admission under constant pinning; reuse only when the full content address matches; post-evaluation must pass before locking.
+
+## B10 — Consensus rulings and truth-table fixtures (D2, 2026-11-04)
+The eight PM rulings in `docs/reviews/D2_consensus_truth_table.md` are binding:
+- candidate confidence formulas;
+- NULL pass-skipping and completeness;
+- evidence scoped to the winning value;
+- per-tag pass contract and per-tag rows;
+- reported confidence on disputed/null/pending rows;
+- integer scores with `ROUND(conf, 4)` comparison;
+- strict version binding;
+- tier-3 fields and post-phase gating.
+
+Implement TC-01 to TC-52 as parametrised tests on both dialects. Derive the expected values from the rulings in code, rewrite the fractional-score cases as integer boundary cases, and flag any case where the code and the table disagree in `docs/PROGRESS.md`.
