@@ -294,7 +294,7 @@ A custom prompt (GUI or CLI) sets `control_state.paused`. No new channel runs st
 | Milestone | Content | Spec | Status |
 |---|---|---|---|
 | **M0** | Plan, agent guide and repo seeded | this document, `CLAUDE.md` | ✅ Done 2026-11-03 |
-| **M1** | Kernel foundation — packaging, contracts, field registry, schema with immutability triggers, lifecycle, deterministic ingestion, CLI, CI | `docs/milestones/M1_foundation.md` | ⏳ In progress |
+| **M1** | Kernel foundation — packaging, contracts, field registry, schema with immutability triggers, lifecycle, deterministic ingestion, CLI, CI | `docs/milestones/M1_foundation.md` | 🔍 Implemented incl. R0 amendments A1–A7; PR in review |
 | **M2** | Evaluation engine & SQL layer — providers, six-pass evaluator, consensus/statistics/threshold/priority views, branching, LLM extraction contract | `docs/milestones/M2_evaluation_engine.md` | Planned |
 | **M3** | Orchestration & interface — kernel loop, channels, workbench adapter, repo writer, SonarQube client, interruption, autonomy enforcement, GUI, demo | `docs/milestones/M3_orchestration_interface.md` | Planned |
 | **M4** | Hardening & v1.1 backlog | §15 out-of-scope list | Backlog |
@@ -370,6 +370,7 @@ No prices are quoted here; obtain current quotes before purchase.
 | Date | Event |
 |---|---|
 | 2026-11-03 | Plan v0.2 drafted from the CFO's draft; repository seeded (plan, agent guide, milestone specs, archived draft); M1 started with Claude Code. |
+| 2026-11-04 | M1 implemented by Claude Code (with R0 amendments A1–A7) on `claude/optimistic-allen-ts03d8`; tests green on SQLite and PostgreSQL 16; PR opened for review. |
 
 ---
 
