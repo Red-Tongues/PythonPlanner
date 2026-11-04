@@ -1,0 +1,520 @@
+"""Authoring reference for the M2 SQL layer (views on SQLite and PostgreSQL).
+
+Migration ``0005`` holds *frozen literal copies* of the statements generated here (R1 fix 4);
+``tests/test_sql_views.py`` asserts the installed views match this module exactly, so the two
+can never drift. To change a view: edit it here, then write a NEW revision with the literal text.
+
+Every dialect difference is a token in ``_DIALECT`` (golden rule 7); the view text is otherwise
+identical. Semantic contracts (columns, types, NULL semantics, ordering) are documented in
+``docs/ARCHITECTURE.md`` (B6). Decision-making logic lives here, in SQL; the pure Python oracle
+in ``orchestrator.evaluation.consensus`` must agree with it row for row (D5, parity tests).
+
+Numeric conventions (D2 ruling 6): confidences are ``ROUND(CAST(x AS NUMERIC), 4)`` and every
+comparison against a threshold uses the rounded value on both sides, so SQLite (REAL) and
+PostgreSQL (NUMERIC) decide identically. Booleans in view output are INTEGER 0/1.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class Dialect:
+    #: FROM-clause fragment exploding ``e.item_keys`` (a JSON array of strings) into ``k.value``
+    item_keys: str
+    #: hours between two timestamps: format with ``a`` (later) and ``b`` (earlier)
+    hours: str
+    #: comparable form of a timestamp expression
+    ts: str
+    #: newline character literal
+    newline: str
+
+
+_DIALECT: dict[str, Dialect] = {
+    "sqlite": Dialect(
+        item_keys="json_each(e.item_keys) AS k",
+        hours="((julianday({a}) - julianday({b})) * 24.0)",
+        ts="julianday({x})",
+        newline="char(10)",
+    ),
+    "postgresql": Dialect(
+        item_keys="json_array_elements_text(e.item_keys) AS k(value)",
+        hours="(EXTRACT(EPOCH FROM ({a} - {b})) / 3600.0)",
+        ts="{x}",
+        newline="chr(10)",
+    ),
+}
+
+#: views created by 0005, in dependency order
+VIEW_NAMES: tuple[str, ...] = (
+    "v_eva_progress",
+    "v_eva_item_consensus",
+    "v_field_consensus",
+    "v_field_status",
+    "v_packet_stats",
+    "v_branch_stats",
+    "v_branch_model_usage",
+    "v_branch_triggers",
+    "v_ready_candidates",
+    "v_queue",
+)
+
+
+def _setting(key: str, default: str) -> str:
+    return (
+        f"COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st "
+        f"WHERE st.key = '{key}'), {default})"
+    )
+
+
+def _r(expr: str) -> str:
+    return f"ROUND(CAST({expr} AS NUMERIC), 4)"
+
+
+# --------------------------------------------------------------------------- consensus
+
+
+def _eva_progress() -> str:
+    """Per evaPacket: which passes are done and whether every *applicable* pass is (ruling 2)."""
+    done = "".join(
+        f"  MAX(CASE WHEN ep.pass_no = {n} THEN 1 ELSE 0 END) AS done{n},\n" for n in range(1, 7)
+    )
+    return f"""CREATE VIEW v_eva_progress AS
+WITH base AS (
+  SELECT e.id AS eva_packet_id, e.packet_id, e.field_name, e.phase, e.state, e.created_at,
+         CASE WHEN d.kind = 'text' THEN 1 ELSE 0 END AS is_text,
+{done}  CASE WHEN EXISTS (SELECT 1 FROM evaluation_pass_items i WHERE i.eva_packet_id = e.id
+                     AND i.pass_no = 1) THEN 1 ELSE 0 END AS a_present,
+  CASE WHEN EXISTS (SELECT 1 FROM evaluation_pass_items i WHERE i.eva_packet_id = e.id
+                     AND i.pass_no = 2) THEN 1 ELSE 0 END AS b_present
+  FROM eva_packets e
+  JOIN candidate_field_definitions d ON d.name = e.field_name
+  LEFT JOIN evaluation_passes ep ON ep.eva_packet_id = e.id
+  GROUP BY e.id, e.packet_id, e.field_name, e.phase, e.state, e.created_at, d.kind
+)
+SELECT base.*,
+  CASE WHEN done1 = 1 AND done2 = 1
+        AND (a_present = 0 OR (done4 = 1 AND (is_text = 1 OR done5 = 1)))
+        AND (b_present = 0 OR (done3 = 1 AND (is_text = 1 OR done6 = 1)))
+       THEN 1 ELSE 0 END AS complete
+FROM base"""
+
+
+def _eva_item_consensus(d: Dialect) -> str:
+    """Per evaPacket × item: the B2/B10 decision table. Applies to every evaPacket (history too);
+    ``v_field_consensus`` selects the current one per packet × field × phase."""
+    joins = "".join(
+        f"  LEFT JOIN evaluation_pass_items i{n} ON i{n}.eva_packet_id = e.id "
+        f"AND i{n}.pass_no = {n} AND i{n}.item_key = k.value\n"
+        for n in range(1, 7)
+    )
+    cw, sw = _setting("aggregation.cross_weight", "0.6"), _setting("aggregation.self_weight", "0.4")
+    conf_a = (
+        f"CASE WHEN x.va IS NULL THEN NULL WHEN x.is_text = 1 THEN {_r('x.s4 / 10.0')} "
+        f"ELSE {_r(f'({cw} * x.s4 + {sw} * x.s5) / 10.0')} END"
+    )
+    conf_b = (
+        f"CASE WHEN x.vb IS NULL THEN NULL WHEN x.is_text = 1 THEN {_r('x.s3 / 10.0')} "
+        f"ELSE {_r(f'({cw} * x.s3 + {sw} * x.s6) / 10.0')} END"
+    )
+    agree_min = _r(_setting("consensus.agreement_min", "0.60"))
+    winner_min = _r(_setting("consensus.winner_min", "0.70"))
+    one_min = _r(_setting("consensus.one_sided_min", "0.70"))
+    margin = _r(_setting("aggregation.dispute_margin", "0.15"))
+    min_sup = _setting("consensus.min_supports", "1")
+    abs_diff = (
+        "CASE WHEN w.conf_a >= w.conf_b THEN w.conf_a - w.conf_b ELSE w.conf_b - w.conf_a END"
+    )
+    return f"""CREATE VIEW v_eva_item_consensus AS
+WITH x AS (
+  SELECT e.id AS eva_packet_id, e.packet_id, e.packet_version, e.cycle_id AS eval_cycle_id,
+         e.field_name, e.phase, e.created_at, d.kind,
+         CASE WHEN d.kind = 'text' THEN 1 ELSE 0 END AS is_text,
+         k.value AS item_key, pr.complete,
+         i1.value_norm AS va, i2.value_norm AS vb,
+         i3.score AS s3, i4.score AS s4, i5.score AS s5, i6.score AS s6,
+         COALESCE(i3.supports, 0) AS sup3, COALESCE(i4.supports, 0) AS sup4,
+         COALESCE(i5.supports, 0) AS sup5, COALESCE(i6.supports, 0) AS sup6,
+         COALESCE(i3.contradictions, 0) AS con3, COALESCE(i4.contradictions, 0) AS con4,
+         COALESCE(i5.contradictions, 0) AS con5, COALESCE(i6.contradictions, 0) AS con6,
+         COALESCE(i3.unverified, 0) AS unv3, COALESCE(i4.unverified, 0) AS unv4,
+         COALESCE(i5.unverified, 0) AS unv5, COALESCE(i6.unverified, 0) AS unv6
+  FROM eva_packets e
+  JOIN candidate_field_definitions d ON d.name = e.field_name
+  JOIN v_eva_progress pr ON pr.eva_packet_id = e.id
+  CROSS JOIN {d.item_keys}
+{joins}),
+c AS (
+  SELECT x.*, {conf_a} AS conf_a, {conf_b} AS conf_b FROM x
+),
+w AS (
+  SELECT c.*,
+    CASE WHEN c.va IS NULL AND c.vb IS NULL THEN 'both_null'
+         WHEN c.va IS NULL THEN 'b_only'
+         WHEN c.vb IS NULL THEN 'a_only'
+         WHEN c.va = c.vb THEN 'agree'
+         ELSE 'disagree' END AS shape,
+    CASE WHEN c.va IS NULL AND c.vb IS NULL THEN NULL
+         WHEN c.va IS NULL THEN 'b'
+         WHEN c.vb IS NULL THEN 'a'
+         WHEN c.va = c.vb THEN 'both'
+         WHEN c.conf_a > c.conf_b THEN 'a'
+         WHEN c.conf_b > c.conf_a THEN 'b'
+         ELSE NULL END AS winner
+  FROM c
+),
+v AS (
+  SELECT w.*,
+    CASE w.winner WHEN 'a' THEN w.sup4 + w.sup5 WHEN 'b' THEN w.sup3 + w.sup6
+         WHEN 'both' THEN w.sup3 + w.sup4 + w.sup5 + w.sup6 ELSE 0 END AS supports,
+    CASE w.winner WHEN 'a' THEN w.con4 + w.con5 WHEN 'b' THEN w.con3 + w.con6
+         WHEN 'both' THEN w.con3 + w.con4 + w.con5 + w.con6 ELSE 0 END AS contradictions,
+    CASE w.winner WHEN 'a' THEN w.unv4 + w.unv5 WHEN 'b' THEN w.unv3 + w.unv6
+         WHEN 'both' THEN w.unv3 + w.unv4 + w.unv5 + w.unv6 ELSE 0 END AS unverified,
+    CASE WHEN w.shape = 'agree' THEN {_r("(w.conf_a + w.conf_b) / 2.0")}
+         WHEN w.shape = 'a_only' THEN w.conf_a
+         WHEN w.shape = 'b_only' THEN w.conf_b
+         WHEN w.shape = 'disagree' THEN CASE WHEN w.conf_a >= w.conf_b THEN w.conf_a
+                                             ELSE w.conf_b END
+         ELSE NULL END AS raw_conf,
+    CASE WHEN w.shape = 'disagree' THEN {_r(abs_diff)}
+         ELSE NULL END AS margin
+  FROM w
+),
+s AS (
+  SELECT v.*,
+    CASE WHEN v.supports >= {min_sup} AND v.contradictions <= v.supports THEN 1 ELSE 0 END
+      AS evidence_ok
+  FROM v
+)
+SELECT s.eva_packet_id, s.packet_id, s.packet_version, s.eval_cycle_id, s.field_name, s.phase,
+       s.kind, s.item_key, s.complete, s.created_at,
+       s.va AS value_a, s.vb AS value_b, s.conf_a, s.conf_b,
+       CASE WHEN s.shape = 'agree' THEN 1 ELSE 0 END AS agreement,
+       CASE WHEN s.complete = 0 THEN 'pending'
+            WHEN s.shape = 'both_null' THEN 'null'
+            WHEN s.evidence_ok = 1 AND (
+                 (s.shape = 'agree' AND s.raw_conf >= {agree_min})
+              OR (s.shape IN ('a_only', 'b_only') AND s.raw_conf >= {one_min})
+              OR (s.shape = 'disagree' AND s.winner IS NOT NULL
+                  AND s.raw_conf >= {winner_min} AND s.margin >= {margin}))
+            THEN 'accepted'
+            ELSE 'disputed' END AS status,
+       CASE WHEN s.complete = 0 THEN NULL
+            WHEN s.shape = 'both_null' THEN 0
+            ELSE s.raw_conf END AS confidence,
+       CASE WHEN s.complete = 0 THEN 0 ELSE s.supports END AS supports,
+       CASE WHEN s.complete = 0 THEN 0 ELSE s.contradictions END AS contradictions,
+       CASE WHEN s.complete = 0 THEN 0 ELSE s.unverified END AS unverified,
+       CASE WHEN s.complete = 1 AND s.winner = 'a' THEN s.va
+            WHEN s.complete = 1 AND s.winner IN ('b', 'both') THEN s.vb
+            ELSE NULL END AS winning_value
+FROM s"""
+
+
+def _field_consensus() -> str:
+    """Current consensus per head packet × field × phase × item (strict binding, ruling 7).
+
+    Pre-phase results must target the packet's current ``input_hash``; post-phase results target
+    an output, whose exact hash the completion gate checks against the artifact (B9)."""
+    return """CREATE VIEW v_field_consensus AS
+WITH cand AS (
+  SELECT e.id, e.packet_id, e.field_name, e.phase,
+         ROW_NUMBER() OVER (PARTITION BY e.packet_id, e.field_name, e.phase
+                            ORDER BY pr.complete DESC, e.escalation DESC, e.created_at DESC,
+                                     e.id DESC) AS rn
+  FROM eva_packets e
+  JOIN packets p ON p.id = e.packet_id
+  JOIN v_eva_progress pr ON pr.eva_packet_id = e.id
+  WHERE e.packet_version = p.version
+    AND (e.phase = 'post' OR e.target_hash = p.input_hash)
+    AND e.state <> 'superseded'
+    AND NOT EXISTS (SELECT 1 FROM packets s WHERE s.supersedes_id = p.id)
+)
+SELECT p.id AS packet_id, p.ref AS packet_ref, p.version AS packet_version,
+       c.field_name, c.phase, c.item_key, c.kind,
+       c.value_a, c.value_b, c.conf_a, c.conf_b, c.confidence, c.agreement, c.status,
+       CASE WHEN c.status = 'accepted' THEN c.winning_value ELSE NULL END AS final_value,
+       c.supports, c.contradictions, c.unverified, c.eva_packet_id, c.eval_cycle_id
+FROM cand
+JOIN packets p ON p.id = cand.packet_id
+JOIN v_eva_item_consensus c ON c.eva_packet_id = cand.id
+WHERE cand.rn = 1"""
+
+
+def _field_status() -> str:
+    """Field-level roll-up of ``v_field_consensus`` (a tag set is as weak as its weakest tag)."""
+    return """CREATE VIEW v_field_status AS
+SELECT c.packet_id, c.packet_ref, c.packet_version, c.field_name, c.phase, c.kind,
+       CASE WHEN SUM(CASE WHEN c.status = 'pending' THEN 1 ELSE 0 END) > 0 THEN 'pending'
+            WHEN SUM(CASE WHEN c.status = 'disputed' THEN 1 ELSE 0 END) > 0 THEN 'disputed'
+            WHEN SUM(CASE WHEN c.status = 'accepted' THEN 1 ELSE 0 END) = 0 THEN 'null'
+            ELSE 'accepted' END AS status,
+       COUNT(*) AS items,
+       SUM(CASE WHEN c.status = 'accepted' THEN 1 ELSE 0 END) AS accepted_items,
+       SUM(CASE WHEN c.status = 'disputed' THEN 1 ELSE 0 END) AS disputed_items,
+       MIN(c.confidence) AS min_confidence,
+       MAX(c.eva_packet_id) AS eva_packet_id
+FROM v_field_consensus c
+GROUP BY c.packet_id, c.packet_ref, c.packet_version, c.field_name, c.phase, c.kind"""
+
+
+# --------------------------------------------------------------------------- statistics
+
+
+def _packet_stats(d: Dialect) -> str:
+    text_expr = f"TRIM(REPLACE(p.prompt_description, {d.newline}, ' '))"
+    hours = d.hours.format(a="COALESCE(p.completed_at, CURRENT_TIMESTAMP)", b="p.created_at")
+    threshold = _setting("stats.score_threshold", "7")
+    return f"""CREATE VIEW v_packet_stats AS
+SELECT p.id AS packet_id, p.ref AS packet_ref, p.version AS packet_version,
+       CASE WHEN {text_expr} = '' THEN 0
+            ELSE LENGTH({text_expr}) - LENGTH(REPLACE({text_expr}, ' ', '')) + 1 END
+         AS prompt_word_count,
+       (SELECT COUNT(*) FROM eva_packets e WHERE e.packet_id = p.id) AS evaluation_runs,
+       (SELECT COUNT(*) FROM channel_runs r WHERE r.packet_id = p.id
+          AND r.channel = 'quickfire_evaluation') AS evaluation_attempts,
+       COALESCE((SELECT SUM(ep.latency_ms) FROM evaluation_passes ep
+                 WHERE ep.packet_id = p.id), 0) AS evaluation_ms,
+       {hours} AS lifecycle_hours,
+       (SELECT COUNT(*) FROM v_field_consensus c WHERE c.packet_id = p.id AND c.kind = 'score'
+          AND c.status = 'accepted' AND CAST(c.final_value AS NUMERIC) >= {threshold})
+         AS scores_above_threshold,
+       COALESCE((SELECT SUM(i.supports + i.contradictions) FROM evaluation_pass_items i
+                 JOIN eva_packets e ON e.id = i.eva_packet_id
+                 WHERE e.packet_id = p.id), 0) AS evidence_items,
+       0 AS generation_ms
+FROM packets p"""
+
+
+def _branch_stats() -> str:
+    """Federated statistics for each trunk (a root packet lineage with descendants)."""
+    return """CREATE VIEW v_branch_stats AS
+WITH fed AS (
+  SELECT r.ref AS root_ref, m.id AS member_id, m.ref AS member_ref
+  FROM packets r
+  JOIN packets m ON m.root_id = r.id OR m.id = r.id
+  WHERE r.root_id IS NULL OR r.root_id = r.id
+),
+scores AS (
+  SELECT fed.root_ref, CAST(c.final_value AS NUMERIC) AS v
+  FROM fed JOIN v_field_consensus c ON c.packet_id = fed.member_id
+  WHERE c.kind = 'score' AND c.status = 'accepted'
+)
+SELECT fed.root_ref,
+       (SELECT MIN(p.created_at) FROM packets p WHERE p.ref = fed.root_ref) AS created_at,
+       COUNT(DISTINCT CASE WHEN fed.member_ref <> fed.root_ref THEN fed.member_ref END)
+         AS descendant_count,
+       (SELECT AVG(s.v * s.v) - AVG(s.v) * AVG(s.v) FROM scores s
+         WHERE s.root_ref = fed.root_ref) AS score_variance,
+       COUNT(DISTINCT fed.member_id) - COUNT(DISTINCT fed.member_ref) AS revision_count,
+       (SELECT COUNT(*) FROM channel_runs r JOIN fed f2 ON f2.member_id = r.packet_id
+         WHERE f2.root_ref = fed.root_ref AND r.status IN ('failed', 'invalid')) AS failed_runs,
+       (SELECT COALESCE(SUM(i.contradictions), 0) FROM evaluation_pass_items i
+          JOIN eva_packets e ON e.id = i.eva_packet_id
+          JOIN fed f3 ON f3.member_id = e.packet_id
+         WHERE f3.root_ref = fed.root_ref) AS contradiction_count,
+       (SELECT COUNT(DISTINCT ep.model) FROM evaluation_passes ep
+          JOIN fed f4 ON f4.member_id = ep.packet_id
+         WHERE f4.root_ref = fed.root_ref) AS distinct_models
+FROM fed
+GROUP BY fed.root_ref
+HAVING COUNT(DISTINCT CASE WHEN fed.member_ref <> fed.root_ref THEN fed.member_ref END) > 0"""
+
+
+def _branch_model_usage() -> str:
+    return """CREATE VIEW v_branch_model_usage AS
+SELECT r.ref AS root_ref, ep.model, COUNT(*) AS passes
+FROM packets r
+JOIN packets m ON m.root_id = r.id OR m.id = r.id
+JOIN evaluation_passes ep ON ep.packet_id = m.id
+WHERE r.root_id IS NULL OR r.root_id = r.id
+GROUP BY r.ref, ep.model"""
+
+
+# --------------------------------------------------------------------------- triggers
+
+
+def _branch_triggers() -> str:
+    """Enabled ``thresholds`` rules that fire on a head packet's current pre-phase consensus."""
+    numeric = "CAST(c.final_value AS NUMERIC)"
+    rule = "CAST(t.value AS NUMERIC)"
+    return f"""CREATE VIEW v_branch_triggers AS
+SELECT c.packet_id, c.packet_ref, c.packet_version,
+       t.id AS threshold_id, t.name AS threshold_name, t.version AS threshold_version,
+       t.action, t.precedence, COUNT(*) AS matched_items, MIN(c.field_name) AS field_name
+FROM v_field_consensus c
+JOIN thresholds t ON t.enabled
+  AND (t.field_name = c.field_name
+       OR (t.field_name = '@key_fields' AND c.field_name IN
+           (SELECT d.name FROM candidate_field_definitions d WHERE d.is_key_field)))
+WHERE c.phase = 'pre' AND (
+     (t.operator = 'status_is' AND c.status = t.value)
+  OR (t.operator = 'has_tag' AND c.kind = 'tagset' AND c.status = 'accepted'
+      AND c.item_key = t.value AND c.final_value = 'on')
+  OR (c.kind = 'score' AND c.status = 'accepted' AND (
+         (t.operator = '>=' AND {numeric} >= {rule}) OR (t.operator = '>' AND {numeric} > {rule})
+      OR (t.operator = '<=' AND {numeric} <= {rule}) OR (t.operator = '<' AND {numeric} < {rule})
+      OR (t.operator = '=' AND {numeric} = {rule}) OR (t.operator = '!=' AND {numeric} <> {rule})))
+  OR (c.kind IN ('bool', 'text') AND c.status = 'accepted' AND (
+         (t.operator = '=' AND c.final_value = t.value)
+      OR (t.operator = '!=' AND c.final_value <> t.value))))
+GROUP BY c.packet_id, c.packet_ref, c.packet_version, t.id, t.name, t.version, t.action,
+         t.precedence"""
+
+
+# --------------------------------------------------------------------------- readiness, queue
+
+
+def _ready_candidates() -> str:
+    """Explanatory only (D1 point 4): the authoritative readiness rule is the pure Python
+    predicate ``orchestrator.evaluation.readiness``, re-checked at admission and claim."""
+    return """CREATE VIEW v_ready_candidates AS
+WITH req AS (
+  SELECT ps.field_name, ps.phase, ps.tier, ps.hard
+  FROM eva_presets ps
+  WHERE ps.enabled AND ps.required AND ps.tier IN (1, 2)
+    AND ps.revision = (SELECT MAX(p2.revision) FROM eva_presets p2
+                       WHERE p2.field_name = ps.field_name AND p2.phase = ps.phase)
+),
+heads AS (
+  SELECT p.* FROM packets p
+  WHERE NOT EXISTS (SELECT 1 FROM packets s WHERE s.supersedes_id = p.id)
+    AND NOT p.locked
+)
+SELECT h.id AS packet_id, h.ref AS packet_ref, h.version AS packet_version, h.status,
+       COUNT(req.field_name) AS required_fields,
+       SUM(CASE WHEN fs.status = 'accepted' THEN 1 ELSE 0 END) AS accepted,
+       SUM(CASE WHEN fs.status = 'disputed' THEN 1 ELSE 0 END) AS disputed,
+       SUM(CASE WHEN fs.status = 'null' THEN 1 ELSE 0 END) AS null_fields,
+       SUM(CASE WHEN fs.status = 'pending' THEN 1 ELSE 0 END) AS pending,
+       SUM(CASE WHEN fs.status IS NULL THEN 1 ELSE 0 END) AS missing,
+       (SELECT COUNT(*) FROM waivers wv WHERE wv.packet_id = h.id
+          AND wv.target_version = h.version
+          AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'waiver'
+                          AND rv.target_id = wv.id)) AS active_waivers,
+       (SELECT COUNT(*) FROM packet_dependencies dep
+          JOIN packets dp ON dp.id = dep.depends_on_id
+         WHERE dep.packet_id = h.id
+           AND NOT EXISTS (SELECT 1 FROM packets dh WHERE dh.ref = dp.ref
+                           AND dh.status = 'completed')) AS unmet_dependencies,
+       (SELECT COUNT(*) FROM confirmations cf WHERE cf.entity_id = h.id
+          AND cf.status = 'pending') AS pending_approvals
+FROM heads h
+CROSS JOIN req
+LEFT JOIN v_field_status fs ON fs.packet_id = h.id AND fs.field_name = req.field_name
+  AND fs.phase = req.phase
+WHERE req.phase = 'pre'
+GROUP BY h.id, h.ref, h.version, h.status"""
+
+
+def queue_select(dialect: str, now: str) -> str:
+    """The ``v_queue`` query with ``now`` as an SQL expression (``CURRENT_TIMESTAMP`` in the view,
+    a bound ``:now`` in ``orchestrator.sql.queries.queue_rows`` for simulated time)."""
+    d = _DIALECT[dialect]
+    age = d.hours.format(a=now, b="p.created_at")
+    now_ts = d.ts.format(x=now)
+    max_age = _setting("priority.max_age_hours", "72")
+    budget = _setting("queue.failure_budget", "3")
+    backoff_h = f"({_setting('queue.retry_backoff_minutes', '30')} / 60.0)"
+    last_fail_age = d.hours.format(a=now, b="x.last_failure_at")
+    active = (
+        "NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'override' "
+        "AND rv.target_id = o.id) AND (o.scope = 'lineage' OR o.target_version = p.version)"
+    )
+    w = {
+        k: _setting(f"priority.w_{k}", v)
+        for k, v in (
+            ("objective", "0.30"),
+            ("age", "0.25"),
+            ("ambiguity", "0.15"),
+            ("boost", "0.20"),
+            ("failures", "0.10"),
+        )
+    }
+    return f"""WITH x AS (
+  SELECT p.id AS packet_id, p.ref AS packet_ref, p.version AS packet_version, p.status,
+         p.created_at, p.claimed_by, p.lease_expires_at,
+         COALESCE(o.priority_level, 5) AS objective_priority,
+         COALESCE((SELECT CAST(c.final_value AS NUMERIC) FROM v_field_consensus c
+                   WHERE c.packet_id = p.id AND c.field_name = 'ambiguity_quotient'
+                     AND c.phase = 'pre' AND c.status = 'accepted'), 5) AS ambiguity,
+         CASE WHEN p.manual_boost < 0 THEN 0 WHEN p.manual_boost > 10 THEN 10
+              ELSE p.manual_boost END AS boost,
+         (SELECT COUNT(*) FROM channel_runs r WHERE r.packet_id = p.id AND r.status = 'failed'
+            AND r.channel IN ('local_generation', 'workbench_production')) AS failed_runs,
+         (SELECT MAX(r.finished_at) FROM channel_runs r WHERE r.packet_id = p.id
+            AND r.status = 'failed'
+            AND r.channel IN ('local_generation', 'workbench_production')) AS last_failure_at,
+         {age} AS age_hours,
+         (SELECT MIN(CASE o.kind WHEN 'block' THEN 1 WHEN 'hold' THEN 2 WHEN 'force' THEN 3
+                                 WHEN 'pin' THEN 4 ELSE 5 END)
+            FROM queue_overrides o WHERE o.packet_ref = p.ref AND {active}) AS override_rank,
+         COALESCE((SELECT SUM(o.value) FROM queue_overrides o WHERE o.packet_ref = p.ref
+                     AND o.kind = 'reorder' AND {active}), 0) AS reorder_delta,
+         (SELECT COUNT(*) FROM confirmations cf WHERE cf.entity_id = p.id
+            AND cf.status = 'pending') AS pending_approvals
+  FROM packets p
+  LEFT JOIN objectives o ON o.id = p.objective_id
+  WHERE p.status IN ('ready', 'queued')
+    AND NOT EXISTS (SELECT 1 FROM packets s WHERE s.supersedes_id = p.id)
+),
+y AS (
+  SELECT x.*,
+    CASE WHEN x.override_rank = 1 THEN 'blocked'
+         WHEN x.override_rank = 2 THEN 'held'
+         WHEN x.pending_approvals > 0 THEN 'awaiting_approval'
+         WHEN x.failed_runs >= {budget} THEN 'failure_budget'
+         WHEN x.last_failure_at IS NOT NULL AND {last_fail_age} < {backoff_h} THEN 'backoff'
+         WHEN x.claimed_by IS NOT NULL AND x.lease_expires_at IS NOT NULL
+              AND {d.ts.format(x="x.lease_expires_at")} > {now_ts} THEN 'claimed'
+         ELSE NULL END AS ineligible_reason,
+    CASE WHEN x.override_rank = 3 THEN 1
+         WHEN x.override_rank = 4 THEN 2
+         WHEN x.age_hours >= {_setting("queue.max_wait_hours", "48")} THEN 3
+         ELSE 4 END AS queue_class,
+    ROUND(CAST(
+        {w["objective"]} * x.objective_priority / 10.0
+      + {w["age"]} * (CASE WHEN x.age_hours < 0 THEN 0
+                           WHEN x.age_hours > {max_age} THEN {max_age}
+                           ELSE x.age_hours END) / {max_age}
+      + {w["ambiguity"]} * (10 - x.ambiguity) / 10.0
+      + {w["boost"]} * x.boost / 10.0
+      - {w["failures"]} * (CASE WHEN x.failed_runs > {budget} THEN {budget}
+                                ELSE x.failed_runs END) / {budget}
+      + x.reorder_delta AS NUMERIC), 6) AS priority
+  FROM x
+)
+SELECT y.packet_id, y.packet_ref, y.packet_version, y.status, y.created_at,
+       CASE WHEN y.ineligible_reason IS NULL THEN 1 ELSE 0 END AS eligible,
+       y.ineligible_reason, y.queue_class, y.priority, y.age_hours, y.failed_runs,
+       CASE WHEN y.ineligible_reason IS NULL THEN ROW_NUMBER() OVER (
+              PARTITION BY CASE WHEN y.ineligible_reason IS NULL THEN 0 ELSE 1 END
+              ORDER BY y.queue_class, y.priority DESC, y.created_at, y.packet_ref)
+            ELSE NULL END AS position
+FROM y"""
+
+
+def _queue(dialect: str) -> str:
+    return "CREATE VIEW v_queue AS\n" + queue_select(dialect, "CURRENT_TIMESTAMP")
+
+
+# --------------------------------------------------------------------------- entry points
+
+
+def view_statements(dialect: str) -> list[str]:
+    """``CREATE VIEW`` statements in dependency order."""
+    d = _DIALECT[dialect]
+    return [
+        _eva_progress(),
+        _eva_item_consensus(d),
+        _field_consensus(),
+        _field_status(),
+        _packet_stats(d),
+        _branch_stats(),
+        _branch_model_usage(),
+        _branch_triggers(),
+        _ready_candidates(),
+        _queue(dialect),
+    ]
