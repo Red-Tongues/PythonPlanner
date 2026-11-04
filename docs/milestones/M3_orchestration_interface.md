@@ -159,15 +159,17 @@ These take precedence over the text above where they conflict.
 - **C23 Packet states** [GA2, MA3, GC3]. The genPacket state set is C11's plus `waiting_for_children`, `awaiting_confirmation` and `closed_unverified`.
   - `closed_unverified` is terminal, **locked** and non-success, and only a user can set it (as implemented in M2.1). It is excluded from the queue, never counts as `completed`, and never satisfies a dependency.
   - The CLI and the GUI's "Close unverified" action require a reason.
-  - Publish separate **packet** and **run** transition tables in `docs/ARCHITECTURE.md`; tests assert that every transition not in the tables is rejected.
+  - Start from the reviewed design reference `docs/reviews/D8_state_machines.md` (list any deviation in the PR with its reason). Publish separate **packet** and **run** transition tables in `docs/ARCHITECTURE.md`; tests assert that every transition not in the tables is rejected.
   - GUI and digest give `closed_unverified`, `awaiting_confirmation` and `blocked:<reason>` distinct badges.
 - **C24 Run tables** [GA3].
   - Each generation dispatch creates one `generation_runs` row. It owns the C1 run state machine, the lease, the fencing token (C26) and the frozen snapshot, including `gate_revision`.
   - Each attempt appends one row to `channel_runs` (append-only, linked by `generation_run_id`); Quickfire Evaluation attempts link `eva_packet_id`.
   - Console IDs are `#<QE|LG|WP><channel_runs id>`.
+  - `accepted` is final only once the write and commit are recorded. Before that, a fencing or gate change, a moved HEAD or a `modifies` base mismatch makes it `stale` (D8 R4).
 - **C25 Governance atomicity** [GA4, MA2, GC2].
   - **Writers.** Every governance write increments the `gate_revision` of every non-terminal packet in its scope, in the same transaction. Governance writes are: dependency additions and revocations, override and waiver additions and revocations, holds, branch kill, confirmation decisions, autonomy-scope or threshold changes, budget top-ups and interrupt supersession, whether made from the GUI, the CLI or the digest. Scope means the packet itself or all packets under the branch, objective or project.
   - **Admission and claim.** Both recompute the context fingerprint from the current packet, project and objective heads (M2.1 #1). The claim's guarded UPDATE checks status, version, input hash, `gate_revision` and lease. The snapshot is written in the same transaction.
+  - **Approvals of a specific run (D8 R1).** An approval aimed at a parked or awaiting run checks `run.gate_revision == packet.gate_revision`, then increments both in the same transaction, so the approval doesn't invalidate the run it approves. Any other governance write still makes the run stale.
   - **Kernel error handling (M2.1 rulings 4–5).** On a context-mismatch error at claim, the kernel *commits* (so the packet's return to `evaluating_pre` persists); it never rolls back. On SQLite a database-lock error during admission or claim is treated as a lost claim and retried on the next tick.
   - **Run completion.** It re-checks fingerprint and gate revision. On mismatch only the completing run becomes `stale`, with an event. The packet returns to `evaluating_pre` only if that run still owns the current packet version, the packet is non-terminal, and no hold, block, pause or `awaiting_confirmation` applies; otherwise the packet's current state and restrictions are kept. A stale run never changes a terminal packet or a superseding version.
 - **C26 Fencing and exclusivity** [MA8, GA16 partial].
@@ -195,7 +197,7 @@ These take precedence over the text above where they conflict.
   4. **Completion.** It requires a complete, accepted evaluation for every required post field for *that* manifest hash, plus the quality policy below. Evidence for a different manifest or commit (branch advanced, merge changed bytes, late scan of an old SHA) is stale and is rescheduled. A failed post-evaluation → `needs_review`.
   - **Quality policy:** the per-project setting `quality_scan` = `off` | `optional` (default) | `required`.
     - `off`: no scan is requested; it is recorded as `skipped` with an event and the packet shows as "unscanned". Scanning never blocks completion.
-    - `optional`: a missing scanner or a scanner error is recorded as `skipped` and shown as "unscanned", and does not block completion. A returned gate `ERROR` raises a confirmation and blocks completion until it is decided.
+    - `optional`: a missing scanner or a scanner error is recorded as `skipped` and shown as "unscanned", and does not block completion. A returned gate `ERROR` raises a confirmation and blocks completion until it is decided; rejecting it → `held` with the reason (D8 R3).
     - `required`: a missing scanner or a scanner error blocks completion; gate `ERROR` → `needs_review` plus a confirmation.
     - Hard constraints are never waivable.
 - **C31 Executing generated code** [MA7, GA12 amended; defer 5].
@@ -212,7 +214,7 @@ These take precedence over the text above where they conflict.
   - **Responses.**
     - Hard caps (pace budgets, packets per objective per day, fan-out) refuse the *first* excess action.
     - Post-generation alignment < 7,500 holds the branch immediately and raises a confirmation.
-    - Three distinct failed validation attempts on a channel within the preceding 2 h pause that channel and raise a confirmation.
+    - Three *generation runs* on a channel that ended `failed` on validation within the preceding 2 h pause that channel and raise a confirmation. Count runs, not attempts: one packet using up its own retries must not pause the channel (D8 R2).
     - Pre-generation ambiguity > 4,000 sends the packet to `needs_review`.
     - 48 h with no human touch makes new dispatches in that objective require confirmation. A human touch is an owner decision or edit only, never automated events or polling.
   - **Scope states.** A scope's persisted status is `normal` or `paused`; a pause clears only on explicit owner resume. "Off-hours throttling" is a derived display condition (the off-hours multiplier is active). It is not a status and never clears a pause. Manual holds and failure-budget parking never clear automatically.
