@@ -8,7 +8,7 @@ Newest entries first. Every agent session appends an entry: what changed, decisi
 
 Branch `claude/elegant-davinci-hcny5t`, draft PR [redtongues/PythonPlanner#3](https://github.com/redtongues/PythonPlanner/pull/3). `main` was merged in three times during the session (D8 errata E1–E11; D9 with ruling D9-R1; D10 with rulings Q1–Q16), all docs only. PM-owned docs were not edited (see the ruff note below). Stage A stops here for the PM checkpoint; no channels, kernel loop, GUI or integrations yet.
 
-**Suite:** __TESTS__ on SQLite plus PostgreSQL 16 locally (Python 3.13). Ruff check and format are clean; the CI CLI smoke chain runs.
+**Suite:** 560 passed and 4 skipped (564 items: 346 SQLite, 218 PostgreSQL) on SQLite plus PostgreSQL 16 locally (Python 3.13), up from 410 + 4 at the start of the session. The 4 skips are the existing dialect-specific tests. The race tests passed 3× on PostgreSQL and 5× on SQLite. Ruff check and format are clean; the CI CLI smoke chain runs.
 
 ### What was built
 | Piece | Where | Tests |
