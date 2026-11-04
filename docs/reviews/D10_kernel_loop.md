@@ -59,12 +59,16 @@ The initial generation attempt reuses the claim's reservation; retries and resum
 ## 3. Channel adapter protocol
 ```python
 class ChannelAdapter(Protocol):
-    def available(self) -> tuple[bool, str | None]: ...        # local check, no model call
-    def start(self, req: AttemptRequest) -> Observation: ...    # returns promptly
+    def available(self) -> tuple[bool, str | None]: ...  # local check, no model call
+    def start(self, req: AttemptRequest) -> Observation: ...  # returns promptly
     def resume(self, req: AttemptRequest, ident: ResumeIdentity) -> Observation: ...
-    def poll(self, operation_id: str) -> Observation: ...      # never blocks
-    def recover(self, req: AttemptRequest) -> Observation: ...  # inspect evidence; never blindly re-run
-    def cancel(self, operation_id: str) -> Observation: ...    # best-effort cleanup only
+    def poll(self, operation_id: str) -> Observation: ...  # never blocks
+    def recover(
+        self, req: AttemptRequest
+    ) -> Observation: ...  # inspect evidence; never blindly re-run
+    def cancel(self, operation_id: str) -> Observation: ...  # best-effort cleanup only
+
+
 # AttemptRequest: operation_id, channel, owner_id, attempt_number, request_hash, payload, deadline_at,
 #                 configuration_revision, resume_identity
 # Observation = Receipt(exit_code, output, reported_model, resume_identity, tokens…) | Pending | Unknown(reason)

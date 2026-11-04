@@ -34,6 +34,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from orchestrator.contracts import (
     DEFAULT_RESPONSE_STRUCTURE,
+    AttemptOutcome,
     AutonomyMode,
     Channel,
     ConfirmationStatus,
@@ -50,6 +51,8 @@ from orchestrator.contracts import (
     PacketStatus,
     PassPlanName,
     RunStatus,
+    ScopeStatus,
+    ScopeType,
     Stage,
     ThresholdAction,
     ThresholdOperator,
@@ -219,6 +222,11 @@ class Packet(Base):
     #: M2.1 fix 2: bumped by every governance write that can change readiness (waivers,
     #: overrides, revocations, dependencies, approvals); admission and claim compare-and-set it.
     gate_revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    #: M3 C26: incremented by every claim; result acceptance and publication reject a run whose
+    #: token is not the packet's current one
+    fencing_token: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    #: M3 E7: the generation run that currently owns this packet version (NULL when none)
+    active_run_id: Mapped[str | None] = mapped_column(String(36))
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = _updated()
 
@@ -321,9 +329,16 @@ class Setting(Base):
 
 
 class ChannelRun(Base):
-    """One Run-ID contract: an attempt to obtain a valid output from a channel."""
+    """One Run-ID contract: an attempt to obtain a valid output from a channel.
+
+    **Append-only** since M3 (C24, DB-enforced): one row per attempt, written before the
+    attempt's external effect for generation runs; the outcome is a ``ChannelRunOutcome``."""
 
     __tablename__ = "channel_runs"
+    __table_args__ = (
+        # a unique index (not a constraint) so 0007 can add it to the existing table on SQLite
+        Index("uq_channel_runs_operation_id", "operation_id", unique=True),
+    )
 
     id: Mapped[str] = _id()
     run_id: Mapped[str] = mapped_column(String(32), unique=True, nullable=False)
@@ -348,6 +363,36 @@ class ChannelRun(Base):
     finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = _updated()
+    # M3 (C24, C26): the generation run (LG/WP) or evaPacket (QE) this attempt belongs to, its
+    # durable operation ID (recovery recognises an effect that already happened) and the
+    # fencing token it was dispatched under
+    generation_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("generation_runs.id"), index=True
+    )
+    eva_packet_id: Mapped[str | None] = mapped_column(ForeignKey("eva_packets.id"), index=True)
+    operation_id: Mapped[str | None] = mapped_column(String(64))
+    fencing_token: Mapped[int | None] = mapped_column(Integer)
+
+
+class ChannelRunOutcome(Base):
+    """How one attempt ended (C27), recorded exactly once per attempt. **Append-only**."""
+
+    __tablename__ = "channel_run_outcomes"
+
+    id: Mapped[str] = _id()
+    channel_run_id: Mapped[str] = mapped_column(
+        ForeignKey("channel_runs.id"), unique=True, nullable=False
+    )
+    generation_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("generation_runs.id"), index=True
+    )
+    outcome: Mapped[AttemptOutcome] = mapped_column(enum_type(AttemptOutcome), nullable=False)
+    exit_code: Mapped[int | None] = mapped_column(Integer)
+    error: Mapped[str | None] = mapped_column(Text)
+    output_hash: Mapped[str | None] = mapped_column(String(64))
+    tokens_used: Mapped[int | None] = mapped_column(Integer)  # NULL = unknown (C36)
+    latency_ms: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = _created()
 
 
 class Artifact(Base):
@@ -684,9 +729,13 @@ class PacketDependency(Base):
 
 
 class GenerationRun(Base):
-    """One claim of a genPacket for generation, with the frozen evaluation snapshot it ran with.
+    """One generation dispatch of a genPacket version (C24): owns the run state machine
+    (``orchestrator.transitions``), the lease, the fencing token and the frozen snapshot.
 
-    ``evaluation_snapshot`` can never change after insert (DB-enforced)."""
+    DB-enforced (0005, 0007): the snapshot, binding columns and fencing token never change; the
+    gate revision only moves by +1 (R1); manifest hash and commit SHA are write-once; a terminal
+    run, or an accepted run whose commit is recorded, never changes; state changes follow the
+    run table."""
 
     __tablename__ = "generation_runs"
 
@@ -695,13 +744,38 @@ class GenerationRun(Base):
     packet_version: Mapped[int] = mapped_column(Integer, nullable=False)
     input_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     claimed_by: Mapped[str] = mapped_column(String(64), nullable=False)
-    channel_run_id: Mapped[str | None] = mapped_column(ForeignKey("channel_runs.id"))
+    #: M2 column (unused since M3: attempts point at their run). ``use_alter`` breaks the FK
+    #: cycle with ``channel_runs.generation_run_id`` so schema comparison still checks both.
+    channel_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("channel_runs.id", use_alter=True)
+    )
     state: Mapped[GenerationRunState] = mapped_column(
-        enum_type(GenerationRunState), default=GenerationRunState.CLAIMED, nullable=False
+        enum_type(GenerationRunState), default=GenerationRunState.PLANNED, nullable=False
     )
     evaluation_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = _updated()
+    # M3 (C24, C26, C27, C29, C30, C32). Legacy M2 rows have NULL fencing token and channel.
+    channel: Mapped[Channel | None] = mapped_column(enum_type(Channel))
+    fencing_token: Mapped[int | None] = mapped_column(Integer)
+    gate_revision: Mapped[int | None] = mapped_column(Integer)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    heartbeat_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    max_attempts: Mapped[int | None] = mapped_column(Integer)
+    deadline_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    #: stable conversation / resume identity (exit 3 resumes the same conversation, C27)
+    resume_key: Mapped[str | None] = mapped_column(String(128))
+    model_identity: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    model_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    manifest_hash: Mapped[str | None] = mapped_column(String(64))
+    commit_sha: Mapped[str | None] = mapped_column(String(64))
+    expected_head: Mapped[str | None] = mapped_column(String(64))
+    failure_kind: Mapped[str | None] = mapped_column(String(32))
+    #: True once this run's failure was added to the packet's lifetime failure budget
+    charged: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    stale_reason: Mapped[str | None] = mapped_column(Text)
+    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
 
 class QueueAdmission(Base):
@@ -730,6 +804,130 @@ class BranchApplication(Base):
     threshold_id: Mapped[str] = mapped_column(ForeignKey("thresholds.id"), nullable=False)
     threshold_version: Mapped[int] = mapped_column(Integer, nullable=False)
     children: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    created_at: Mapped[datetime] = _created()
+
+
+# --------------------------------------------------------------------------- M3: control layer
+
+
+class KernelLease(Base):
+    """The single-kernel lock (C26): a lease row taken by conditional UPDATE. ``epoch`` grows on
+    every acquisition, so an old owner is fenced out of every later guarded write."""
+
+    __tablename__ = "kernel_leases"
+
+    name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    holder: Mapped[str | None] = mapped_column(String(64))
+    epoch: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    acquired_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    heartbeat_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    lease_expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    updated_at: Mapped[datetime] = _updated()
+
+
+class GovernorState(Base):
+    """Persisted status of one governance scope (C26, C33): ``normal`` or ``paused``. A pause
+    clears only on an explicit owner resume. ``revision`` grows with every change and with
+    every dispatch authorised in the scope, which serialises dispatch with pause."""
+
+    __tablename__ = "governor_states"
+    __table_args__ = (UniqueConstraint("scope_type", "scope_id"),)
+
+    id: Mapped[str] = _id()
+    scope_type: Mapped[ScopeType] = mapped_column(enum_type(ScopeType), nullable=False)
+    scope_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[ScopeStatus] = mapped_column(
+        enum_type(ScopeStatus), default=ScopeStatus.NORMAL, nullable=False
+    )
+    reason: Mapped[str | None] = mapped_column(Text)
+    revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    changed_by: Mapped[str | None] = mapped_column(String(64))
+    last_human_touch_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    created_at: Mapped[datetime] = _created()
+    updated_at: Mapped[datetime] = _updated()
+
+
+class GovernorEvent(Base):
+    """Every governor observation and action (C33). **Append-only**; ``observation_key`` makes
+    each observation count once."""
+
+    __tablename__ = "governor_events"
+
+    id: Mapped[str] = _id()
+    scope_type: Mapped[ScopeType] = mapped_column(enum_type(ScopeType), nullable=False)
+    scope_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    signal: Mapped[str] = mapped_column(String(64), nullable=False)
+    observed: Mapped[str] = mapped_column(String(16), nullable=False)  # breach|clean|unknown|…
+    value_e4: Mapped[int | None] = mapped_column(Integer)
+    threshold_e4: Mapped[int | None] = mapped_column(Integer)
+    action: Mapped[str] = mapped_column(String(64), nullable=False)
+    observation_key: Mapped[str | None] = mapped_column(String(160), unique=True)
+    details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = _created()
+
+
+class BudgetCounter(Base):
+    """Used capacity of one scope × metric × window (C36). Reserved by conditional UPDATE
+    (``used + n <= limit``), atomically with an append-only ``BudgetReservation``."""
+
+    __tablename__ = "budget_counters"
+    __table_args__ = (
+        UniqueConstraint("scope_type", "scope_id", "metric", "period", "period_start"),
+    )
+
+    id: Mapped[str] = _id()
+    scope_type: Mapped[ScopeType] = mapped_column(enum_type(ScopeType), nullable=False)
+    scope_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    metric: Mapped[str] = mapped_column(String(16), nullable=False)  # runs | tokens | packets
+    period: Mapped[str] = mapped_column(String(8), nullable=False)  # hour | day
+    period_start: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    used: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    updated_at: Mapped[datetime] = _updated()
+
+
+class BudgetReservation(Base):
+    """One reservation of capacity before an external attempt (C36). **Append-only**."""
+
+    __tablename__ = "budget_reservations"
+    __table_args__ = (UniqueConstraint("operation_id", "counter_id"),)
+
+    id: Mapped[str] = _id()
+    operation_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    counter_id: Mapped[str] = mapped_column(ForeignKey("budget_counters.id"), nullable=False)
+    amount: Mapped[int] = mapped_column(Integer, nullable=False)
+    packet_id: Mapped[str | None] = mapped_column(ForeignKey("packets.id"))
+    generation_run_id: Mapped[str | None] = mapped_column(ForeignKey("generation_runs.id"))
+    created_at: Mapped[datetime] = _created()
+
+
+class BudgetReconciliation(Base):
+    """Actual usage of one reservation, recorded exactly once (C36). **Append-only**. A
+    reservation with unknown usage has no row and keeps its reservation."""
+
+    __tablename__ = "budget_reconciliations"
+
+    id: Mapped[str] = _id()
+    reservation_id: Mapped[str] = mapped_column(
+        ForeignKey("budget_reservations.id"), unique=True, nullable=False
+    )
+    actual: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = _created()
+
+
+class BudgetTopup(Base):
+    """An owner-authorised budget top-up (C27 failure allowance, C36). **Append-only**."""
+
+    __tablename__ = "budget_topups"
+
+    id: Mapped[str] = _id()
+    scope_type: Mapped[ScopeType] = mapped_column(enum_type(ScopeType), nullable=False)
+    scope_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    metric: Mapped[str] = mapped_column(String(32), nullable=False)
+    period: Mapped[str | None] = mapped_column(String(8))
+    period_start: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    amount: Mapped[int] = mapped_column(Integer, nullable=False)
+    actor: Mapped[str] = mapped_column(String(64), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = _created()
 
 
@@ -762,4 +960,12 @@ TABLE_NAMES: tuple[str, ...] = (
     "generation_runs",
     "queue_admissions",
     "branch_applications",
+    "channel_run_outcomes",
+    "kernel_leases",
+    "governor_states",
+    "governor_events",
+    "budget_counters",
+    "budget_reservations",
+    "budget_reconciliations",
+    "budget_topups",
 )

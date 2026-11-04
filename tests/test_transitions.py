@@ -168,3 +168,17 @@ def test_d9_r1_branch_kill_blocks_and_never_closes() -> None:
     for src in ("draft", "evaluating_pre", "ready", "queued", "needs_review", "failed", "held"):
         assert "branch kill" in PACKET_TRANSITIONS[(src, "blocked")].trigger
     check_packet(S.BLOCKED, S.EVALUATING_PRE, USER)  # undone by revoking the BLOCK
+
+
+def test_d10_q14_post_phase_recovery_rows() -> None:
+    check_packet(S.BLOCKED, S.EVALUATING_POST, KERNEL)  # scanner available again
+    check_packet(S.NEEDS_REVIEW, S.EVALUATING_POST, USER)  # phase-post soft waiver
+    with pytest.raises(InvalidTransitionError):
+        check_packet(S.BLOCKED, S.EVALUATING_POST, USER)  # a kernel recovery, not an owner skip
+    with pytest.raises(InvalidTransitionError):
+        check_packet(S.NEEDS_REVIEW, S.EVALUATING_POST, KERNEL)
+    for dst in (S.COMPLETED, S.RUNNING, S.QUEUED, S.READY):
+        for actor in ACTORS.values():
+            with pytest.raises(InvalidTransitionError):
+                check_packet(S.BLOCKED, dst, actor)
+    check_run(R.AWAITING_CONFIRMATION, R.FAILED, USER)  # cancellation (packet stays held)

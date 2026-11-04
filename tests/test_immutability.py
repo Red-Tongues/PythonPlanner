@@ -8,7 +8,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
 from orchestrator.contracts import AutonomyMode, Stage
-from orchestrator.db.ddl import is_immutability_violation
+from orchestrator.db.ddl import is_immutability_violation, is_transition_violation
 from orchestrator.db.models import Artifact, AutonomyScope, EvaluationPass, Event, utcnow
 from orchestrator.errors import ImmutableRecordError
 from orchestrator.events import record_event
@@ -22,10 +22,15 @@ def raw(engine: Engine, sql: str, **params: object) -> None:
         connection.execute(text(sql), params)
 
 
-def assert_db_rejects(engine: Engine, sql: str, **params: object) -> None:
+def assert_db_rejects(engine: Engine, sql: str, *, either: bool = False, **params: object) -> None:
+    """The database rejects ``sql`` through an immutability trigger (``either``: or through the
+    0007 transition-table trigger, when both rules forbid the change)."""
     with pytest.raises(DBAPIError) as info:
         raw(engine, sql, **params)
-    assert is_immutability_violation(info.value), info.value
+    ok = is_immutability_violation(info.value)
+    if either:
+        ok = ok or is_transition_violation(info.value)
+    assert ok, info.value
 
 
 @pytest.fixture
@@ -44,7 +49,9 @@ def test_completed_packet_cannot_be_updated_or_deleted_at_db_level(engine, compl
     assert_db_rejects(
         engine, "UPDATE packets SET locked = :f WHERE id = :id", id=completed.id, f=False
     )
-    assert_db_rejects(engine, "UPDATE packets SET status = 'draft' WHERE id = :id", id=completed.id)
+    assert_db_rejects(
+        engine, "UPDATE packets SET status = 'draft' WHERE id = :id", id=completed.id, either=True
+    )
     assert_db_rejects(engine, "DELETE FROM packets WHERE id = :id", id=completed.id)
 
 
@@ -54,9 +61,15 @@ def test_unlocked_packet_can_be_updated_at_db_level(engine, tree) -> None:
 
 def test_completion_requires_lock_on_update_and_insert(engine, tree) -> None:
     pid = tree.packets[1].id
+    # walk the M3 table to evaluating_post, so only the lock invariant can reject what follows
+    for status in ("evaluating_pre", "ready", "queued", "running", "evaluating_post"):
+        raw(engine, "UPDATE packets SET status = :s WHERE id = :id", s=status, id=pid)
     assert_db_rejects(engine, "UPDATE packets SET status = 'completed' WHERE id = :id", id=pid)
     assert_db_rejects(
-        engine, "UPDATE packets SET status = 'archived', locked = :t WHERE id = :id", id=pid, t=True
+        engine,
+        "UPDATE packets SET status = 'completed', locked = :t WHERE id = :id",
+        id=pid,
+        t=True,
     )  # completed_at missing
     p = tree.packets[1]
     insert = (

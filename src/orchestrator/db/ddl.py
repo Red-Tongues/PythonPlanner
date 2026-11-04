@@ -477,3 +477,258 @@ def m21_statements(dialect: str) -> list[str]:
     if dialect == "postgresql":
         return _m21_postgresql()
     raise NotImplementedError(f"no M2.1 DDL for dialect {dialect!r}")
+
+
+# --------------------------------------------------------------------------- M3 (revision 0007)
+# Authoring reference for the triggers in migration 0007 (C22–C26). The revision holds frozen
+# literal copies; tests/test_m3_schema.py asserts they are equal.
+
+TRANSITION_MARKER = "orchestrator-transition"
+
+#: M3 append-only tables (UPDATE and DELETE always rejected; PostgreSQL also TRUNCATE)
+M3_APPEND_ONLY: tuple[str, ...] = (
+    "channel_runs",
+    "channel_run_outcomes",
+    "governor_events",
+    "budget_reservations",
+    "budget_reconciliations",
+    "budget_topups",
+)
+#: M3 tables whose rows are never deleted (mutable state, but history is kept)
+M3_NO_DELETE: tuple[str, ...] = ("kernel_leases", "governor_states", "budget_counters")
+#: generation_runs columns fixed from insert (in addition to 0005's snapshot binding)
+RUN_FROZEN: tuple[str, ...] = ("claimed_by", "channel", "fencing_token", "created_at")
+#: generation_runs columns that may be set once and never changed afterwards
+RUN_WRITE_ONCE: tuple[str, ...] = ("manifest_hash", "commit_sha")
+RUN_TERMINAL_SQL = "'failed', 'stale', 'succeeded', 'abandoned'"
+RUN_BINDINGS_MSG = "generation run bindings are frozen (gate revision moves by +1 only)"
+GOVERNOR_MSG = "a governor state change must increase its revision and keep its scope"
+
+
+def _pairs_sql(pairs: list[tuple[str, str]]) -> str:
+    return ", ".join(f"'{a}>{b}'" for a, b in pairs)
+
+
+def _m3_sqlite(packet_pairs: list[tuple[str, str]], run_pairs: list[tuple[str, str]]) -> list[str]:
+    def trigger(name: str, timing: str, table: str, when: str, message: str, marker: str) -> str:
+        return (
+            f"CREATE TRIGGER {name} {timing} ON {table} FOR EACH ROW WHEN {when} "
+            f"BEGIN SELECT RAISE(ABORT, '{marker}: {message}'); END"
+        )
+
+    imm, tra = IMMUTABLE_MARKER, TRANSITION_MARKER
+    stmts = [
+        trigger(
+            "trg_packets_transition_table",
+            "BEFORE UPDATE",
+            "packets",
+            "NEW.status IS NOT OLD.status AND (OLD.status || '>' || NEW.status) NOT IN ("
+            + _pairs_sql(packet_pairs)
+            + ")",
+            "packet status change is not in the M3 transition table",
+            tra,
+        ),
+        trigger(
+            "trg_generation_runs_transition_table",
+            "BEFORE UPDATE",
+            "generation_runs",
+            "NEW.state IS NOT OLD.state AND (OLD.state || '>' || NEW.state) NOT IN ("
+            + _pairs_sql(run_pairs)
+            + ")",
+            "run state change is not in the M3 transition table",
+            tra,
+        ),
+        trigger(
+            "trg_generation_runs_final",
+            "BEFORE UPDATE",
+            "generation_runs",
+            f"OLD.state IN ({RUN_TERMINAL_SQL}) "
+            "OR (OLD.state = 'accepted' AND OLD.commit_sha IS NOT NULL)",
+            "a finished generation run cannot be changed",
+            imm,
+        ),
+        trigger(
+            "trg_generation_runs_bindings_frozen",
+            "BEFORE UPDATE",
+            "generation_runs",
+            " OR ".join(f"NEW.{c} IS NOT OLD.{c}" for c in RUN_FROZEN)
+            + " OR "
+            + " OR ".join(
+                f"(OLD.{c} IS NOT NULL AND NEW.{c} IS NOT OLD.{c})" for c in RUN_WRITE_ONCE
+            )
+            + " OR (NEW.gate_revision IS NOT OLD.gate_revision "
+            "AND (OLD.gate_revision IS NULL OR NEW.gate_revision IS NOT OLD.gate_revision + 1))",
+            "generation run bindings are frozen (gate revision moves by +1 only)",
+            imm,
+        ),
+        trigger(
+            "trg_kernel_leases_epoch",
+            "BEFORE UPDATE",
+            "kernel_leases",
+            "NEW.epoch < OLD.epoch OR NEW.name IS NOT OLD.name",
+            "the kernel lease epoch never decreases",
+            imm,
+        ),
+        trigger(
+            "trg_governor_states_revision",
+            "BEFORE UPDATE",
+            "governor_states",
+            "NEW.revision <= OLD.revision OR NEW.scope_type IS NOT OLD.scope_type "
+            "OR NEW.scope_id IS NOT OLD.scope_id",
+            "a governor state change must increase its revision and keep its scope",
+            imm,
+        ),
+    ]
+    for table in M3_APPEND_ONLY:
+        stmts += [
+            trigger(
+                f"trg_{table}_append_only_{op}",
+                f"BEFORE {op.upper()}",
+                table,
+                "1 = 1",
+                f"{table} is append-only ({op} rejected)",
+                imm,
+            )
+            for op in ("update", "delete")
+        ]
+    stmts += [
+        trigger(
+            f"trg_{table}_no_delete",
+            "BEFORE DELETE",
+            table,
+            "1 = 1",
+            f"{table} rows cannot be deleted",
+            imm,
+        )
+        for table in M3_NO_DELETE
+    ]
+    return stmts
+
+
+def _m3_postgresql(
+    packet_pairs: list[tuple[str, str]], run_pairs: list[tuple[str, str]]
+) -> list[str]:
+    def raise_(marker: str, message: str) -> str:
+        return f"RAISE EXCEPTION '{marker}: {message}' USING ERRCODE = '23001';"
+
+    imm, tra = IMMUTABLE_MARKER, TRANSITION_MARKER
+    frozen = "\n     OR ".join(f"NEW.{c} IS DISTINCT FROM OLD.{c}" for c in RUN_FROZEN)
+    once = "\n     OR ".join(
+        f"(OLD.{c} IS NOT NULL AND NEW.{c} IS DISTINCT FROM OLD.{c})" for c in RUN_WRITE_ONCE
+    )
+    stmts = [
+        _pg_function(
+            "orch_packets_transition_guard",
+            "  IF NEW.status IS DISTINCT FROM OLD.status\n"
+            "     AND (OLD.status || '>' || NEW.status) NOT IN (" + _pairs_sql(packet_pairs) + ") "
+            "THEN\n"
+            f"    {raise_(tra, 'packet status change is not in the M3 transition table')}\n"
+            "  END IF;",
+        ),
+        _pg_function(
+            "orch_generation_runs_m3_guard",
+            f"  IF OLD.state IN ({RUN_TERMINAL_SQL})\n"
+            "     OR (OLD.state = 'accepted' AND OLD.commit_sha IS NOT NULL) THEN\n"
+            f"    {raise_(imm, 'a finished generation run cannot be changed')}\n"
+            "  END IF;\n"
+            "  IF NEW.state IS DISTINCT FROM OLD.state\n"
+            "     AND (OLD.state || '>' || NEW.state) NOT IN (" + _pairs_sql(run_pairs) + ") "
+            "THEN\n"
+            f"    {raise_(tra, 'run state change is not in the M3 transition table')}\n"
+            "  END IF;\n"
+            f"  IF {frozen}\n     OR {once}\n"
+            "     OR (NEW.gate_revision IS DISTINCT FROM OLD.gate_revision\n"
+            "         AND (OLD.gate_revision IS NULL\n"
+            "              OR NEW.gate_revision IS DISTINCT FROM OLD.gate_revision + 1)) THEN\n"
+            f"    {raise_(imm, RUN_BINDINGS_MSG)}\n"
+            "  END IF;",
+        ),
+        _pg_function(
+            "orch_kernel_leases_guard",
+            "  IF TG_OP = 'DELETE' THEN\n"
+            f"    {raise_(imm, 'kernel_leases rows cannot be deleted')}\n"
+            "  END IF;\n"
+            "  IF NEW.epoch < OLD.epoch OR NEW.name IS DISTINCT FROM OLD.name THEN\n"
+            f"    {raise_(imm, 'the kernel lease epoch never decreases')}\n"
+            "  END IF;",
+        ),
+        _pg_function(
+            "orch_governor_states_guard",
+            "  IF TG_OP = 'DELETE' THEN\n"
+            f"    {raise_(imm, 'governor_states rows cannot be deleted')}\n"
+            "  END IF;\n"
+            "  IF NEW.revision <= OLD.revision OR NEW.scope_type IS DISTINCT FROM OLD.scope_type\n"
+            "     OR NEW.scope_id IS DISTINCT FROM OLD.scope_id THEN\n"
+            f"    {raise_(imm, GOVERNOR_MSG)}\n"
+            "  END IF;",
+        ),
+        _pg_function(
+            "orch_no_delete_guard", "  " + _pg_raise("% rows cannot be deleted", "TG_TABLE_NAME")
+        ),
+        "CREATE TRIGGER trg_packets_transition_table BEFORE UPDATE ON packets "
+        "FOR EACH ROW EXECUTE FUNCTION orch_packets_transition_guard()",
+        "CREATE TRIGGER trg_generation_runs_m3 BEFORE UPDATE ON generation_runs "
+        "FOR EACH ROW EXECUTE FUNCTION orch_generation_runs_m3_guard()",
+        "CREATE TRIGGER trg_kernel_leases_guard BEFORE UPDATE OR DELETE ON kernel_leases "
+        "FOR EACH ROW EXECUTE FUNCTION orch_kernel_leases_guard()",
+        "CREATE TRIGGER trg_governor_states_guard BEFORE UPDATE OR DELETE ON governor_states "
+        "FOR EACH ROW EXECUTE FUNCTION orch_governor_states_guard()",
+        "CREATE TRIGGER trg_budget_counters_no_delete BEFORE DELETE ON budget_counters "
+        "FOR EACH ROW EXECUTE FUNCTION orch_no_delete_guard()",
+    ]
+    for table in M3_APPEND_ONLY:
+        stmts += [
+            f"CREATE TRIGGER trg_{table}_append_only BEFORE UPDATE OR DELETE ON {table} "
+            "FOR EACH ROW EXECUTE FUNCTION orch_append_only_guard()",
+            f"CREATE TRIGGER trg_{table}_no_truncate BEFORE TRUNCATE ON {table} "
+            "FOR EACH STATEMENT EXECUTE FUNCTION orch_append_only_guard()",
+        ]
+    for table in M3_NO_DELETE:
+        stmts.append(
+            f"CREATE TRIGGER trg_{table}_no_truncate BEFORE TRUNCATE ON {table} "
+            "FOR EACH STATEMENT EXECUTE FUNCTION orch_no_delete_guard()"
+        )
+    return stmts
+
+
+M3_PG_FUNCTIONS: tuple[str, ...] = (
+    "orch_packets_transition_guard",
+    "orch_generation_runs_m3_guard",
+    "orch_kernel_leases_guard",
+    "orch_governor_states_guard",
+    "orch_no_delete_guard",
+)
+
+
+def m3_statements(dialect: str) -> list[str]:
+    """Trigger DDL installed by migration 0007, per dialect, from the M3 transition tables."""
+    from orchestrator.transitions import packet_pairs, run_pairs
+
+    if dialect == "sqlite":
+        return _m3_sqlite(packet_pairs(), run_pairs())
+    if dialect == "postgresql":
+        return _m3_postgresql(packet_pairs(), run_pairs())
+    raise NotImplementedError(f"no M3 DDL for dialect {dialect!r}")
+
+
+def is_transition_violation(exc: BaseException) -> bool:
+    """True if a database error was raised by the 0007 transition-table triggers."""
+    return TRANSITION_MARKER in str(exc)
+
+
+#: D10 Q3: the console's view of each generation run's latest attempt and its outcome
+#: (portable SQL, identical on both dialects; frozen in 0007).
+M3_VIEWS: dict[str, str] = {
+    "v_run_attempts": (
+        "CREATE VIEW v_run_attempts AS\n"
+        "SELECT r.id AS generation_run_id, r.packet_id, r.packet_version, r.state, r.channel,\n"
+        "       r.fencing_token, r.attempts, r.max_attempts, c.id AS channel_run_id, c.run_id,\n"
+        "       c.attempt, c.operation_id, c.created_at AS authorised_at, o.outcome,\n"
+        "       o.exit_code, o.error, o.created_at AS outcome_at\n"
+        "FROM generation_runs r\n"
+        "LEFT JOIN channel_runs c ON c.generation_run_id = r.id\n"
+        "  AND NOT EXISTS (SELECT 1 FROM channel_runs c2\n"
+        "                  WHERE c2.generation_run_id = r.id AND c2.attempt > c.attempt)\n"
+        "LEFT JOIN channel_run_outcomes o ON o.channel_run_id = c.id"
+    ),
+}

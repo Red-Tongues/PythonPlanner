@@ -181,6 +181,7 @@ change (DB-enforced).
 | `awaiting_confirmation` → `running` | user | exit-3 approval | R1; then the shared dispatch guard (E3); resumes the same conversation exactly once |  |
 | `awaiting_confirmation` → `waiting_for_children` | user | split approval | E10 split guard; the confirmation is validated and C25 applied |  |
 | `blocked` → `closed_unverified` | user | explicit owner close (branch kill is a BLOCK, not a close: D9-R1) | reason required; locks; in-flight runs staled |  |
+| `blocked` → `evaluating_post` | kernel | required scanner available again (D10 Q14) | only a post-phase scanner blocker (E6), no BLOCK/HOLD; the output's M and commit SHA are already recorded; the scan is re-requested for that SHA | P6 |
 | `blocked` → `evaluating_pre` | kernel / user | last BLOCK revoked / blocker cleared; no HOLD | — |  |
 | `blocked` → `held` | user | last BLOCK revoked, HOLD remains | — |  |
 | `draft` → `blocked` | user | BLOCK, incl. branch kill (D9-R1: a branch-scope BLOCK, reversible) | G bumped in scope (C35) |  |
@@ -278,9 +279,18 @@ change (DB-enforced).
 | P3 | Legacy M1 statuses `evaluating`, `in_progress`, `processed` keep one exit, `→ evaluating_pre` (kernel), plus `→ closed_unverified` (user) | Old rows must stay valid (C22) and must be able to re-enter the governed pipeline. They re-enter from scratch rather than resuming (`in_progress → running` would bypass the claim and fencing) |
 | P4 | `archived` is terminal with **no entries** | D8 has no `archived`; `closed_unverified` (with a reason) replaces it. Existing archived rows stay valid and locked |
 | P5 | New version rows start in `draft`, not `evaluating_pre` | M2 behaviour (`supersede_packet`); `draft → evaluating_pre` follows on the next tick under the same guard (H current), so nothing is evaluated earlier or skipped |
+| P6 | `blocked → evaluating_post` (kernel) when the required scanner is available again | D10 ruling Q14: recovery from the E6 post-phase blocker. Only a scanner blocker qualifies; the recorded manifest and commit are unchanged, so post-evaluation resumes for the same M |
 | R1 | Legacy run state `claimed` may only go `stale` | An M2 claim has no fencing token or operation ID, so it can never dispatch or publish under C26 |
 | — | `dispatched → dispatched` (E11) is listed as a self-transition | A deadline expiry with attempts left is a new attempt row, not a state change; the row documents that the retry passes the E3 guard |
 | — | A user-approved split's `→ waiting_for_children` is recorded with the kernel actor `system:brancher` | D8 lists the split as a kernel move; the owner's approval authorises it and is recorded in the confirmation and split events |
+
+**D10 rulings that shape these tables.** Q4: pause/resume are controls serialised through the
+scope rows (C26), not C25 governance writes, so they never bump G. Q5: rejecting an exit-3
+confirmation bumps the packet's and the run's G together (as R1), so the run stays parked and
+matched; the owner later cancels (`awaiting_confirmation → failed` for the run, packet stays
+`held`) or reconsiders through a new confirmation that follows R1. Q14: post-phase recovery is
+`blocked → evaluating_post` (P6) and `needs_review → evaluating_post` (phase-post soft
+waiver); run cancellation leaves the packet `held`. Everything else stays rejected.
 
 ### 7.4 Errata E1–E11
 

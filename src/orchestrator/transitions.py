@@ -249,6 +249,15 @@ _PACKET_RULES: list[Rule] = [
     ),
     *_p(OVERRIDABLE, S.HELD, KU, "HOLD (user) or alignment hold (governor)", "no active BLOCK"),
     *_p(S.BLOCKED, S.HELD, U, "last BLOCK revoked, HOLD remains"),
+    *_p(
+        S.BLOCKED,
+        S.EVALUATING_POST,
+        K,
+        "required scanner available again (D10 Q14)",
+        "only a post-phase scanner blocker (E6), no BLOCK/HOLD; the output's M and commit SHA "
+        "are already recorded; the scan is re-requested for that SHA",
+        deviation="P6",
+    ),
     *_p(S.BLOCKED, S.EVALUATING_PRE, KU, "last BLOCK revoked / blocker cleared; no HOLD"),
     *_p(S.HELD, S.EVALUATING_PRE, U, "last HOLD revoked / owner clears hold", "never automatic"),
     *_p(
