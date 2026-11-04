@@ -114,3 +114,8 @@ The eight PM rulings in `docs/reviews/D2_consensus_truth_table.md` are binding:
 - tier-3 fields and post-phase gating.
 
 Implement TC-01 to TC-52 as parametrised tests on both dialects. Derive the expected values from the rulings in code, rewrite the fractional-score cases as integer boundary cases, and flag any case where the code and the table disagree in `docs/PROGRESS.md`.
+
+## B11 — Evaluator model pinning (D3, 2026-11-04)
+- Each provider config names a model **and its SHA-256 digest**. At startup the OpenAI-compatible/Ollama provider checks `/api/tags` (or an equivalent) against the allowlist and refuses to run evaluations on a mismatch (evented, visible in `orchestrator status`).
+- Record model digest, quantisation, `num_ctx` and decoding options in each `eva_packets.model_config`, so they form part of the content address (D1).
+- Always send an explicit `num_ctx` and `think: false` where supported. Use JSON-Schema structured outputs (`response_format` json_schema / native `format`) generated from the Pydantic contracts, then validate with Pydantic.
