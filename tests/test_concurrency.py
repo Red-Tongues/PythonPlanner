@@ -64,7 +64,7 @@ from tests.govfixtures import (
     queued_ref,
     ready_packet,
 )
-from tests.runfixtures import attempts, claimed_run, queued_packet
+from tests.runfixtures import attempts, claimed_run, held, queued_packet
 
 R, S = GenerationRunState, PacketStatus
 
@@ -258,10 +258,10 @@ def test_two_claimers_race_for_the_last_budget_unit(factory: sessionmaker[Sessio
 def _parked_run(factory: sessionmaker[Session]) -> tuple[str, str, str]:
     with factory() as s:
         packet, run = claimed_run(s)
-        attempt = authorise_dispatch(s, run)
+        attempt = authorise_dispatch(s, run, lock=held(s))
         move_run(s, run, R.AWAITING_RESULT, KERNEL, "launched")
         record_outcome(s, attempt, AttemptOutcome.PARKED, exit_code=3)
-        confirmation = park_run(s, run)
+        confirmation = park_run(s, run, lock=held(s))
         s.commit()
         return packet.ref, run.id, confirmation.id
 
@@ -333,7 +333,7 @@ def test_approval_racing_a_governance_write_never_resumes(factory: sessionmaker[
 def test_a_duplicate_result_is_recorded_once(factory: sessionmaker[Session]) -> None:
     with factory() as s:
         _, run = claimed_run(s)
-        attempt_id = authorise_dispatch(s, run).id
+        attempt_id = authorise_dispatch(s, run, lock=held(s)).id
         s.commit()
 
     def report() -> str:
@@ -356,7 +356,7 @@ def test_a_late_result_after_lease_takeover_has_no_effect(factory: sessionmaker[
     later = datetime.now(UTC) + timedelta(hours=2)
     with factory() as s:
         packet, run = claimed_run(s)
-        old_attempt = authorise_dispatch(s, run).id
+        old_attempt = authorise_dispatch(s, run, lock=held(s)).id
         s.commit()
         ref = packet.ref
     with factory() as s:  # kernel B: the lease expired; stale it and claim again (F = 2)
@@ -365,7 +365,7 @@ def test_a_late_result_after_lease_takeover_has_no_effect(factory: sessionmaker[
         for status in (S.READY, S.QUEUED):
             transition(packet, status, KERNEL)
         new_run = claim(s, ref, "kernel-b", now=later)
-        authorise_dispatch(s, new_run, now=later)
+        authorise_dispatch(s, new_run, now=later, lock=held(s))
         s.commit()
 
     def late() -> str:
@@ -406,7 +406,7 @@ def test_dispatch_authorised_first_drains_when_the_pause_follows(
         with factory() as s:
             run = s.get(GenerationRun, run_id)
             assert run is not None
-            authorise_dispatch(s, run)  # scope rows touched and locked until commit
+            authorise_dispatch(s, run, lock=held(s))  # scope rows touched and locked until commit
             authorised.set()
             paused.wait(1.5)  # on PostgreSQL the pause is blocked behind us
             s.commit()
@@ -451,7 +451,7 @@ def test_pause_committed_first_refuses_the_dispatch(factory: sessionmaker[Sessio
             try:
                 run = s.get(GenerationRun, run_id)
                 assert run is not None
-                authorise_dispatch(s, run)
+                authorise_dispatch(s, run, lock=held(s))
                 s.commit()
                 outcome.append("dispatched")
             except Exception as exc:
@@ -601,7 +601,7 @@ def test_a_governance_write_after_the_binding_check_stops_the_dispatch(
                 assert written.wait(15), "the writer never committed"
 
             try:
-                authorise_dispatch(a, run, before_scopes=seam)
+                authorise_dispatch(a, run, before_scopes=seam, lock=held(a))
                 a.commit()
                 outcome.append("dispatched")
             except StaleRun:
@@ -611,18 +611,28 @@ def test_a_governance_write_after_the_binding_check_stops_the_dispatch(
                 a.rollback()
                 outcome.append("locked")
 
+    wrote: list[str] = []
+
     def writer() -> None:
         assert checked.wait(15)
         try:
             with factory() as b:
                 grant_waiver(b, ref, "tools_needed", actor=USER, reason="changed meanwhile")
                 b.commit()
+                wrote.append("committed")
+        except OperationalError:  # SQLite: A's fence already holds the single write lock
+            wrote.append("locked")
         finally:
             written.set()
 
     _run_threads(dispatcher, writer)
-    assert outcome in (["stale"], ["locked"]), outcome
-    assert _effects(factory) == 0
     with factory() as s:
         run = s.get(GenerationRun, run_id)
-        assert run is not None and run.state is R.PLANNED
+        assert run is not None
+        if wrote == ["committed"]:  # the gate moved after A's check: A must dispatch nothing
+            assert outcome in (["stale"], ["locked"]), outcome
+            assert _effects(factory) == 0 and run.state is R.PLANNED
+        else:  # SQLite serialised the writer behind A: A's dispatch stands, the waiver never was
+            assert wrote == ["locked"] and outcome == ["dispatched"], (wrote, outcome)
+            assert _effects(factory) == 1 and run.state is R.DISPATCHED
+            assert s.get_bind().dialect.name == "sqlite"

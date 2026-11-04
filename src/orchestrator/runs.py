@@ -50,7 +50,7 @@ from orchestrator.contracts import (
     ScopeStatus,
     Stage,
 )
-from orchestrator.control import KernelLock, authorise_scopes, scope_status
+from orchestrator.control import FencedOut, KernelLock, authorise_scopes, scope_status
 from orchestrator.db.models import (
     ChannelRun,
     ChannelRunOutcome,
@@ -373,6 +373,40 @@ def reconcile_runs(session: Session, *, now: datetime | None = None) -> list[str
     return staled
 
 
+# --------------------------------------------------------------------------- authority (MR2, MR3)
+
+
+def _require_fence(lock: KernelLock | None, session: Session, now: datetime | None) -> None:
+    """Effect-authorising kernel writes need the kernel lock, proven in this transaction."""
+    if lock is None:
+        raise FencedOut("a kernel write needs the kernel lock (none was given)")
+    lock.fence(session, now=now)
+
+
+def _check_approval(
+    session: Session, run: GenerationRun, approval: Confirmation | None, *, parked: bool
+) -> None:
+    """A user dispatch is the resume of a parked run, carried by its just-approved confirmation,
+    while the packet is ``running`` with no HOLD or BLOCK."""
+    from orchestrator.governance import active_overrides
+
+    if not parked or approval is None:
+        raise RunError(f"run {run.id}: a user may only resume a parked run via approve_run")
+    if (
+        approval.entity_type != "generation_run"
+        or approval.entity_id != run.id
+        or ConfirmationStatus(approval.status) is not ConfirmationStatus.APPROVED
+    ):
+        raise RunError(f"run {run.id}: the approval is not a decided approval of this run")
+    packet = session.get(Packet, run.packet_id)
+    assert packet is not None
+    if PacketStatus(packet.status) is not S.RUNNING:
+        raise RunError(f"{packet.ref} is {PacketStatus(packet.status).value}, not running")
+    for override in active_overrides(session, packet):
+        if OverrideKind(override.kind) in (OverrideKind.BLOCK, OverrideKind.HOLD):
+            raise RunError(f"{packet.ref} has an active {OverrideKind(override.kind).value}")
+
+
 # --------------------------------------------------------------------------- dispatch (E3)
 
 _DISPATCH_FROM = {
@@ -394,6 +428,7 @@ def authorise_dispatch(
     demands: Sequence[Demand] = (),
     contract: str = "generation@1",
     before_scopes: Any = None,
+    approval: Confirmation | None = None,
 ) -> ChannelRun:
     """The single dispatch guard (E3). Returns the new immutable attempt row; the caller commits
     and only then performs the effect under ``attempt.operation_id``.
@@ -401,6 +436,11 @@ def authorise_dispatch(
     Raises ``StaleRun`` (bindings), ``control.DispatchRefused`` (paused), ``FencedOut``
     (kernel lock) or ``budgets.BudgetExhausted``; on any of these the caller rolls back and the
     packet and run are unchanged. ``before_scopes`` is a test seam.
+
+    MR2/MR3: a ``system`` actor must hold the kernel lock (``lock`` is fenced; none →
+    ``FencedOut``). A ``user`` actor dispatches only through ``approve_run``, which passes the
+    run-bound confirmation it has just approved (``approval``); a parked run can be dispatched
+    no other way.
     """
     now = now or utcnow()
     source = GenerationRunState(run.state)
@@ -408,9 +448,13 @@ def authorise_dispatch(
         raise RunError(f"run {run.id} cannot be dispatched from {source.value}")
     if run.channel is None:  # fail closed: never guess a channel for an unrouted packet
         raise RunError(f"run {run.id} has no channel (the packet was not routed)")
-    if lock is not None:
-        lock.fence(session, now=now)
     parked = source is R.AWAITING_CONFIRMATION
+    if actor.is_user:
+        _check_approval(session, run, approval, parked=parked)
+    else:
+        _require_fence(lock, session, now)
+        if parked or approval is not None:
+            raise RunError(f"run {run.id}: a parked run resumes only through approve_run")
     why = binding_mismatch(session, run, now=now, lease=not parked)
     if why is not None:
         raise StaleRun(f"run {run.id}: {why}")
@@ -542,9 +586,9 @@ def accept_run(
     lock: KernelLock | None = None,
 ) -> None:
     """``validating → accepted`` with the output's manifest hash M (C30), only while every
-    binding holds; otherwise the run is made stale and ``StaleRun`` is raised."""
-    if lock is not None:
-        lock.fence(session, now=now)
+    binding holds; otherwise the run is made stale and ``StaleRun`` is raised. The kernel must
+    hold the lock (MR2)."""
+    _require_fence(lock, session, now)
     why = binding_mismatch(session, run, now=now)
     if why is not None:
         stale_run(session, run, why, actor=actor)
@@ -612,9 +656,18 @@ def _bump_pair(session: Session, packet: Packet, run: GenerationRun, cause: str,
     session.flush()
 
 
-def park_run(session: Session, run: GenerationRun, *, actor: Actor = KERNEL) -> Confirmation:
+def park_run(
+    session: Session,
+    run: GenerationRun,
+    *,
+    lock: KernelLock | None = None,
+    actor: Actor = KERNEL,
+    now: datetime | None = None,
+) -> Confirmation:
     """Exit 3: ``awaiting_result → awaiting_confirmation`` (no counters), the packet
-    ``running → awaiting_confirmation`` and exactly one confirmation aimed at this run."""
+    ``running → awaiting_confirmation`` and exactly one confirmation aimed at this run. The
+    kernel must hold the lock (MR2)."""
+    _require_fence(lock, session, now)
     why = binding_mismatch(session, run)
     if why is not None:
         stale_run(session, run, why, actor=actor)
@@ -714,7 +767,9 @@ def approve_run(
         reason or "parked run approved",
         where=[Packet.__table__.c.active_run_id == run.id],
     )
-    return authorise_dispatch(session, run, actor=actor, now=now, demands=demands)
+    return authorise_dispatch(
+        session, run, actor=actor, now=now, demands=demands, approval=confirmation
+    )
 
 
 def reject_run(session: Session, confirmation_id: str, *, actor: Actor, reason: str) -> None:

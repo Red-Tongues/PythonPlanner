@@ -56,14 +56,14 @@ from orchestrator.runs import (
     try_claim,
 )
 from tests.conftest import KERNEL, USER
-from tests.runfixtures import attempts, claimed_run, queued_packet
+from tests.runfixtures import attempts, claimed_run, held, queued_packet
 
 R, S = GenerationRunState, PacketStatus
 
 
 def _dispatched(session: Session):  # type: ignore[no-untyped-def]
     packet, run = claimed_run(session)
-    attempt = authorise_dispatch(session, run)
+    attempt = authorise_dispatch(session, run, lock=held(session))
     move_run(session, run, R.AWAITING_RESULT, KERNEL, "launched")
     return packet, run, attempt
 
@@ -101,7 +101,7 @@ def test_every_claim_carries_a_higher_token(session: Session) -> None:
 
 def test_dispatch_writes_intent_before_any_effect(session: Session) -> None:
     packet, run = claimed_run(session)
-    attempt = authorise_dispatch(session, run)
+    attempt = authorise_dispatch(session, run, lock=held(session))
     assert run.state is R.DISPATCHED and run.attempts == 1
     assert attempt.operation_id == f"{run.id}:1" and attempt.fencing_token == 1
     assert attempt.run_id.startswith("LG") and attempt.generation_run_id == run.id
@@ -119,19 +119,21 @@ def test_dispatch_writes_intent_before_any_effect(session: Session) -> None:
 def test_retries_pass_the_same_guard_and_stop_at_max_attempts(session: Session) -> None:
     packet, run, first = _dispatched(session)
     record_outcome(session, first, AttemptOutcome.FAILED, exit_code=1)
-    second = authorise_dispatch(session, run)  # awaiting_result → awaiting_result (retry)
-    third = authorise_dispatch(session, run)
+    second = authorise_dispatch(
+        session, run, lock=held(session)
+    )  # awaiting_result → awaiting_result (retry)
+    third = authorise_dispatch(session, run, lock=held(session))
     assert [a.attempt for a in (first, second, third)] == [1, 2, 3]
     assert run.state is R.AWAITING_RESULT and attempts(session) == 3
     with pytest.raises(RunError, match="used all 3 attempts"):
-        authorise_dispatch(session, run)
+        authorise_dispatch(session, run, lock=held(session))
 
 
 def test_a_governance_write_stales_the_run_before_dispatch(session: Session) -> None:
     packet, run = claimed_run(session)
     add_override(session, packet.ref, OverrideKind.HOLD, actor=USER, reason="wait")
     with pytest.raises(StaleRun, match="gate revision"):
-        authorise_dispatch(session, run)
+        authorise_dispatch(session, run, lock=held(session))
     assert attempts(session) == 0 and run.state is R.PLANNED  # unchanged on refusal
     assert reconcile_runs(session) == [run.id]
     # E7/V2: a HOLD applies, so only the run goes stale; the packet keeps its state
@@ -166,12 +168,12 @@ def test_pause_refuses_dispatch_without_touching_gates(session: Session) -> None
     assert pause(session, "objective", objective_ref, actor=USER, reason="look first")
     assert packet.gate_revision == gate  # D10 Q4: a pause is a control, not a gate write
     with pytest.raises(DispatchRefused, match=f"objective:{objective_ref} is paused"):
-        authorise_dispatch(session, run)
+        authorise_dispatch(session, run, lock=held(session))
     assert attempts(session) == 0
     with pytest.raises(PermissionError):
         resume(session, "objective", objective_ref, actor=KERNEL, reason="auto")  # never automatic
     assert resume(session, "objective", objective_ref, actor=USER, reason="go")
-    assert authorise_dispatch(session, run).attempt == 1
+    assert authorise_dispatch(session, run, lock=held(session)).attempt == 1
     for kind in ("scope.paused", "scope.resumed"):
         assert session.scalar(select(func.count()).select_from(Event).where(Event.action == kind))
 
@@ -188,13 +190,13 @@ def test_dispatch_reserves_budget_or_changes_nothing(session: Session) -> None:
     packet, run = claimed_run(session)
     hour = datetime(2026, 11, 4, 12, tzinfo=UTC)
     demand = Demand("channel", "local_generation", "runs", "hour", hour, 1, 1)
-    authorise_dispatch(session, run, demands=[demand])
+    authorise_dispatch(session, run, demands=[demand], lock=held(session))
     used = session.scalar(select(BudgetCounter.used))
     assert used == 1
     record_outcome(session, session.scalars(select(ChannelRun)).one(), AttemptOutcome.FAILED)
     move_run(session, run, R.AWAITING_RESULT, KERNEL, "launched")
     with pytest.raises(BudgetExhausted):
-        authorise_dispatch(session, run, demands=[demand])
+        authorise_dispatch(session, run, demands=[demand], lock=held(session))
     session.rollback()
 
 
@@ -232,16 +234,15 @@ def test_acceptance_needs_every_binding(session: Session) -> None:
     move_run(session, run, R.VALIDATING, KERNEL, "exit 0")
     grant_waiver(session, packet.ref, "tools_needed", actor=USER, reason="x")
     with pytest.raises(StaleRun):
-        accept_run(session, run, "m" * 64)
+        accept_run(session, run, "m" * 64, lock=held(session))
     assert run.state is R.STALE
 
 
 def test_accepted_run_goes_stale_before_publication_on_a_context_change(session: Session) -> None:
     packet, run, _ = _dispatched(session)
     move_run(session, run, R.VALIDATING, KERNEL, "exit 0")
-    accept_run(session, run, "m" * 64)
-    lock = KernelLock("kernel-a")
-    lock.acquire(session)
+    accept_run(session, run, "m" * 64, lock=held(session))
+    lock = held(session)
     assert_publishable(session, run, lock=lock)  # all bindings hold
     supersede_objective(session, packet.objective.ref, {"brief": "changed"}, actor=USER)
     with pytest.raises(StaleRun):  # E8: H mismatch (and G bump) before the commit is recorded
@@ -271,7 +272,7 @@ def test_a_late_result_for_an_obsolete_token_revives_nothing(session: Session) -
 def _parked(session: Session):  # type: ignore[no-untyped-def]
     packet, run, attempt = _dispatched(session)
     record_outcome(session, attempt, AttemptOutcome.PARKED, exit_code=3)
-    confirmation = park_run(session, run)
+    confirmation = park_run(session, run, lock=held(session))
     return packet, run, confirmation
 
 
@@ -457,5 +458,39 @@ def test_an_unrouted_run_is_never_dispatched(session: Session) -> None:
     run = claim(session, packet.ref, "kernel-a")
     assert run.channel is None
     with pytest.raises(RunError, match="no channel"):
-        authorise_dispatch(session, run)
+        authorise_dispatch(session, run, lock=held(session))
     assert attempts(session) == 0
+
+
+# ------------------------------------------------------------------- authority (R4 MR2, MR3)
+
+
+def test_kernel_writes_without_the_lock_are_refused(session: Session) -> None:
+    from orchestrator.control import FencedOut
+
+    packet, run = claimed_run(session)
+    with pytest.raises(FencedOut):
+        authorise_dispatch(session, run)
+    attempt = authorise_dispatch(session, run, lock=held(session))
+    move_run(session, run, R.AWAITING_RESULT, KERNEL, "launched")
+    record_outcome(session, attempt, AttemptOutcome.PARKED, exit_code=3)
+    with pytest.raises(FencedOut):
+        park_run(session, run)
+    move_run(session, run, R.VALIDATING, KERNEL, "exit 0")
+    with pytest.raises(FencedOut):
+        accept_run(session, run, "m" * 64)
+    assert run.state is R.VALIDATING and attempts(session) == 1
+
+
+def test_only_an_approval_resumes_a_parked_run(session: Session) -> None:
+    packet, run, confirmation = _parked(session)
+    with pytest.raises(RunError, match="only through approve_run"):
+        authorise_dispatch(session, run, lock=held(session))  # the kernel cannot resume it
+    with pytest.raises(RunError, match="via approve_run"):
+        authorise_dispatch(session, run, actor=USER)  # nor a user without the approval
+    with pytest.raises(RunError, match="not a decided approval"):
+        authorise_dispatch(session, run, actor=USER, approval=confirmation)  # still pending
+    reject_run(session, confirmation.id, actor=USER, reason="no")
+    with pytest.raises(RunError):  # MR3: a rejected parked run is never resumable directly
+        authorise_dispatch(session, run, actor=USER, approval=confirmation)
+    assert run.state is R.AWAITING_CONFIRMATION and attempts(session) == 1

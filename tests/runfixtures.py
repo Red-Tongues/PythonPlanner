@@ -58,3 +58,27 @@ def attempts(session: Session) -> int:
         )
         or 0
     )
+
+
+_LOCKS: dict[int, object] = {}
+
+
+def held(session: Session):  # type: ignore[no-untyped-def]
+    """The test kernel's lock for this database (acquired once, with a long lease), proven in
+    the session's transaction. Kernel writes need it (R4 MR2)."""
+    from datetime import timedelta
+
+    from orchestrator.control import FencedOut, KernelLock
+
+    key = id(session.get_bind())
+    lock = _LOCKS.get(key)
+    if isinstance(lock, KernelLock):
+        try:
+            lock.fence(session)
+            return lock
+        except FencedOut:
+            pass
+    lock = KernelLock("kernel-test", ttl=timedelta(days=1))
+    lock.acquire(session)
+    _LOCKS[key] = lock
+    return lock
