@@ -3,14 +3,30 @@
 | | |
 |---|---|
 | **Document** | Project Plan — replaces the draft `Python Planner.docx` (archived at `docs/archive/`) |
-| **Plan version** | 0.4 — living document, updated after every delivery round (v0.4 records the CFO's decisions on pace, Juggler and the v1 bar) |
+| **Plan version** | 0.5 — living document; checkpoint at end of session 1 (2026-11-04) |
 | **Product target** | v1.0.0.0 prototype of the Python Orchestrator (package version `1.0.0.0.devN` until acceptance) |
 | **Sponsor / CFO** | Sam (redtongues) |
 | **Project manager** | Claude (PM agent) |
 | **Main engineer** | Claude Code (cloud session, GitHub-connected) |
 | **Review panel** | Microsoft Copilot · Gemini (Argon) · GitHub Copilot — consensus-scored (see §17) |
 | **Repository** | `github.com/redtongues/PythonPlanner` (private) |
-| **Last updated** | 2026-11-03 |
+| **Last updated** | 2026-11-04 (checkpoint) |
+
+---
+
+## 0. Status at a glance — checkpoint 2026-11-04 00:20
+
+| Item | State |
+|---|---|
+| Plan | v0.5 (this document) — CFO decisions D13–D16 recorded; D3 and §20 questions still open |
+| M0 — plan and repo | Done |
+| R0 — panel review of plan | Done: 24 findings → 20 adopted (A1–A7, B1–B8, C1–C7) |
+| M1 — kernel foundation | **PR #1** built by Claude Code (9 commits, ~5,800 lines); CI green on SQLite (Py 3.11/3.12) and PostgreSQL 16 |
+| R1 — panel review of M1 code | Done: 24 findings → 18 accepted, 2 partial, 2 deferred to M2, 2 declined (verified false positives) |
+| M1.1 — 12 review fixes | **In progress at pause.** The engineer checkpoints in `docs/PROGRESS.md` (done/remaining); PR #1 merges when CI is green |
+| M2, M3 | Specs ready, with R0 amendments (and C8 pace governor) |
+| M4 — Juggler bridge | Spec rewritten around the headless `juggler run` CLI (verified in Juggler's source) |
+| Work paused | Claude Pro usage at 88%; resume after the reset. Steps for the next agent are in §22 |
 
 ---
 
@@ -429,3 +445,24 @@ No prices are quoted here; obtain current quotes before purchase.
 - Respect the Key Idea filter (§2) and the immutability rule (Requirement F) above all else.
 - **Ownership:** the PM owns this plan, the milestone specs and `docs/reviews/`; the engineer owns code, `README.md`, `docs/PROGRESS.md` and technical docs (`docs/ARCHITECTURE.md`, `docs/RUNBOOK.md`). Engineers should propose plan changes in `docs/PROGRESS.md` rather than edit this file, so parallel branches don't conflict.
 - Update `docs/PROGRESS.md` at the end of every session; the PM folds it into §16 and §21.
+
+### 22.1 Resume plan (next session)
+1. **Finish M1.1.**
+   - Reopen the existing Claude Code session ("Milestone M1 kernel foundation", branch `claude/optimistic-allen-ts03d8`).
+   - Ask it to complete the remaining fixes from `docs/reviews/R1_consensus.md`, using its checkpoint in `docs/PROGRESS.md`.
+   - Get CI green on all three jobs, then squash-merge PR #1.
+2. **M2 in a fresh Claude Code session from `main`.** Implement `docs/milestones/M2_evaluation_engine.md` including amendments B1–B8, plus the R1 deferrals: UTC-aware datetimes (GH6) and idempotent re-seeding on init-db (GE6). Panel review R2 → consensus → fixes → merge.
+3. **M3**, then the **M4 spike**. The spike needs Juggler installed on the CFO's machine and a connected folder; the session is linked to that computer.
+4. Fold each engineer checkpoint into §0, §16 and §21. Regenerate the Word handover document from this file.
+
+### 22.2 Operating notes for the PM agent (learned this session)
+- **Tabs:** tab 1 Claude Code (engineer) · tab 2 GitHub Copilot · tab 3 Microsoft Copilot (CFO's freelance sandbox tenant — uploads to its OneDrive are fine) · tab 4 Gemini (Argon) · tab 5 the repo / PR.
+- **Typing into chat UIs drops characters.** Insert text with `document.execCommand('insertText', …)` and verify it matches before sending.
+- **File attachments:**
+  - Microsoft Copilot has a native `<input type=file>`.
+  - Gemini has none. Add a helper file input to the page, set the file on it, then dispatch a synthetic `paste` event carrying the file into Gemini's editor.
+  - Gemini's GitHub connector fails with "error 13"; don't depend on it.
+  - GitHub Copilot reads the repo and PRs directly. Copilot Free has a monthly chat cap, so use about two prompts per review round.
+- **CI:** GitHub won't run `pull_request` CI while a PR has merge conflicts. The PM edits only PM-owned files on `main`; the engineer owns `docs/PROGRESS.md`.
+- **The PM container could not reach PyPI.** Independent verification relies on GitHub Actions (three jobs), plus PM spot-checks of panel claims in the source.
+- **Review consensus works.** In R1 the cross-check removed two plausible but false findings (MC2, MC8) before they reached the engineer. Always verify concrete claims in the code before relaying them.
