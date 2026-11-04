@@ -4,6 +4,33 @@ Newest entries first. Every agent session appends an entry: what changed, decisi
 
 ---
 
+## 2026-11-04 (late) — R4 fixes: PAUSED at the CFO's request (Claude Code)
+
+Working from `docs/reviews/R4_consensus.md` (16 items) on PR [redtongues/PythonPlanner#3](https://github.com/redtongues/PythonPlanner/pull/3), one commit per fix group. The CFO paused the sprint until 23:59; I stopped at a clean point.
+
+**Done (committed, full suite green on SQLite and PostgreSQL 16: 573 passed, 4 skipped):**
+- **Group 1, MR1** (6dae604): every binding-dependent run write (dispatch, accept, publish, park, the run-targeted gate bump) re-checks the packet row in one compare-and-set (`runs.guard_bindings`). A two-session barrier test at the `before_scopes` seam fails on PostgreSQL without the guard.
+- **Group 2, MR2 + MR3** (c83d407):
+  - kernel dispatch, accept, publish and park need a fenced `KernelLock`;
+  - a user dispatch is only `approve_run`'s resume with the run-bound, just-approved confirmation, while the packet is running with no HOLD/BLOCK;
+  - tests take the lock through `runfixtures.held()`;
+  - on SQLite the fence serialises a concurrent governance write behind the dispatch, and the barrier test asserts whichever serialisation happened.
+
+**Next, in order (not started):**
+- group 3: MR4 lease renewal on resume, MR6 retry eligibility, MR7 dispatch sequence separate from chargeable attempts;
+- group 4: MR5 split continuation;
+- group 5: MR8 deferred recovery, MR10 legacy reconciliation;
+- group 6: MR9 stale-approval disposition (a `retired` confirmation status);
+- group 7: GR1, GA-R1 guarded `cancel_run` / `reject_run`;
+- group 8: GA-R2 failure-budget atomicity;
+- group 9: GA-R3 trunk branch scope;
+- group 10: MR11, GA-R5 budget validation, CHECKs and audit ordering (`reserve` with two demands currently autoflushes before its event);
+- group 11: MR12, MR13 race-test hardening with an effect-counting fake adapter.
+
+Then PROGRESS, the PR checklist and the report.
+
+---
+
 ## 2026-11-04 (evening) — Build-process tidy (CFO decision Q4) (Claude Code)
 
 On PR [redtongues/PythonPlanner#3](https://github.com/redtongues/PythonPlanner/pull/3), as five focused commits, after merging `main` at e4234bb (the CFO–Argon clarification). The PM asked for no R4 fixes and no M3a work until the data model is settled, so this is a **build process** change only. The **product** rule is unchanged: immutability, append-only and transition triggers stay, are never disabled, and keep their tests on both dialects.
