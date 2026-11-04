@@ -14,29 +14,16 @@
 
 ---
 
-## 0. Status at a glance — checkpoint 2026-11-04 12:00
+## 0. Status at a glance — checkpoint 2026-11-04 22:30
 
 | Item | State |
 |---|---|
-| Plan | v0.7 (this document) |
-| M0 — plan and repo | Done |
-| M1 + M1.1 — kernel foundation | **Merged** (PR #1, 3068e35) after reviews R0 and R1 |
-| M2 — evaluation engine | **Merged** (PR #2, 1031665): M2 + the 12 M2.1 fixes from R2; 410 tests |
-| R2 — panel review of M2 code | Done: 25 findings → 21 accepted, 1 deferred (GE7 → M3), 2 declined. Engineer's 7 open notes ruled (all accepted) |
-| M3 — orchestration and interface | Spec reviewed *before* coding (R3: 46 findings, 43 adopted, 3 partial) and independently verified (V1–V11). Six scope cuts. State-machine reference D8. **Stage A done** (draft PR #3, 560 tests); review R4 running; Stage B (loop, channels, digest, C27–C39) next |
-| M4 — Juggler bridge | Spec ready; now also owns the real `juggler run` CLI and worktrees (moved from M3) |
----|---|
-| Plan | v0.5 (this document) — CFO decisions D13–D16 recorded; D3 and §20 questions still open |
-| M0 — plan and repo | Done |
-| R0 — panel review of plan | Done: 24 findings → 20 adopted (A1–A7, B1–B8, C1–C7) |
-| M1 — kernel foundation | **PR #1** built by Claude Code (9 commits, ~5,800 lines); CI green on SQLite (Py 3.11/3.12) and PostgreSQL 16 |
-| R1 — panel review of M1 code | Done: 24 findings → 18 accepted, 2 partial, 2 deferred to M2, 2 declined (verified false positives) |
-| M1.1 — 12 review fixes | **In progress at pause.** The engineer checkpoints in `docs/PROGRESS.md` (done/remaining); PR #1 merges when CI is green |
-| M2, M3 | Specs ready, with R0 amendments (and C8 pace governor) |
-| M4 — Juggler bridge | Spec rewritten around the headless `juggler run` CLI (verified in Juggler's source) |
-| Work paused | Claude Pro usage at 88%; resume after the reset. Steps for the next agent are in §22 |
-
----
+| Plan | v0.7. **Authoritative CFO clarifications** in `docs/notes/2026-11-04_CFO_Argon_clarification.md` override older text below until the specs are consolidated |
+| M0, M1, M1.1, M2 (+M2.1) | **Merged** (PR #1 3068e35; PR #2 1031665) |
+| M3 | **Split into M3a** (genPacket loop + pause/branch in SQL) **and M3b** (digest/interface). Stage A foundations on draft **PR #3**: build-process tidy done (single schema source, one baseline migration, capability-named tests; 571 tests, CI green); **R4 fixes in progress** |
+| Theory before M3a | T1 (genPacket field history, staleness, failure semantics, repo inclusion), Q1 (queue maths, team-first). Audit A1 recommends a short **corrective spec** before M3a builds field history, staleness or failure logic |
+| M4 | Juggler bridge. Juggler is the sole arbiter to production models; the add-on route is being assessed (`docs/notes/2026-11-04_juggler_first_look.md`) |
+| Parked | Tailscale and remote access; separate test projects |
 
 ## 1. Executive summary
 
