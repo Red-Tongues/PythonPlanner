@@ -44,7 +44,10 @@ HEAD_VIEWS: dict[str, str] = {
     "v_packet_heads": "packets",
 }
 
-_LOCKING_SQL = ", ".join(f"'{s.value}'" for s in sorted(LOCKING_STATUSES))
+#: The locking statuses as frozen in 0002. ``closed_unverified`` (M2.1) is guarded by its own
+#: trigger in 0006 (``m21_statements``), so 0002's reference text never changes.
+_LOCKING_SQL = "'archived', 'completed'"
+assert {"archived", "completed"} <= {s.value for s in LOCKING_STATUSES}
 
 
 # --------------------------------------------------------------------------- views (portable)
@@ -305,3 +308,172 @@ def install(connection: Connection) -> int:
 def is_immutability_violation(exc: BaseException) -> bool:
     """True if a database error was raised by one of these triggers."""
     return IMMUTABLE_MARKER in str(exc)
+
+
+# --------------------------------------------------------------------------- M2.1 (revision 0006)
+# Authoring reference for the triggers in migration 0006 (review R2, fixes 5 and 6). The
+# revision holds frozen literal copies; tests/test_sql_views.py asserts they are equal.
+
+#: binding columns of an evaluation cycle: frozen after insert (only state / completed_at move)
+CYCLE_BINDINGS: tuple[str, ...] = (
+    "packet_id",
+    "packet_version",
+    "phase",
+    "target_hash",
+    "project_id",
+    "project_version",
+    "objective_id",
+    "objective_version",
+    "registry_revision_id",
+    "pass_plan",
+    "models",
+    "created_at",
+)
+#: identity columns of an evaPacket: frozen from insert (only state / error / updated_at move)
+EVA_IDENTITY: tuple[str, ...] = (
+    "packet_id",
+    "packet_version",
+    "cycle_id",
+    "preset_id",
+    "field_name",
+    "definition_version",
+    "phase",
+    "plan",
+    "item_keys",
+    "target_hash",
+    "model_config",
+    "model_config_hash",
+    "content_address",
+    "idempotency_key",
+    "escalation",
+    "escalated_from_id",
+    "reused_from_id",
+    "created_at",
+)
+JSON_COLUMNS: frozenset[str] = frozenset({"models", "item_keys", "model_config"})
+#: PostgreSQL tables that get a statement-level BEFORE TRUNCATE guard in 0006
+M21_TRUNCATE_GUARDED: tuple[str, ...] = (
+    "generation_runs",
+    "packet_dependencies",
+    "evaluation_cycles",
+    "eva_packets",
+)
+
+
+def _m21_sqlite() -> list[str]:
+    def trigger(name: str, timing: str, table: str, when: str, message: str) -> str:
+        return (
+            f"CREATE TRIGGER {name} {timing} ON {table} FOR EACH ROW WHEN {when} "
+            f"BEGIN SELECT RAISE(ABORT, '{IMMUTABLE_MARKER}: {message}'); END"
+        )
+
+    def changed(columns: tuple[str, ...]) -> str:
+        return " OR ".join(f"NEW.{c} IS NOT OLD.{c}" for c in columns)
+
+    closed = (
+        "NEW.status = 'closed_unverified' AND (NEW.locked IS NOT 1 OR NEW.completed_at IS NULL)"
+    )
+    stmts = [
+        trigger(
+            f"trg_packets_closed_unverified_locks_{op}",
+            f"BEFORE {op.upper()}",
+            "packets",
+            closed,
+            "closed_unverified packets must be locked with completed_at set",
+        )
+        for op in ("insert", "update")
+    ]
+    stmts += [
+        trigger(
+            "trg_evaluation_cycles_bindings_frozen",
+            "BEFORE UPDATE",
+            "evaluation_cycles",
+            changed(CYCLE_BINDINGS),
+            "evaluation cycle bindings are frozen after insert",
+        ),
+        trigger(
+            "trg_evaluation_cycles_no_delete",
+            "BEFORE DELETE",
+            "evaluation_cycles",
+            "1 = 1",
+            "evaluation cycles cannot be deleted",
+        ),
+        trigger(
+            "trg_eva_packets_identity_frozen",
+            "BEFORE UPDATE",
+            "eva_packets",
+            changed(EVA_IDENTITY),
+            "evaPacket identity columns are frozen from insert",
+        ),
+    ]
+    stmts += [
+        trigger(
+            f"trg_packet_dependencies_append_only_{op}",
+            f"BEFORE {op.upper()}",
+            "packet_dependencies",
+            "1 = 1",
+            f"packet_dependencies is append-only ({op} rejected)",
+        )
+        for op in ("update", "delete")
+    ]
+    return stmts
+
+
+def _m21_postgresql() -> list[str]:
+    def distinct(columns: tuple[str, ...]) -> str:
+        return "\n     OR ".join(
+            f"NEW.{c}::text IS DISTINCT FROM OLD.{c}::text"
+            if c in JSON_COLUMNS
+            else f"NEW.{c} IS DISTINCT FROM OLD.{c}"
+            for c in columns
+        )
+
+    stmts = [
+        _pg_function(
+            "orch_packets_closed_guard",
+            "  IF NEW.status = 'closed_unverified'\n"
+            "     AND (NOT NEW.locked OR NEW.completed_at IS NULL) THEN\n"
+            f"    {_pg_raise('closed_unverified packets must be locked with completed_at set')}\n"
+            "  END IF;",
+        ),
+        _pg_function(
+            "orch_evaluation_cycles_guard",
+            "  IF TG_OP = 'DELETE' THEN\n"
+            f"    {_pg_raise('evaluation cycles cannot be deleted')}\n"
+            "  END IF;\n"
+            f"  IF {distinct(CYCLE_BINDINGS)} THEN\n"
+            f"    {_pg_raise('evaluation cycle bindings are frozen after insert')}\n"
+            "  END IF;",
+        ),
+        _pg_function(
+            "orch_eva_packets_identity_guard",
+            f"  IF {distinct(EVA_IDENTITY)} THEN\n"
+            f"    {_pg_raise('evaPacket identity columns are frozen from insert')}\n"
+            "  END IF;",
+        ),
+    ]
+    stmts += [
+        "CREATE TRIGGER trg_packets_closed_unverified BEFORE INSERT OR UPDATE ON packets "
+        "FOR EACH ROW EXECUTE FUNCTION orch_packets_closed_guard()",
+        "CREATE TRIGGER trg_evaluation_cycles_guard BEFORE UPDATE OR DELETE ON evaluation_cycles "
+        "FOR EACH ROW EXECUTE FUNCTION orch_evaluation_cycles_guard()",
+        "CREATE TRIGGER trg_eva_packets_identity BEFORE UPDATE ON eva_packets "
+        "FOR EACH ROW EXECUTE FUNCTION orch_eva_packets_identity_guard()",
+        "CREATE TRIGGER trg_packet_dependencies_append_only BEFORE UPDATE OR DELETE ON "
+        "packet_dependencies FOR EACH ROW EXECUTE FUNCTION orch_append_only_guard()",
+    ]
+    stmts += [
+        f"CREATE TRIGGER trg_{table}_no_truncate BEFORE TRUNCATE ON {table} "
+        "FOR EACH STATEMENT EXECUTE FUNCTION orch_append_only_guard()"
+        for table in M21_TRUNCATE_GUARDED
+    ]
+    return stmts
+
+
+def m21_statements(dialect: str) -> list[str]:
+    """Trigger DDL installed by migration 0006, per dialect."""
+    if dialect == "sqlite":
+        return _m21_sqlite()
+    if dialect == "postgresql":
+        return _m21_postgresql()
+    raise NotImplementedError(f"no M2.1 DDL for dialect {dialect!r}")

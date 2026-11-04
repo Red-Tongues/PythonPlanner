@@ -9,9 +9,10 @@ identical. Semantic contracts (columns, types, NULL semantics, ordering) are doc
 ``docs/ARCHITECTURE.md`` (B6). Decision-making logic lives here, in SQL; the pure Python oracle
 in ``orchestrator.evaluation.consensus`` must agree with it row for row (D5, parity tests).
 
-Numeric conventions (D2 ruling 6): confidences are ``ROUND(CAST(x AS NUMERIC), 4)`` and every
-comparison against a threshold uses the rounded value on both sides, so SQLite (REAL) and
-PostgreSQL (NUMERIC) decide identically. Booleans in view output are INTEGER 0/1.
+Numeric conventions (D2 ruling 6, M2.1 fix 7): consensus arithmetic is integer fixed point
+scaled by 10⁴ (``*_e4`` columns), so SQLite and PostgreSQL decide identically; the
+``confidence`` columns are those integers divided by 10000 for display. Booleans in view output
+are INTEGER 0/1.
 """
 
 from __future__ import annotations
@@ -68,10 +69,6 @@ def _setting(key: str, default: str) -> str:
     )
 
 
-def _r(expr: str) -> str:
-    return f"ROUND(CAST({expr} AS NUMERIC), 4)"
-
-
 # --------------------------------------------------------------------------- consensus
 
 
@@ -101,30 +98,43 @@ SELECT base.*,
 FROM base"""
 
 
+def _e4(expr: str) -> str:
+    """A setting as an integer scaled by 10⁴ (fixed point, M2.1 fix 7): 0.6 → 6000."""
+    return f"CAST(ROUND({expr} * 10000) AS INTEGER)"
+
+
 def _eva_item_consensus(d: Dialect) -> str:
     """Per evaPacket × item: the B2/B10 decision table. Applies to every evaPacket (history too);
-    ``v_field_consensus`` selects the current one per packet × field × phase."""
+    ``v_field_consensus`` selects the current one per packet × field × phase.
+
+    All arithmetic is **integer fixed point scaled by 10⁴** (M2.1 fix 7): weights and thresholds
+    are quantised to 4 dp once, ``conf = (cw·cross + sw·self + 5) / 10`` (integer division,
+    half up), agreement mean ``(a + b + 1) / 2``. SQLite and PostgreSQL then decide identically
+    and match the oracle exactly — no REAL rounding at a boundary.
+    """
     joins = "".join(
         f"  LEFT JOIN evaluation_pass_items i{n} ON i{n}.eva_packet_id = e.id "
         f"AND i{n}.pass_no = {n} AND i{n}.item_key = k.value\n"
         for n in range(1, 7)
     )
-    cw, sw = _setting("aggregation.cross_weight", "0.6"), _setting("aggregation.self_weight", "0.4")
+    cw = _e4(_setting("aggregation.cross_weight", "0.6"))
+    sw = _e4(_setting("aggregation.self_weight", "0.4"))
     conf_a = (
-        f"CASE WHEN x.va IS NULL THEN NULL WHEN x.is_text = 1 THEN {_r('x.s4 / 10.0')} "
-        f"ELSE {_r(f'({cw} * x.s4 + {sw} * x.s5) / 10.0')} END"
+        "CASE WHEN x.va IS NULL OR x.s4 IS NULL THEN NULL WHEN x.is_text = 1 THEN x.s4 * 1000 "
+        f"WHEN x.s5 IS NULL THEN NULL ELSE ({cw} * x.s4 + {sw} * x.s5 + 5) / 10 END"
     )
     conf_b = (
-        f"CASE WHEN x.vb IS NULL THEN NULL WHEN x.is_text = 1 THEN {_r('x.s3 / 10.0')} "
-        f"ELSE {_r(f'({cw} * x.s3 + {sw} * x.s6) / 10.0')} END"
+        "CASE WHEN x.vb IS NULL OR x.s3 IS NULL THEN NULL WHEN x.is_text = 1 THEN x.s3 * 1000 "
+        f"WHEN x.s6 IS NULL THEN NULL ELSE ({cw} * x.s3 + {sw} * x.s6 + 5) / 10 END"
     )
-    agree_min = _r(_setting("consensus.agreement_min", "0.60"))
-    winner_min = _r(_setting("consensus.winner_min", "0.70"))
-    one_min = _r(_setting("consensus.one_sided_min", "0.70"))
-    margin = _r(_setting("aggregation.dispute_margin", "0.15"))
+    agree_min = _e4(_setting("consensus.agreement_min", "0.60"))
+    winner_min = _e4(_setting("consensus.winner_min", "0.70"))
+    one_min = _e4(_setting("consensus.one_sided_min", "0.70"))
+    margin = _e4(_setting("aggregation.dispute_margin", "0.15"))
     min_sup = _setting("consensus.min_supports", "1")
-    abs_diff = (
-        "CASE WHEN w.conf_a >= w.conf_b THEN w.conf_a - w.conf_b ELSE w.conf_b - w.conf_a END"
+    high = (
+        "CASE WHEN s.ca IS NULL THEN s.cb WHEN s.cb IS NULL THEN s.ca "
+        "WHEN s.ca >= s.cb THEN s.ca ELSE s.cb END"
     )
     return f"""CREATE VIEW v_eva_item_consensus AS
 WITH x AS (
@@ -146,7 +156,7 @@ WITH x AS (
   CROSS JOIN {d.item_keys}
 {joins}),
 c AS (
-  SELECT x.*, {conf_a} AS conf_a, {conf_b} AS conf_b FROM x
+  SELECT x.*, {conf_a} AS ca, {conf_b} AS cb FROM x
 ),
 w AS (
   SELECT c.*,
@@ -159,8 +169,8 @@ w AS (
          WHEN c.va IS NULL THEN 'b'
          WHEN c.vb IS NULL THEN 'a'
          WHEN c.va = c.vb THEN 'both'
-         WHEN c.conf_a > c.conf_b THEN 'a'
-         WHEN c.conf_b > c.conf_a THEN 'b'
+         WHEN c.ca > c.cb THEN 'a'
+         WHEN c.cb > c.ca THEN 'b'
          ELSE NULL END AS winner
   FROM c
 ),
@@ -172,71 +182,116 @@ v AS (
          WHEN 'both' THEN w.con3 + w.con4 + w.con5 + w.con6 ELSE 0 END AS contradictions,
     CASE w.winner WHEN 'a' THEN w.unv4 + w.unv5 WHEN 'b' THEN w.unv3 + w.unv6
          WHEN 'both' THEN w.unv3 + w.unv4 + w.unv5 + w.unv6 ELSE 0 END AS unverified,
-    CASE WHEN w.shape = 'agree' THEN {_r("(w.conf_a + w.conf_b) / 2.0")}
-         WHEN w.shape = 'a_only' THEN w.conf_a
-         WHEN w.shape = 'b_only' THEN w.conf_b
-         WHEN w.shape = 'disagree' THEN CASE WHEN w.conf_a >= w.conf_b THEN w.conf_a
-                                             ELSE w.conf_b END
-         ELSE NULL END AS raw_conf,
-    CASE WHEN w.shape = 'disagree' THEN {_r(abs_diff)}
-         ELSE NULL END AS margin
+    CASE WHEN w.shape = 'agree' THEN (w.ca + w.cb + 1) / 2
+         WHEN w.shape = 'a_only' THEN w.ca
+         WHEN w.shape = 'b_only' THEN w.cb
+         WHEN w.shape = 'disagree' THEN CASE WHEN w.ca >= w.cb THEN w.ca ELSE w.cb END
+         ELSE NULL END AS decision_e4,
+    CASE WHEN w.shape = 'disagree' THEN
+           CASE WHEN w.ca >= w.cb THEN w.ca - w.cb ELSE w.cb - w.ca END
+         ELSE NULL END AS margin_e4
   FROM w
 ),
 s AS (
   SELECT v.*,
-    CASE WHEN v.supports >= {min_sup} AND v.contradictions <= v.supports THEN 1 ELSE 0 END
-      AS evidence_ok
+    CASE WHEN v.complete = 0 THEN 'pending'
+         WHEN v.shape = 'both_null' THEN 'null'
+         WHEN v.supports >= {min_sup} AND v.contradictions <= v.supports AND (
+              (v.shape = 'agree' AND v.decision_e4 >= {agree_min})
+           OR (v.shape IN ('a_only', 'b_only') AND v.decision_e4 >= {one_min})
+           OR (v.shape = 'disagree' AND v.winner IS NOT NULL
+               AND v.decision_e4 >= {winner_min} AND v.margin_e4 >= {margin}))
+         THEN 'accepted'
+         ELSE 'disputed' END AS status
   FROM v
+),
+r AS (
+  SELECT s.*,
+    CASE WHEN s.status = 'pending' THEN NULL
+         WHEN s.status = 'null' THEN 0
+         WHEN s.status = 'accepted' AND s.shape = 'agree' THEN s.decision_e4
+         ELSE {high} END AS confidence_e4
+  FROM s
 )
-SELECT s.eva_packet_id, s.packet_id, s.packet_version, s.eval_cycle_id, s.field_name, s.phase,
-       s.kind, s.item_key, s.complete, s.created_at,
-       s.va AS value_a, s.vb AS value_b, s.conf_a, s.conf_b,
-       CASE WHEN s.shape = 'agree' THEN 1 ELSE 0 END AS agreement,
-       CASE WHEN s.complete = 0 THEN 'pending'
-            WHEN s.shape = 'both_null' THEN 'null'
-            WHEN s.evidence_ok = 1 AND (
-                 (s.shape = 'agree' AND s.raw_conf >= {agree_min})
-              OR (s.shape IN ('a_only', 'b_only') AND s.raw_conf >= {one_min})
-              OR (s.shape = 'disagree' AND s.winner IS NOT NULL
-                  AND s.raw_conf >= {winner_min} AND s.margin >= {margin}))
-            THEN 'accepted'
-            ELSE 'disputed' END AS status,
-       CASE WHEN s.complete = 0 THEN NULL
-            WHEN s.shape = 'both_null' THEN 0
-            ELSE s.raw_conf END AS confidence,
-       CASE WHEN s.complete = 0 THEN 0 ELSE s.supports END AS supports,
-       CASE WHEN s.complete = 0 THEN 0 ELSE s.contradictions END AS contradictions,
-       CASE WHEN s.complete = 0 THEN 0 ELSE s.unverified END AS unverified,
-       CASE WHEN s.complete = 1 AND s.winner = 'a' THEN s.va
-            WHEN s.complete = 1 AND s.winner IN ('b', 'both') THEN s.vb
+SELECT r.eva_packet_id, r.packet_id, r.packet_version, r.eval_cycle_id, r.field_name, r.phase,
+       r.kind, r.item_key, r.complete, r.created_at,
+       r.va AS value_a, r.vb AS value_b,
+       r.ca AS conf_a_e4, r.cb AS conf_b_e4, r.confidence_e4,
+       r.ca / 10000.0 AS conf_a, r.cb / 10000.0 AS conf_b,
+       r.confidence_e4 / 10000.0 AS confidence,
+       CASE WHEN r.shape = 'agree' THEN 1 ELSE 0 END AS agreement,
+       r.status,
+       CASE WHEN r.complete = 0 THEN 0 ELSE r.supports END AS supports,
+       CASE WHEN r.complete = 0 THEN 0 ELSE r.contradictions END AS contradictions,
+       CASE WHEN r.complete = 0 THEN 0 ELSE r.unverified END AS unverified,
+       CASE WHEN r.complete = 1 AND r.winner = 'a' THEN r.va
+            WHEN r.complete = 1 AND r.winner IN ('b', 'both') THEN r.vb
             ELSE NULL END AS winning_value
-FROM s"""
+FROM r"""
 
 
 def _field_consensus() -> str:
     """Current consensus per head packet × field × phase × item (strict binding, ruling 7).
 
-    Pre-phase results must target the packet's current ``input_hash``; post-phase results target
-    an output, whose exact hash the completion gate checks against the artifact (B9)."""
+    An evaPacket is *current* (M2.1 fixes 3, 4) only when all of these hold:
+    - same packet row (= version);
+    - its target is the packet's ``input_hash`` (pre) or the sha256 of the packet's newest
+      artifact (post);
+    - its preset is the active (newest, enabled) revision for its field and phase;
+    - its ``definition_version`` equals the field definition's current version.
+    The most relevant evaPacket is chosen: current first, then complete, then the highest
+    escalation, then newest. If it is not current the row reports ``pending`` with no
+    confidence or value, so stale results can never satisfy readiness or completion.
+    """
     return """CREATE VIEW v_field_consensus AS
-WITH cand AS (
-  SELECT e.id, e.packet_id, e.field_name, e.phase,
-         ROW_NUMBER() OVER (PARTITION BY e.packet_id, e.field_name, e.phase
-                            ORDER BY pr.complete DESC, e.escalation DESC, e.created_at DESC,
-                                     e.id DESC) AS rn
+WITH art AS (
+  SELECT a.packet_id, a.sha256,
+         ROW_NUMBER() OVER (PARTITION BY a.packet_id ORDER BY a.created_at DESC, a.id DESC)
+           AS rn
+  FROM artifacts a
+),
+bound AS (
+  SELECT e.id, e.packet_id, e.field_name, e.phase, e.escalation, e.created_at, pr.complete,
+         CASE WHEN ((e.phase = 'pre' AND e.target_hash = p.input_hash)
+                    OR (e.phase = 'post' AND e.target_hash = la.sha256))
+                   AND ps.enabled
+                   AND ps.revision = (SELECT MAX(p2.revision) FROM eva_presets p2
+                                      WHERE p2.field_name = e.field_name
+                                        AND p2.phase = e.phase)
+                   AND d.enabled
+                   AND e.definition_version = d.version
+              THEN 1 ELSE 0 END AS is_current
   FROM eva_packets e
   JOIN packets p ON p.id = e.packet_id
   JOIN v_eva_progress pr ON pr.eva_packet_id = e.id
+  JOIN eva_presets ps ON ps.id = e.preset_id
+  JOIN candidate_field_definitions d ON d.name = e.field_name
+  LEFT JOIN art la ON la.packet_id = p.id AND la.rn = 1
   WHERE e.packet_version = p.version
-    AND (e.phase = 'post' OR e.target_hash = p.input_hash)
     AND e.state <> 'superseded'
     AND NOT EXISTS (SELECT 1 FROM packets s WHERE s.supersedes_id = p.id)
+),
+cand AS (
+  SELECT bound.*,
+         ROW_NUMBER() OVER (PARTITION BY bound.packet_id, bound.field_name, bound.phase
+                            ORDER BY bound.is_current DESC, bound.complete DESC,
+                                     bound.escalation DESC, bound.created_at DESC,
+                                     bound.id DESC) AS rn
+  FROM bound
 )
 SELECT p.id AS packet_id, p.ref AS packet_ref, p.version AS packet_version,
        c.field_name, c.phase, c.item_key, c.kind,
-       c.value_a, c.value_b, c.conf_a, c.conf_b, c.confidence, c.agreement, c.status,
-       CASE WHEN c.status = 'accepted' THEN c.winning_value ELSE NULL END AS final_value,
-       c.supports, c.contradictions, c.unverified, c.eva_packet_id, c.eval_cycle_id
+       c.value_a, c.value_b,
+       CASE WHEN cand.is_current = 1 THEN c.conf_a ELSE NULL END AS conf_a,
+       CASE WHEN cand.is_current = 1 THEN c.conf_b ELSE NULL END AS conf_b,
+       CASE WHEN cand.is_current = 1 THEN c.confidence ELSE NULL END AS confidence,
+       CASE WHEN cand.is_current = 1 THEN c.confidence_e4 ELSE NULL END AS confidence_e4,
+       c.agreement,
+       CASE WHEN cand.is_current = 1 THEN c.status ELSE 'pending' END AS status,
+       CASE WHEN cand.is_current = 1 AND c.status = 'accepted' THEN c.winning_value
+            ELSE NULL END AS final_value,
+       c.supports, c.contradictions, c.unverified, c.eva_packet_id, c.eval_cycle_id,
+       cand.is_current
 FROM cand
 JOIN packets p ON p.id = cand.packet_id
 JOIN v_eva_item_consensus c ON c.eva_packet_id = cand.id
@@ -397,6 +452,8 @@ SELECT h.id AS packet_id, h.ref AS packet_ref, h.version AS packet_version, h.st
        (SELECT COUNT(*) FROM packet_dependencies dep
           JOIN packets dp ON dp.id = dep.depends_on_id
          WHERE dep.packet_id = h.id
+           AND NOT EXISTS (SELECT 1 FROM revocations rd WHERE rd.target_type = 'dependency'
+                           AND rd.target_id = dep.id)
            AND NOT EXISTS (SELECT 1 FROM packets dh WHERE dh.ref = dp.ref
                            AND dh.status = 'completed')) AS unmet_dependencies,
        (SELECT COUNT(*) FROM confirmations cf WHERE cf.entity_id = h.id
@@ -443,7 +500,11 @@ def queue_select(dialect: str, now: str) -> str:
          CASE WHEN p.manual_boost < 0 THEN 0 WHEN p.manual_boost > 10 THEN 10
               ELSE p.manual_boost END AS boost,
          (SELECT COUNT(*) FROM channel_runs r WHERE r.packet_id = p.id AND r.status = 'failed'
-            AND r.channel IN ('local_generation', 'workbench_production')) AS failed_runs,
+            AND r.channel IN ('local_generation', 'workbench_production')
+            AND NOT EXISTS (SELECT 1 FROM confirmations cf WHERE cf.entity_id = p.id
+                              AND cf.entity_type = 'failure_budget' AND cf.status = 'approved'
+                              AND {d.ts.format(x="cf.decided_at")}
+                                  >= {d.ts.format(x="r.finished_at")})) AS failed_runs,
          (SELECT MAX(r.finished_at) FROM channel_runs r WHERE r.packet_id = p.id
             AND r.status = 'failed'
             AND r.channel IN ('local_generation', 'workbench_production')) AS last_failure_at,

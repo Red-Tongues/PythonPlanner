@@ -216,6 +216,9 @@ class Packet(Base):
     #: SHA-256 of what evaPackets read (packet core + head project/objective core). Results are
     #: current only while their target hash equals this value.
     input_hash: Mapped[str | None] = mapped_column(String(64))
+    #: M2.1 fix 2: bumped by every governance write that can change readiness (waivers,
+    #: overrides, revocations, dependencies, approvals); admission and claim compare-and-set it.
+    gate_revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = _updated()
 
@@ -571,6 +574,9 @@ class EvaPacket(Base):
     )
     preset_id: Mapped[str] = mapped_column(ForeignKey("eva_presets.id"), nullable=False)
     field_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: M2.1 fix 4: the field definition version evaluated; consensus is current only while it
+    #: equals ``candidate_field_definitions.version``
+    definition_version: Mapped[int | None] = mapped_column(Integer)
     phase: Mapped[EvaPhase] = mapped_column(enum_type(EvaPhase), nullable=False)
     plan: Mapped[PassPlanName] = mapped_column(enum_type(PassPlanName), nullable=False)
     #: consensus items: the vocabulary for tag sets, [""] otherwise (bound at creation)

@@ -31,6 +31,9 @@ class PacketStatus(StrEnum):
     AWAITING_CONFIRMATION = "awaiting_confirmation"
     WAITING_FOR_CHILDREN = "waiting_for_children"
     ARCHIVED = "archived"
+    #: M2.1 fix 5: closed by a user without a passing evaluation — terminal, locked, and never
+    #: counted as a success (``completed`` always means the completion gate passed).
+    CLOSED_UNVERIFIED = "closed_unverified"
     # legacy (M1)
     EVALUATING = "evaluating"
     IN_PROGRESS = "in_progress"
@@ -39,7 +42,7 @@ class PacketStatus(StrEnum):
 
 #: Statuses that lock a packet (Requirement F). Kept in sync with ``orchestrator.db.ddl``.
 LOCKING_STATUSES: frozenset[PacketStatus] = frozenset(
-    {PacketStatus.COMPLETED, PacketStatus.ARCHIVED}
+    {PacketStatus.COMPLETED, PacketStatus.ARCHIVED, PacketStatus.CLOSED_UNVERIFIED}
 )
 
 
