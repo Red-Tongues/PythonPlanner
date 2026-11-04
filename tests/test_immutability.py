@@ -14,7 +14,7 @@ from orchestrator.errors import ImmutableRecordError
 from orchestrator.events import record_event
 from orchestrator.lifecycle import transition
 from orchestrator.repository import delete_packet, get_packet, lock_record, update_packet
-from tests.conftest import USER
+from tests.conftest import USER, make_cycle
 
 
 def raw(engine: Engine, sql: str, **params: object) -> None:
@@ -162,7 +162,7 @@ def test_evaluation_passes_are_append_only(engine, session: Session, tree) -> No
         role="extract",
         value=7,
         score=None,
-        eval_cycle_id="cycle-1",
+        eval_cycle_id=make_cycle(session, tree.packets[0].id),
     )
     session.add(ev)
     session.commit()

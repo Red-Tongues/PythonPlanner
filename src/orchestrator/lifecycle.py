@@ -20,17 +20,42 @@ from orchestrator.repository import is_head, packet_snapshot
 
 S = PacketStatus
 
+#: The B9 genPacket lifecycle. Side states: needs_review (a human must look), held / blocked
+#: (human restrictions), awaiting_confirmation (an autonomy-scope approval), waiting_for_children
+#: (a split trunk, B5), failed. Legacy M1 statuses only have exits into this lifecycle.
+_RELEASE = frozenset({S.DRAFT, S.EVALUATING_PRE, S.READY, S.ARCHIVED})
 ALLOWED_TRANSITIONS: dict[PacketStatus, frozenset[PacketStatus]] = {
-    S.DRAFT: frozenset({S.QUEUED, S.ARCHIVED}),
-    S.QUEUED: frozenset({S.EVALUATING, S.READY, S.DRAFT, S.ARCHIVED}),
-    S.EVALUATING: frozenset({S.READY, S.QUEUED, S.FAILED}),
-    S.READY: frozenset({S.IN_PROGRESS, S.AWAITING_CONFIRMATION, S.QUEUED, S.ARCHIVED}),
-    S.IN_PROGRESS: frozenset({S.AWAITING_CONFIRMATION, S.PROCESSED, S.READY, S.FAILED}),
-    S.AWAITING_CONFIRMATION: frozenset({S.IN_PROGRESS, S.READY, S.PROCESSED, S.FAILED}),
-    S.PROCESSED: frozenset({S.COMPLETED, S.IN_PROGRESS, S.QUEUED}),
-    S.FAILED: frozenset({S.QUEUED, S.ARCHIVED}),
+    S.DRAFT: frozenset({S.EVALUATING_PRE, S.HELD, S.BLOCKED, S.ARCHIVED}),
+    S.EVALUATING_PRE: frozenset(
+        {S.READY, S.NEEDS_REVIEW, S.FAILED, S.HELD, S.BLOCKED, S.DRAFT, S.WAITING_FOR_CHILDREN}
+    ),
+    S.READY: frozenset(
+        {
+            S.QUEUED,
+            S.EVALUATING_PRE,
+            S.NEEDS_REVIEW,
+            S.AWAITING_CONFIRMATION,
+            S.WAITING_FOR_CHILDREN,
+            S.HELD,
+            S.BLOCKED,
+            S.ARCHIVED,
+        }
+    ),
+    S.QUEUED: frozenset({S.RUNNING, S.READY, S.EVALUATING_PRE, S.HELD, S.BLOCKED}),
+    S.RUNNING: frozenset({S.EVALUATING_POST, S.READY, S.FAILED, S.AWAITING_CONFIRMATION}),
+    S.EVALUATING_POST: frozenset({S.COMPLETED, S.NEEDS_REVIEW, S.FAILED, S.READY}),
+    S.NEEDS_REVIEW: frozenset({S.EVALUATING_PRE, S.READY, S.HELD, S.BLOCKED, S.ARCHIVED}),
+    S.HELD: _RELEASE,
+    S.BLOCKED: _RELEASE,
+    S.AWAITING_CONFIRMATION: frozenset({S.READY, S.EVALUATING_PRE, S.NEEDS_REVIEW, S.FAILED}),
+    S.WAITING_FOR_CHILDREN: frozenset({S.COMPLETED, S.NEEDS_REVIEW, S.FAILED}),
+    S.FAILED: frozenset({S.DRAFT, S.EVALUATING_PRE, S.AWAITING_CONFIRMATION, S.ARCHIVED}),
     S.COMPLETED: frozenset(),
     S.ARCHIVED: frozenset(),
+    # legacy M1 statuses
+    S.EVALUATING: frozenset({S.EVALUATING_PRE, S.READY, S.FAILED, S.ARCHIVED}),
+    S.IN_PROGRESS: frozenset({S.RUNNING, S.FAILED, S.ARCHIVED}),
+    S.PROCESSED: frozenset({S.EVALUATING_POST, S.ARCHIVED}),
 }
 
 #: Extra transitions only a user actor may make, from any non-terminal status.
@@ -74,6 +99,9 @@ def transition(
             f"(allowed: {allowed or 'none — terminal'})"
         )
 
+    if target is S.COMPLETED and not actor.is_user:
+        _completion_gate(session, packet, current)
+
     before = packet_snapshot(packet)
     packet.status = target
     if target in LOCKING_STATUSES:
@@ -94,3 +122,12 @@ def transition(
     )
     session.flush()
     return event
+
+
+def _completion_gate(session: Session, packet: Packet, current: PacketStatus) -> None:
+    """System completion locks a packet, so it needs evidence (B9, D2 TC-52, B5 roll-up)."""
+    from orchestrator.evaluation.readiness import completion_blockers
+
+    blockers = completion_blockers(session, packet, current)
+    if blockers:
+        raise InvalidTransitionError(f"{packet.ref} cannot complete yet: " + "; ".join(blockers))

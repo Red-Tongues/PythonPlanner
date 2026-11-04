@@ -19,7 +19,6 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     Boolean,
-    DateTime,
     Float,
     ForeignKey,
     Index,
@@ -38,15 +37,24 @@ from orchestrator.contracts import (
     AutonomyMode,
     Channel,
     ConfirmationStatus,
+    CycleState,
+    DependencyKind,
+    EvaPhase,
+    EvaState,
     FieldKind,
     FieldLevel,
+    GenerationRunState,
+    OverrideKind,
+    OverrideScope,
     PacketKind,
     PacketStatus,
+    PassPlanName,
     RunStatus,
     Stage,
     ThresholdAction,
     ThresholdOperator,
 )
+from orchestrator.db.types import UTCDateTime
 
 NAMING_CONVENTION = {
     "ix": "ix_%(column_0_label)s",
@@ -87,11 +95,11 @@ def _id() -> Mapped[str]:
 
 
 def _created() -> Mapped[datetime]:
-    return mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    return mapped_column(UTCDateTime(), default=utcnow, nullable=False)
 
 
 def _updated() -> Mapped[datetime]:
-    return mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+    return mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow, nullable=False)
 
 
 def _version() -> Mapped[int]:
@@ -187,7 +195,7 @@ class Packet(Base):
     )
     evaluations_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     repo_target_path: Mapped[str | None] = mapped_column(Text)
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     locked: Mapped[bool] = _locked()
     # versioning and branching
     version: Mapped[int] = _version()
@@ -199,9 +207,15 @@ class Packet(Base):
     depth: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     # kernel claims (M3): atomic claim with an expiring lease and heartbeats
     claimed_by: Mapped[str | None] = mapped_column(String(64))
-    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    heartbeat_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     source: Mapped[str] = mapped_column(String(64), default="manual", nullable=False)
+    # B9 projections of the current consensus (written from the SQL views, stale-write guarded)
+    tags: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    scores: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    #: SHA-256 of what evaPackets read (packet core + head project/objective core). Results are
+    #: current only while their target hash equals this value.
+    input_hash: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = _updated()
 
@@ -241,12 +255,17 @@ class EvaluationPass(Base):
     # NULLs can never slip past the uniqueness rule.
     __table_args__ = (
         UniqueConstraint("packet_id", "eval_cycle_id", "field_name", "pass_no", "attempt"),
+        # M2: one valid row per pass of an evaPacket (legacy rows have no evaPacket)
+        Index("uq_evaluation_passes_eva_pass", "eva_packet_id", "pass_no", unique=True),
     )
 
     id: Mapped[str] = _id()
     packet_id: Mapped[str] = mapped_column(ForeignKey("packets.id"), nullable=False, index=True)
     field_name: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-    eval_cycle_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    eval_cycle_id: Mapped[str] = mapped_column(
+        ForeignKey("evaluation_cycles.id"), nullable=False, index=True
+    )
+    eva_packet_id: Mapped[str | None] = mapped_column(ForeignKey("eva_packets.id"), index=True)
     run_id: Mapped[str | None] = mapped_column(String(32), index=True)
     model: Mapped[str] = mapped_column(String(128), nullable=False)
     pass_no: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -277,6 +296,7 @@ class Threshold(Base):
     precedence: Mapped[int] = mapped_column(Integer, default=100, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    version: Mapped[int] = _version()  # bumped on every change; part of the branching key (B5)
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = _updated()
 
@@ -315,14 +335,14 @@ class ChannelRun(Base):
     input_hash: Mapped[str | None] = mapped_column(String(64))
     output_hash: Mapped[str | None] = mapped_column(String(64))
     policy_revision: Mapped[str | None] = mapped_column(String(64))
-    deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deadline_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     status: Mapped[RunStatus] = mapped_column(
         enum_type(RunStatus), default=RunStatus.PENDING, nullable=False
     )
     error: Mapped[str | None] = mapped_column(Text)
     latency_ms: Mapped[int | None] = mapped_column(Integer)
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    started_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = _updated()
 
@@ -340,7 +360,7 @@ class Artifact(Base):
     sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     content: Mapped[str | None] = mapped_column(Text)
     accepted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    accepted_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = _updated()
 
@@ -408,7 +428,7 @@ class Confirmation(Base):
         index=True,
     )
     decided_by: Mapped[str | None] = mapped_column(String(64))
-    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    decided_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     reason: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = _updated()
@@ -484,6 +504,229 @@ class FieldRegistryRevision(Base):
     created_at: Mapped[datetime] = _created()
 
 
+# --------------------------------------------------------------------------- M2: evaPackets (B9)
+
+
+class EvaluationCycle(Base):
+    """Groups the evaPackets behind one readiness decision (B1), bound to exact versions."""
+
+    __tablename__ = "evaluation_cycles"
+
+    id: Mapped[str] = _id()
+    packet_id: Mapped[str] = mapped_column(ForeignKey("packets.id"), nullable=False, index=True)
+    packet_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    phase: Mapped[EvaPhase] = mapped_column(enum_type(EvaPhase), nullable=False)
+    target_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    project_id: Mapped[str | None] = mapped_column(ForeignKey("projects.id"))
+    project_version: Mapped[int | None] = mapped_column(Integer)
+    objective_id: Mapped[str | None] = mapped_column(ForeignKey("objectives.id"))
+    objective_version: Mapped[int | None] = mapped_column(Integer)
+    registry_revision_id: Mapped[str | None] = mapped_column(
+        ForeignKey("field_registry_revisions.id")
+    )
+    pass_plan: Mapped[str] = mapped_column(String(32), nullable=False)
+    models: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    state: Mapped[CycleState] = mapped_column(
+        enum_type(CycleState), default=CycleState.OPEN, nullable=False
+    )
+    created_at: Mapped[datetime] = _created()
+    completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    updated_at: Mapped[datetime] = _updated()
+
+
+class EvaPreset(Base):
+    """A preset evaluative prompt for one field and phase. **Append-only**: a change is a new
+    revision; the highest revision per (field, phase) is current."""
+
+    __tablename__ = "eva_presets"
+    __table_args__ = (UniqueConstraint("field_name", "phase", "revision"),)
+
+    id: Mapped[str] = _id()
+    field_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    phase: Mapped[EvaPhase] = mapped_column(enum_type(EvaPhase), nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    tier: Mapped[int] = mapped_column(Integer, nullable=False)  # 1 gating, 2 routing, 3 optional
+    required: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    hard: Mapped[bool] = mapped_column(Boolean, nullable=False)  # hard gates can never be waived
+    gate_operator: Mapped[str | None] = mapped_column(String(16))
+    gate_value: Mapped[str | None] = mapped_column(String(64))
+    plan: Mapped[PassPlanName] = mapped_column(enum_type(PassPlanName), nullable=False)
+    prompt_template: Mapped[str] = mapped_column(String(64), nullable=False)
+    schema_version: Mapped[str] = mapped_column(String(16), nullable=False)
+    policy_version: Mapped[str] = mapped_column(String(16), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = _created()
+
+
+class EvaPacket(Base):
+    """One field of one genPacket version, one phase, one preset revision, one target hash."""
+
+    __tablename__ = "eva_packets"
+
+    id: Mapped[str] = _id()
+    packet_id: Mapped[str] = mapped_column(ForeignKey("packets.id"), nullable=False, index=True)
+    packet_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    cycle_id: Mapped[str] = mapped_column(
+        ForeignKey("evaluation_cycles.id"), nullable=False, index=True
+    )
+    preset_id: Mapped[str] = mapped_column(ForeignKey("eva_presets.id"), nullable=False)
+    field_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    phase: Mapped[EvaPhase] = mapped_column(enum_type(EvaPhase), nullable=False)
+    plan: Mapped[PassPlanName] = mapped_column(enum_type(PassPlanName), nullable=False)
+    #: consensus items: the vocabulary for tag sets, [""] otherwise (bound at creation)
+    item_keys: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    target_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    model_config: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    model_config_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    content_address: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    state: Mapped[EvaState] = mapped_column(
+        enum_type(EvaState), default=EvaState.PLANNED, nullable=False
+    )
+    escalation: Mapped[int] = mapped_column(Integer, default=0, nullable=False)  # B12
+    escalated_from_id: Mapped[str | None] = mapped_column(ForeignKey("eva_packets.id"))
+    reused_from_id: Mapped[str | None] = mapped_column(ForeignKey("eva_packets.id"))
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = _created()
+    updated_at: Mapped[datetime] = _updated()
+
+
+class EvaluationPassItem(Base):
+    """One consensus item of one valid pass: the tag (tag sets) or "" (other kinds).
+
+    Extraction passes have an item only for non-null values; evaluation passes have an item for
+    each item of the value they evaluate, with *verified* evidence counts. **Append-only.**
+    """
+
+    __tablename__ = "evaluation_pass_items"
+    __table_args__ = (UniqueConstraint("pass_id", "item_key"),)
+
+    id: Mapped[str] = _id()
+    pass_id: Mapped[str] = mapped_column(ForeignKey("evaluation_passes.id"), nullable=False)
+    eva_packet_id: Mapped[str] = mapped_column(
+        ForeignKey("eva_packets.id"), nullable=False, index=True
+    )
+    pass_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    item_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    value_norm: Mapped[str | None] = mapped_column(Text)
+    score: Mapped[int | None] = mapped_column(Integer)
+    supports: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    contradictions: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    unverified: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = _created()
+
+
+class QueueOverride(Base):
+    """A human queue decision (B9). **Append-only**; revoked through ``revocations``."""
+
+    __tablename__ = "queue_overrides"
+
+    id: Mapped[str] = _id()
+    packet_id: Mapped[str] = mapped_column(ForeignKey("packets.id"), nullable=False, index=True)
+    packet_ref: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    kind: Mapped[OverrideKind] = mapped_column(enum_type(OverrideKind), nullable=False)
+    scope: Mapped[OverrideScope] = mapped_column(enum_type(OverrideScope), nullable=False)
+    target_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    value: Mapped[float | None] = mapped_column(Float)  # REORDER: priority delta
+    actor: Mapped[str] = mapped_column(String(64), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = _created()
+
+
+class Waiver(Base):
+    """A version-bound human acceptance of one *soft* field (B9). **Append-only**."""
+
+    __tablename__ = "waivers"
+
+    id: Mapped[str] = _id()
+    packet_id: Mapped[str] = mapped_column(ForeignKey("packets.id"), nullable=False, index=True)
+    packet_ref: Mapped[str] = mapped_column(String(16), nullable=False)
+    target_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    field_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    phase: Mapped[EvaPhase] = mapped_column(enum_type(EvaPhase), nullable=False)
+    actor: Mapped[str] = mapped_column(String(64), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = _created()
+
+
+class Revocation(Base):
+    """Revokes one waiver or queue override (its own append-only record, B9)."""
+
+    __tablename__ = "revocations"
+    __table_args__ = (UniqueConstraint("target_type", "target_id"),)
+
+    id: Mapped[str] = _id()
+    target_type: Mapped[str] = mapped_column(String(16), nullable=False)  # waiver | override
+    target_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    actor: Mapped[str] = mapped_column(String(64), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = _created()
+
+
+class PacketDependency(Base):
+    """A typed execution edge (D1). Parent/child hierarchy is *not* a dependency."""
+
+    __tablename__ = "packet_dependencies"
+    __table_args__ = (UniqueConstraint("packet_id", "depends_on_id", "kind"),)
+
+    id: Mapped[str] = _id()
+    packet_id: Mapped[str] = mapped_column(ForeignKey("packets.id"), nullable=False, index=True)
+    depends_on_id: Mapped[str] = mapped_column(ForeignKey("packets.id"), nullable=False)
+    kind: Mapped[DependencyKind] = mapped_column(enum_type(DependencyKind), nullable=False)
+    satisfied_when: Mapped[str] = mapped_column(String(32), default="completed", nullable=False)
+    created_at: Mapped[datetime] = _created()
+
+
+class GenerationRun(Base):
+    """One claim of a genPacket for generation, with the frozen evaluation snapshot it ran with.
+
+    ``evaluation_snapshot`` can never change after insert (DB-enforced)."""
+
+    __tablename__ = "generation_runs"
+
+    id: Mapped[str] = _id()
+    packet_id: Mapped[str] = mapped_column(ForeignKey("packets.id"), nullable=False, index=True)
+    packet_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    input_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    claimed_by: Mapped[str] = mapped_column(String(64), nullable=False)
+    channel_run_id: Mapped[str | None] = mapped_column(ForeignKey("channel_runs.id"))
+    state: Mapped[GenerationRunState] = mapped_column(
+        enum_type(GenerationRunState), default=GenerationRunState.CLAIMED, nullable=False
+    )
+    evaluation_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = _created()
+    updated_at: Mapped[datetime] = _updated()
+
+
+class QueueAdmission(Base):
+    """One admission ready → queued, with its class (fair admission, B9). **Append-only**."""
+
+    __tablename__ = "queue_admissions"
+
+    id: Mapped[str] = _id()
+    packet_id: Mapped[str] = mapped_column(ForeignKey("packets.id"), nullable=False, index=True)
+    packet_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    admission_class: Mapped[str] = mapped_column(String(16), nullable=False)
+    created_at: Mapped[datetime] = _created()
+
+
+class BranchApplication(Base):
+    """Idempotency record of one split (B5): unique per packet version × rule × rule version."""
+
+    __tablename__ = "branch_applications"
+    __table_args__ = (
+        UniqueConstraint("packet_id", "packet_version", "threshold_id", "threshold_version"),
+    )
+
+    id: Mapped[str] = _id()
+    packet_id: Mapped[str] = mapped_column(ForeignKey("packets.id"), nullable=False)
+    packet_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    threshold_id: Mapped[str] = mapped_column(ForeignKey("thresholds.id"), nullable=False)
+    threshold_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    children: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    created_at: Mapped[datetime] = _created()
+
+
 TABLE_NAMES: tuple[str, ...] = (
     "projects",
     "objectives",
@@ -502,4 +745,15 @@ TABLE_NAMES: tuple[str, ...] = (
     "exemplars",
     "ref_counters",
     "field_registry_revisions",
+    "evaluation_cycles",
+    "eva_presets",
+    "eva_packets",
+    "evaluation_pass_items",
+    "queue_overrides",
+    "waivers",
+    "revocations",
+    "packet_dependencies",
+    "generation_runs",
+    "queue_admissions",
+    "branch_applications",
 )

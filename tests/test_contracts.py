@@ -114,4 +114,4 @@ def test_text_field_defaults_to_three_passes() -> None:
         }
     )
     assert d.kind is FieldKind.TEXT
-    assert d.max_passes == 3
+    assert d.max_passes == 4  # B3

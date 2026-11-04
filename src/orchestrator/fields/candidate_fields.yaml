@@ -6,7 +6,7 @@
 # plus `other`, because every draft list ends in "etc".
 #
 # Keys: name, label, level (task|content), kind (tagset|score|text|bool), vocabulary (tagset),
-# scale (score: "0-10"), max_chars / max_passes (text; capped at 3 passes), prompt_hint (the
+# scale (score: "0-10"), max_chars / max_passes (text; capped at 4 passes, B3), prompt_hint (the
 # draft's one-line description), is_key_field (drives routing/branching/approval; PROJECT_PLAN §8).
 #
 # The loader validates this file against orchestrator.contracts.CandidateFieldDefinition and
@@ -105,6 +105,14 @@ fields:
     kind: score
     scale: "0-10"
     prompt_hint: "The prompt is highly ambiguous."
+    is_key_field: true
+
+  # --------------------------------------------------------------- task level · gates (M2, D1 tier 1)
+  - name: safety_clear
+    label: Safety clear
+    level: task
+    kind: bool
+    prompt_hint: "The task can be carried out without destructive, unsafe or policy-violating actions (true) or not (false)."
     is_key_field: true
 
   # --------------------------------------------------------------- content level · scores 0-10

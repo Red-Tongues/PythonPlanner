@@ -30,7 +30,7 @@ def test_uninitialised_database_is_explained(db_url: str) -> None:
 def test_end_to_end(db_url: str) -> None:
     result = cli(db_url, "init-db")
     assert result.exit_code == 0, result.output
-    assert "35 inserted" in result.output
+    assert "36 inserted" in result.output
     assert "0 inserted" in cli(db_url, "init-db").output  # idempotent
 
     result = cli(db_url, "ingest", str(SAMPLE))
@@ -68,7 +68,7 @@ def test_end_to_end(db_url: str) -> None:
 def test_fields_listing(db_url: str) -> None:
     # works from the YAML seed before init-db, and from the DB after
     result = cli(db_url, "fields")
-    assert result.exit_code == 0 and "35 fields" in result.output
+    assert result.exit_code == 0 and "36 fields" in result.output
     cli(db_url, "init-db")
     result = cli(db_url, "fields", "--level", "content")
     assert result.exit_code == 0
