@@ -4,6 +4,82 @@ Newest entries first. Every agent session appends an entry: what changed, decisi
 
 ---
 
+## 2026-11-04 — M2: evaluation engine, genPackets and evaPackets (Claude Code)
+
+Branch `claude/clever-keller-jogsc2` from `main` at 3068e35, with `main` fast-forwarded to 5666780 (B12) during the session. All of M2 is built, including amendments B1–B12, the D1–D5 records and the R1 deferrals GH6 and GE6. `docs/PROJECT_PLAN.md` was not touched.
+
+**Suite:** 350 passed and 3 skipped on SQLite plus PostgreSQL 16 locally (Python 3.13); ruff check and format are clean. CI adds the M2 commands to the CLI smoke step.
+
+### What was built
+| Area | Where |
+|---|---|
+| Migration **0005** (frozen): `evaluation_cycles`, `eva_presets`, `eva_packets`, `evaluation_pass_items`, `queue_overrides`, `waivers`, `revocations`, `packet_dependencies`, `generation_runs`, `queue_admissions`, `branch_applications`. Also: packet `tags`/`scores`/`input_hash`, the B9 statuses, `thresholds.version`, `evaluation_passes.eva_packet_id` and FKs, append-only and snapshot triggers, the `content_eval` ban, M2 settings and presets, and all views | `db/migrations/versions/0005_eva_packets.py`; manifest regenerated through the documented flow |
+| SQL layer (authoring source, frozen into 0005) | `sql/views.py`; `scripts/freeze_views.py`; `tests/test_sql_views.py` keeps the two identical |
+| Providers: protocol, FakeProvider (rule-based, scripted, fail-next-N, noisy), OpenAI-compatible, Ollama with digest pinning | `llm/` |
+| Evaluator: cycles, tiered lazy gating, content-addressed reuse, A-then-B batching, repairs, B12 escalation, stale-write guard | `evaluation/evaluator.py`, `plan.py` + `pass_plans.yaml`, `prompts.py`, `contracts.py`, `normalise.py` |
+| Consensus oracle (pure) and readiness predicate (pure, authoritative) | `evaluation/consensus.py`, `evaluation/readiness.py` |
+| Queue (rank, fair admission, atomic claim with frozen snapshot); waivers/overrides/dependencies; branching, roll-up and promotion; approval actions | `queue.py`, `governance.py`, `branching.py`, `confirmations.py` |
+| LLM tree extraction (`ingest --llm`) | `ingest/llm_extract.py` |
+| CLI: `evaluate`, `consensus`, `stats`, `queue`, `branch apply`, `confirmations list/approve/reject`, `waive`, `override`, `revoke`, `status` | `cli.py` |
+| GH6 UTC-aware datetimes; GE6 re-seeding on init-db | `db/types.py`; `db/seed.py` `ensure_defaults` |
+| Technical docs: B2 decision table, B6 view contracts, SQLite technique | `docs/ARCHITECTURE.md` |
+
+### Judgement calls
+1. **SQLite constraint changes in 0005 use `writable_schema`, not a table rebuild.** Copy-drop-rename under `foreign_keys = ON` failed: dropping a referenced table left deferred violations, and renames rewrote child FKs even in legacy mode. SQLite documents a procedure for format-neutral changes, which is what 0005 does: widen the status CHECK, append defaulted columns at the end (exactly what `ADD COLUMN` does) and add FK clauses, which `foreign_key_check` verifies at once. No row moves and every 0002/0004 trigger and index is untouched. The downgrade uses `DROP COLUMN` (SQLite 3.35+) and refuses while M2 statuses are in use. A populated M1 database and a head → 0003 → head round trip are both tested.
+2. **The `content_eval` ban is a BEFORE INSERT trigger**, not the CHECK named in B9. A CHECK would also reject the legacy rows that D1 says must stay as history.
+3. **Per-item pass rows** are a new append-only table, `evaluation_pass_items`: one row per pass × tag (or `""`), holding the normalised value, score and verified S/C/U counts. This keeps the views plain joins on both dialects. The raw pass, including every quote and its `verified` flag, stays in `evaluation_passes`.
+4. **Disputed agreement reports the mean confidence** (ruling 1), not max(conf_a, conf_b) (ruling 5). The mean is the value the decision was taken on. Disagreement and one-sided rows follow ruling 5.
+5. **B12 attempts:** a combined call gets 1 attempt + 1 repair (`evaluation.repair_attempts`). The single split re-run (`evaluation.max_escalations`) gets `attempts.quickfire_evaluation` (4) attempts per call. Each escalation has its own cycle row bound to the same versions, because pass rows are unique per cycle (R1 fix 5).
+6. **Default presets** (seeded by 0005 and re-seeded by `ensure_defaults`):
+   - pre-phase tier 1: `safety_clear` (hard, gate `= true`), `ambiguity_quotient`, `task_parsability`;
+   - pre-phase tier 2: the routing fields;
+   - pre-phase tier 3: everything else;
+   - post-phase tier 1: `requirement_alignment ≥ 6` and `correctness ≥ 6` (soft), `security_risk ≤ 6` (hard); the other content fields are tier 3.
+   `safety_clear` is a new task-level bool field (registry revision 2 in existing databases), so the D1 tier-1 "safety" gate has something real to check.
+7. **Edits.** `supersede_packet` still creates a `draft`; the evaluator moves it to `evaluating_pre` when it starts. `update_packet` now refuses in-place core-field edits (title, description) once a packet has left `draft` (B9: an edit is a new version). Governance fields stay editable in place.
+8. **Version and hash binding:** pre-phase consensus is current only for the same packet row (= version) **and** `target_hash = packets.input_hash`. Post-phase evaPackets bind to the version, and the completion gate checks that they target the newest artifact's hash when one exists. M3 makes artifacts mandatory.
+9. **User completion keeps M1's manual path:** a user may still complete by hand. The post-evaluation gate applies to system actors (`evaluating_post → completed`), and roll-up to waiting trunks.
+10. **Promotion** writes the routing suggestion (`channel`) only. Priority is computed live in `v_queue`, so `priority_level` is not promoted. `require_approval` rules (ambiguity ≥ 8, disputed key field) create a routing confirmation instead; while it is pending the packet cannot be admitted.
+11. **Simulated time:** `v_queue` uses `CURRENT_TIMESTAMP`; `queue.queue_rows(now=…)` runs the *same generated SQL* with a bound `now`. This is SQL, not a Python fallback (B6).
+12. **One `channel_runs` row per attempt**, each with its own `QE…` id. The pass row records the run id of its successful attempt.
+13. **OpenAI-compatible servers cannot report digests,** so that provider refuses pinned specs rather than trusting them. Ollama is the pinned path (B11).
+14. **Thresholds are now versioned** (the flush guard requires a version bump), which makes the B5 key (packet version × rule × rule version) meaningful.
+15. **M1 tests were updated for the B9 lifecycle** (happy path, retry path, LLM cannot skip) and for 36 registry fields. Test cycle rows come from a `make_cycle` helper because `evaluation_passes.eval_cycle_id` is now a foreign key.
+16. **GE6:** the live defaults in `db/seed.py` are copies of the frozen 0003/0005 seeds. `test_live_defaults_equal_the_frozen_migration_seeds` fails if the two ever drift.
+
+### D2 truth table (B10) — integer rewrites and flags
+Every case's **status** matches Gemini's table. Some reachable integer **confidences** differ from the table:
+
+| Case | Table | Ours | Why |
+|---|---|---|---|
+| TC-02 | 0.59 | 0.59 | (5,6,6,7) |
+| TC-07 | – | A 0.70 vs B 0.54 | margin 0.16 |
+| TC-09 | 0.69 | 0.68 | 0.69 is unreachable |
+| TC-18 | 0.69 | 0.68 | 0.69 is unreachable |
+| TC-25 | 0.65 | 0.66 | nearest reachable |
+| TC-26 | – | t2 0.76 | – |
+| TC-30 | 0.59 | 0.55 | text confidences move in 0.05 steps |
+| TC-31 | – | 0.70 vs 0.50 | – |
+| TC-32 | 0.14 margin | 0.10 | 0.14 is unreachable for text |
+
+TC-12 is re-derived as 0.70 vs 0.60 (margin 0.10). TC-22's "ignored quotes" cannot exist, because both NULLs skip every evaluation pass. Exact boundaries (0.70, margin 0.15, rounding at 4 dp) are unit-tested on `meets` and `margin_ok` (D5 point 1).
+
+**One code/rulings disagreement was found and fixed.** The randomised SQL-versus-oracle parity test caught the oracle counting P5/P6 evidence for text fields, which have no such passes (B3). The SQL was right.
+
+### Known issues
+- **Evaluation is slow:** about 0.8 s per packet with the fake on SQLite. Each pass re-reads and refreshes the packet for the stale-write guard. This is fine at deliberate pace (D14); batch the checks if real models make it matter.
+- **FakeProvider values are keyword heuristics:** good enough to exercise every path, but not a quality signal. Real-model benchmarking is D3/M5 work.
+- **`v_packet_stats.prompt_word_count` is approximate:** it counts single spaces.
+- **`v_branch_stats` treats each trunk version row as a root:** descendants attach to the version they were split from.
+- **0005 assumes a non-defensive SQLite connection:** the Python default. `writable_schema` is unavailable if `SQLITE_DBCONFIG_DEFENSIVE` is on.
+- **CI runs Python 3.11 and 3.12;** this session ran 3.13 locally.
+
+### Next steps
+- PM verification of the PR; panel review R2.
+- M3: the kernel loop around evaluate → admit → claim → generate → post-evaluate → complete, plus channels, artifacts, the pace governor (D14) and the GUI.
+
+---
+
 ## 2026-11-04 — M1.1: review R1 fix list complete (Claude Code)
 
 All 12 fixes from `docs/reviews/R1_consensus.md` are on the PR #1 branch. Following the consensus, **MC2 and MC8 were not acted on** (verified false positives), and **GH6 (UTC-aware datetimes) and GE6 (re-seeding all defaults on init-db) remain deferred to M2**. origin/main was merged in twice this session (c8dc3d3 R1 records; 9fc63bd plan v0.5 and the D1 brief). `docs/PROJECT_PLAN.md` was not touched.
