@@ -52,3 +52,31 @@ Full six-pass run on one packet; agreement, disagreement, dispute-margin and NUL
 3. A packet with `task_parsability ≥ 7` produces child packets linked to the original.
 4. `orchestrator queue` lists packets in a unique, deterministic order.
 5. All tests pass on SQLite locally and on PostgreSQL in CI; ruff clean; `docs/PROGRESS.md` updated; PR lists each criterion ✅/❌.
+
+## R0 review amendments (adopted 2026-11-03 — see `docs/reviews/R0_consensus.md`)
+
+These take precedence over the text above where they conflict.
+
+- **B1 Evaluation cycles.** Every evaluation run gets an `eval_cycle_id` bound to the packet version, project/objective versions, field-definition version, model identities and pass-plan version. `v_field_consensus` aggregates only the latest *complete* cycle per (packet, field).
+- **B2 Consensus decision table** (document it in `docs/ARCHITECTURE.md`, truth-table tests on both dialects):
+  - agreement → accepted only if confidence ≥ 0.60;
+  - disagreement → the winner needs confidence ≥ 0.70 and a margin ≥ 0.15, otherwise `disputed`;
+  - one model NULL → accept the non-null value if its confidence ≥ 0.70, else `disputed`;
+  - both NULL → `null`; incomplete cycle → `pending`; exact ties → `disputed`;
+  - acceptance requires ≥ 1 verified SUPPORT quote (except `null`); contradictions > supports → `disputed`;
+  - tag sets are scored per tag (each tag a toggle with its own confidence).
+  - All thresholds live in `settings`.
+- **B3 Text fields:** 4 passes (P1 A-extract, P2 B-extract, P3 A→b, P4 B→a); confidence = cross score / 10.
+- **B4 Priority.** Inputs normalised to 0–1 with `COALESCE` defaults (ambiguity 5/10 when unknown). The ageing term saturates at `max_age_hours`.
+  - *Eligibility* (status `ready`, unclaimed or lease expired, approvals satisfied, within failure budget, not `waiting_for_children`) is computed separately from *rank*.
+  - Retry backoff; a lifetime failure budget (default 3) moves the packet to `awaiting_confirmation`.
+  - Max-wait rule: any eligible packet waiting longer than `max_wait_hours` is served next.
+  - Tests with simulated time on both dialects.
+- **B5 Branching.** Idempotent on (packet id + version, rule id, rule version), enforced by a unique key. `max_branch_depth` = 2 plus a descendant cap. A split trunk moves to `waiting_for_children` and completes by deterministic roll-up when its children do. `content_eval` packets never branch and never route to generation channels.
+- **B6 View portability.** One documented semantic contract per view (columns, types, NULL semantics, ordering), dialect-specific DDL in one module, and cross-dialect tests asserting identical rows for identical seed data. Decision-making views must not fall back to Python.
+- **B7 Small-model robustness.**
+  - Tolerant output extraction: strip code fences and preambles before JSON parsing.
+  - Conservative quote normalisation before substring matching (whitespace, typographic quotes/dashes, markdown emphasis only). Unverified quotes are stored and excluded, and never fail the parse.
+  - Retry corrections are one concise line, not raw tracebacks.
+  - FakeProvider gains a `noisy` mode (fences, preambles, smart quotes, trailing commas).
+- **B8 Schemas in prompts.** Pass a compact JSON schema of the expected contract in the prompt. Providers declare capabilities (JSON mode, grammar) with graceful fallback.

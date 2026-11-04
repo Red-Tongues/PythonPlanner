@@ -67,8 +67,13 @@ Branch `claude/optimistic-allen-ts03d8`; `origin/main` merged in at 29cd714 (R0 
 - SQLite returns naive datetimes, while PostgreSQL returns timezone-aware ones. All values written are UTC.
 - Alembic downgrades exist but are not tested.
 
+### Proposed plan updates (for the PM; `docs/PROJECT_PLAN.md` is PM-owned)
+- §16: M1 status → "Implemented incl. R0 amendments A1–A7; PR [redtongues/PythonPlanner#1](https://github.com/redtongues/PythonPlanner/pull/1) in review".
+- §21: 2026-11-04 — M1 implemented by Claude Code with A1–A7 on `claude/optimistic-allen-ts03d8`; tests green on SQLite and PostgreSQL 16; PR opened.
+- §6: record that refs name a lineage (`(ref, version)` unique, `REF@N` addresses a version) and that `v_project_heads` / `v_objective_heads` exist alongside `v_packet_heads`.
+
 ### Next steps
-- PM review and Copilot triage of the M1 PR; merge.
+- PM review and panel triage of the M1 PR; merge.
 - M2 (evaluation engine) builds on `eval_cycle_id`, the field-definition and setting versions, `@key_fields` thresholds and the `subtask_list` contract. Add the confirmation approve/reject CLI there.
 
 ---

@@ -56,3 +56,38 @@ Serves requirements **C**, **D**, **E**, **F** · Key Idea K1–K5. Builds on M1
 4. Locked packets cannot be edited from GUI, CLI or code paths (tests).
 5. Interrupt → pause → re-evaluate → resume works (test).
 6. All tests pass (SQLite + PostgreSQL CI); ruff clean; `docs/PROGRESS.md` updated; PR lists each criterion ✅/❌.
+
+## R0 review amendments (adopted 2026-11-03 — see `docs/reviews/R0_consensus.md`)
+
+These take precedence over the text above where they conflict.
+
+- **C1 Durable runs.**
+  - Persisted run state machine (`planned → dispatched → awaiting_result → validating → accepted | failed | stale`).
+  - Intent is written before any external side effect; idempotency keys make every effect repeatable.
+  - Atomic claims with expiring leases and heartbeats; a single-kernel lock.
+  - Startup reconciliation of DB, workbench files and git (resume, re-dispatch or mark stale).
+- **C2 Non-blocking channels.**
+  - Workbench runs wait in `awaiting_result` and are checked each tick until `deadline_at`.
+  - Every external operation has a deadline; one blocked channel never halts the others.
+  - Pause means *drain*: no new dispatches, in-flight runs complete.
+  - Results and approvals are bound to the input hash and policy revision; stale completions are rejected.
+- **C3 Artifact safety.**
+  - Generated artifacts are quarantined (`workbench/quarantine/`) until structural + semantic checks pass (e.g. `python_module` must import in a subprocess and its tests must pass when present).
+  - Target paths are resolved under the repo root, rejecting traversal and symlink escapes.
+  - Accepted artifacts are bound to git commit SHA + content hash; writes and commits are repeatable.
+- **C4 Code outputs** use fenced code blocks with a small front-matter header (path, contract, version), not JSON-escaped strings.
+- **C5 Honest autonomy.**
+  - With no workbench consumer attached, complex-production packets show as `blocked: no workbench consumer` (GUI + CLI) while all other work continues.
+  - SonarQube scans are bound to the exact commit SHA.
+  - Skip/failure policy is documented: a skipped scan is evented; a failed quality gate flags the content-evaluation packet and raises a confirmation.
+- **C6 Adversarial tests.**
+  - Fault injection at every durable boundary (e.g. crash after commit, before DB acknowledgement).
+  - Concurrent claims; late or duplicate inbox results; approval races; branch replay; starvation; retry exhaustion.
+  - A short randomised-fault soak (`orchestrator soak --ticks N --seed S`) that asserts progress and no duplicate effects.
+- **C7 Trust boundary** (documented in `docs/RUNBOOK.md`). On PostgreSQL the runtime role has no DDL rights (migrations use a separate role). Generated work and workbench consumers never receive DB credentials.
+- **C8 Pace and drift governor (CFO decision D14).** Implement PROJECT_PLAN §11.1:
+  - per-channel pace budgets (runs/hour, runs/day) with conservative defaults;
+  - key routing fields evaluated first; other fields lazily, re-evaluated only on input-hash change;
+  - a daily new-packet cap per objective; a confirmation for packets not traceable to an approved objective;
+  - low requirement-alignment on content evaluation pauses that branch;
+  - `orchestrator digest` and a GUI digest page (what advanced, what waits for the user, what is blocked and why).

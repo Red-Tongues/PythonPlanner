@@ -3,12 +3,12 @@
 | | |
 |---|---|
 | **Document** | Project Plan — replaces the draft `Python Planner.docx` (archived at `docs/archive/`) |
-| **Plan version** | 0.2 — living document, updated after every delivery round |
+| **Plan version** | 0.4 — living document, updated after every delivery round (v0.4 records the CFO's decisions on pace, Juggler and the v1 bar) |
 | **Product target** | v1.0.0.0 prototype of the Python Orchestrator (package version `1.0.0.0.devN` until acceptance) |
 | **Sponsor / CFO** | Sam (redtongues) |
 | **Project manager** | Claude (PM agent) |
 | **Main engineer** | Claude Code (cloud session, GitHub-connected) |
-| **Code reviewer** | GitHub Copilot |
+| **Review panel** | Microsoft Copilot · Gemini (Argon) · GitHub Copilot — consensus-scored (see §17) |
 | **Repository** | `github.com/redtongues/PythonPlanner` (private) |
 | **Last updated** | 2026-11-03 |
 
@@ -25,7 +25,7 @@ The Python Orchestrator is the **custom Python kernel** at the centre of an auto
 
 **v1.0.0.0** is a working prototype of that kernel. It runs end-to-end on an ordinary laptop with a deterministic fake model (no GPU, no network), and on the target stack (PostgreSQL + Ollama-served local models + SonarQube) when those are available. It deliberately stops short of production hardening, a native Juggler extension and GPU scheduling, which are planned for v1.1+.
 
-**Delivery approach.** Claude Code builds in three milestone rounds (M1 Foundation → M2 Evaluation engine → M3 Orchestration & interface). GitHub Copilot reviews every round; the PM accepts only suggestions that advance the Key Idea, merges to `main`, verifies independently, and keeps this plan current so any agent can pick up the work.
+**Delivery approach.** Claude Code builds in three milestone rounds (M1 Foundation → M2 Evaluation engine → M3 Orchestration & interface). Every round is reviewed by a **three-model panel** — Microsoft Copilot, Gemini and GitHub Copilot — that mirrors the product's own six-pass design: independent findings, then cross- and self-scoring, then deterministic aggregation (`0.6 × cross + 0.4 × self`). The PM adopts only consensus changes that advance the Key Idea, merges to `main`, verifies independently, and keeps this plan current so any agent can pick up the work.
 
 ---
 
@@ -101,26 +101,23 @@ The Python Orchestrator is the **custom Python kernel** at the centre of an auto
 ### 5.2 Data flow
 
 ```mermaid
-flowchart LR
-  subgraph P1[Part 1 · Set-up / loop interruption]
-    DOC[Planning doc or manual prompt] --> GUI[GUI / CLI]
-    GUI --> EXT[Extraction: Juggler / frontier model / deterministic parser]
-    EXT --> TREE[ProjectTree contract → user confirms per autonomy scope]
+flowchart TB
+  subgraph P1["Part 1 · Set-up / loop interruption"]
+    direction LR
+    DOC["Planning doc or<br/>manual prompt"] --> GUI["GUI / CLI"] --> EXT["Extraction: Juggler,<br/>frontier model or parser"] --> TREE["ProjectTree contract<br/>+ user confirmation"]
   end
-  TREE --> DB[(Project Data · PostgreSQL)]
-  subgraph P2[Part 2 · Automation loop]
-    DB --> QE[a · Quickfire evaluation · local models A+B · 6 passes]
-    QE --> SQL[b · SQL consensus · stats · thresholds · priority]
-    SQL --> ROUTE[c · Python routes ready packets]
-    ROUTE --> LG[Local Generation]
-    ROUTE --> WP[Workbench Production · juggler.studio]
-    LG --> REPO[(Production repo)]
+  TREE --> DB[("Project Data<br/>PostgreSQL")]
+  DB --> QE
+  subgraph P2["Part 2 · Automation loop (every tick)"]
+    direction LR
+    QE["a · Quickfire evaluation<br/>models A + B, six passes"] --> SQL["b · SQL consensus,<br/>stats, thresholds, priority"] --> ROUTE{"c · Python<br/>routes packet"}
+    ROUTE --> LG["Local Generation"]
+    ROUTE --> WP["Workbench Production<br/>juggler.studio"]
+    LG --> REPO[("Production repo")]
     WP --> REPO
-    REPO --> SQ[d · SonarQube scan]
-    SQ --> CE[Content-evaluation packets]
-    CE --> QE
+    REPO --> SQ["d · SonarQube scan"] --> CE["Content-evaluation<br/>packets"]
   end
-  SQL --> DB
+  CE -. "feeds back to (a)" .-> QE
 ```
 
 **Part 1 — set-up / loop interruption.** (i) A planning document or manual prompt enters through the GUI/CLI. (ii) It is extracted to a standardised tree of Project, Objective and Task core fields (Juggler or a frontier model; deterministic parser as fallback), validated against the `ProjectTree` contract, and confirmed by the user according to the autonomy scope.
@@ -151,7 +148,12 @@ flowchart LR
 
 **SQL views:** `v_field_consensus`, `v_packet_stats`, `v_branch_stats` (federated, for branched packets), `v_branch_triggers`, `v_queue`.
 
-**Immutability (Requirement F).** Database triggers on SQLite and PostgreSQL reject UPDATE and DELETE on locked packets and accepted artifacts, and on *any* row of `evaluation_passes` and `events`. The application layer checks first and raises `ImmutableRecordError`, but the database is the guarantee. A correction means a new packet version with `supersedes_id` pointing at the old one.
+**Immutability (Requirement F).** Database triggers on SQLite and PostgreSQL reject UPDATE and DELETE on locked packets and accepted artifacts, and on *any* row of `evaluation_passes` and `events`. They also enforce the invariant on INSERT and UPDATE: a completed or archived row must be locked, and a lock can never be removed. The application layer checks first and raises `ImmutableRecordError`, but the database is the guarantee. A correction means a new version with `supersedes_id` pointing at the old one. Locked rows are never edited and children are never re-pointed; the current head is derived by the `v_packet_heads` view.
+
+**Versioned context and schema (review R0).**
+- Projects, objectives, field definitions and settings are versioned, so every historical evaluation can be traced to the exact inputs it used.
+- Schema, triggers, views and seed data are owned by versioned migrations (Alembic).
+- Columns for claims and leases (`claimed_by`, `lease_expires_at`, `heartbeat_at`), lineage (`depth`, `packet_kind`) and durable runs (`state`, `idempotency_key`, `input_hash`, `output_hash`, `policy_revision`, `deadline_at`) exist from M1.
 
 ---
 
@@ -177,23 +179,26 @@ flowchart LR
 - *Accuracy (in passes 3–6):* "Read `project_document` and determine the accuracy of '`candidate_value`' as a '`candidate_field`'. Consider applicability, relevance, prevalence of evidence, contradictions and ambiguity. The question is: 'Has the candidate value been accurately generated?' Respond only with a single estimated `accuracy_level` score."
 - *Evidence (in passes 3–6):* "Read `project_document` and identify the strongest evidence supporting or contradicting '`candidate_value`' as a value for '`candidate_field`'. Return only exact quotations from the document. Tag each SUPPORT or CONTRADICTION. If no relevant evidence exists, return NULL."
 
-**SQL aggregation (deterministic, weights configurable):**
+**SQL aggregation — decision table (deterministic; all thresholds in `settings`; amended by review R0):**
 
-1. Normalise values (case, whitespace, tag order).
-2. `confidence_x = (0.6 × cross_score_x + 0.4 × self_score_x) / 10` for each model's value.
-3. **Agreement** (`value_a = value_b`) → final value, confidence = mean of both.
-4. **Disagreement** → the higher-confidence value wins; if the margin is below `dispute_margin` (0.15) the field is `disputed` and goes to the approval queue (or Pass 7).
-5. **Tag sets** → each tag is on if both models include it, or one includes it with confidence ≥ 0.7.
-6. **NULL** from both models → consensus `null` (insufficient information).
-7. **Evidence** → quotes must be exact substrings of the source; unverified quotes are discarded and counted. More contradictions than supports → `disputed`.
-8. **Free-text fields** → character-limited and capped at 3 passes (consensus on free text is less reliable).
+1. Every run belongs to an **evaluation cycle** (`eval_cycle_id`) bound to the packet version, context versions, field-definition version, models and pass plan. Only the latest *complete* cycle is aggregated; an incomplete cycle yields `pending`.
+2. Normalise values (case, whitespace, tag order).
+3. `confidence_x = (0.6 × cross_score_x + 0.4 × self_score_x) / 10` for each model's value.
+4. **Agreement** (`value_a = value_b`) → accepted if mean confidence ≥ 0.60, else `disputed`.
+5. **Disagreement** → the winner needs confidence ≥ 0.70 **and** a margin ≥ 0.15, otherwise `disputed` → approval queue (or Pass 7). Exact ties → `disputed`.
+6. **One model NULL** → accept the non-null value if its confidence ≥ 0.70, else `disputed`. **Both NULL** → `null` (insufficient information).
+7. **Evidence** → quotes are matched after conservative normalisation (whitespace, typographic quotes/dashes, markdown emphasis). Unverified quotes are stored but excluded. Acceptance needs ≥ 1 verified SUPPORT quote; more contradictions than supports → `disputed`.
+8. **Tag sets** → scored per tag; each tag is a toggle with its own confidence.
+9. **Free-text fields** → character-limited, 4 passes (P1–P4, cross-checks only), confidence = cross score / 10.
 
 ---
 
 ## 8. Priority, routing, thresholds and branching
 
 **Priority (unique, deterministic, computed in `v_queue`):**
-`priority = w1·objective_priority + w2·age_hours (anti-starvation) + w3·(10 − ambiguity) + w4·manual_boost − w5·failed_runs`, ties broken by `created_at` then `ref`, so every packet has a unique position. Weights live in `settings`.
+`priority = w1·objective_priority + w2·min(age_hours, max_age_hours) + w3·(10 − COALESCE(ambiguity, 5)) + w4·manual_boost − w5·failed_runs`, with every term normalised to 0–1 and ties broken by `created_at` then `ref`, so every packet has a unique position. Weights live in `settings`.
+
+*Eligibility is separate from rank* (amended by review R0). A packet is eligible only when it is `ready`, unclaimed (or its lease has expired), its approvals are satisfied, it is within its lifetime failure budget (default 3, then `awaiting_confirmation`), it is out of retry backoff, and it is not `waiting_for_children`. A max-wait rule serves any eligible packet that has waited longer than `max_wait_hours` next.
 
 **Default routing rules (editable in `thresholds`):**
 
@@ -204,7 +209,7 @@ flowchart LR
 | `coding_intensity ≥ 7` or `reasoning_intensity ≥ 7` or `context_volume ≥ 7` or `output_wordcount ≥ 8` | Workbench Production (Juggler) |
 | Otherwise, consensus accepted | Local Generation |
 
-**Branching:** `task_parsability ≥ 7` → split into independent subtasks (child packets generated through the `subtask_list` contract). The original packet is kept; children carry `parent_id` and `root_id`; federated statistics roll up to the trunk.
+**Branching:** `task_parsability ≥ 7` → split into independent subtasks (child packets generated through the `subtask_list` contract). The original packet is kept and moves to `waiting_for_children`; children carry `parent_id`, `root_id` and `depth`; federated statistics roll up to the trunk. Branching is idempotent (unique key on packet version × rule × rule version), limited to `max_branch_depth` = 2 plus a descendant cap, and never applies to `content_eval` packets.
 
 ---
 
@@ -215,6 +220,12 @@ flowchart LR
 | Quickfire Evaluation | `QE` | 4 | Local models A & B | `CandidateValue`, `PassEvaluation` |
 | Local Generation | `LG` | 3 | Local model | the packet's `response_structure` |
 | Workbench Production | `WP` | 2 | juggler.studio via adapter | the packet's `response_structure` |
+
+**Durable runs (review R0).**
+- Each run follows a persisted state machine (`planned → dispatched → awaiting_result → validating → accepted | failed | stale`). Intent is recorded before any side effect, and idempotency keys make retries safe.
+- Packets are claimed atomically with expiring leases. Startup reconciliation repairs anything left in flight.
+- Channels never block one another: a workbench run waits across ticks until its deadline.
+- Generated artifacts stay in quarantine until checks pass, and their target paths are confined to the repository root.
 
 Up to three run contracts are being verified at any moment (one per channel); the console shows, for example, `Quickfire Evaluation is verifying #QE16709 [attempt 1/4]`. On validation failure the next attempt's prompt includes the validation error. After the last attempt the run is `failed`, counted in the statistics, and the packet is re-queued at lower priority or sent to the approval queue. Every response structure name maps to a registered Pydantic contract; unknown names are rejected at ingestion ("all possible response contracts need to be recognised").
 
@@ -242,6 +253,20 @@ A custom prompt (GUI or CLI) sets `control_state.paused`. No new channel runs st
 
 ---
 
+### 11.1 Pace and drift governor (CFO decision 2026-11-03)
+
+> *"Slow throughput is actually preferred, since it is running all day — I would rather it works slowly to avoid it going far off the rails, working down rabbit holes that I didn't foresee."*
+
+Deliberate pace is a feature, not a performance gap. The kernel enforces:
+
+- **Pace budgets** per channel — maximum runs per hour and per day (conservative defaults; editable in the GUI). Evaluation of key routing fields comes first; other fields are evaluated lazily and only re-evaluated when their inputs change (input-hash caching).
+- **Drift guards:**
+  - a daily cap on new packets per objective;
+  - `max_branch_depth` (2) and a descendant cap;
+  - a packet that cannot be traced to an approved objective needs confirmation;
+  - a low *requirement alignment* score on content evaluation pauses that branch and raises a confirmation instead of continuing.
+- **Daily digest** (GUI + CLI): what advanced, what is waiting for you, what was blocked and why — readable in two minutes (K4).
+
 ## 12. Administrative interface (GUI)
 
 - **Miller-column layout**, inspired by Juggler: Projects │ Objectives │ prioritised Tasks │ Packet detail.
@@ -256,7 +281,7 @@ A custom prompt (GUI or CLI) sets `control_state.paused`. No new channel runs st
 
 **Local LLMs.** Any OpenAI-compatible endpoint (Ollama default `http://localhost:11434/v1`; llama.cpp server and LM Studio also work). Models A and B stay resident on a dedicated 16 GB or 24 GB inference GPU; a separate GPU drives the display and the rest of the stack (MSI X870 board). Tests use a deterministic `FakeProvider`.
 
-**juggler.studio.** An open-source visual workbench for AI coding agents (branchable conversation trees stored on disk; Claude Code, Copilot, OpenAI, Gemini, Ollama and other providers; headless server with browser clients; JavaScript extension SDK). It has no documented REST API, so v1 uses a **file-drop workbench adapter** (`workbench/outbox` → `workbench/inbox`, Markdown + JSON) and specifies a Juggler extension for v1.1 that covers the draft's Tool Design list: conversation selection, model selection, prompt insertion, model outputs, error messages. **Licensing:** Juggler's core is AGPL-3.0 and its extension SDK is Apache-2.0. Keep the orchestrator decoupled (separate process; file/HTTP boundary) and take legal advice before any commercial distribution.
+**juggler.studio.** An open-source visual workbench for AI coding agents (branchable conversation trees stored on disk; Claude Code, Copilot, OpenAI, Gemini, Ollama and other providers; headless server with browser clients; JavaScript extension SDK). It has no documented REST API. M3 therefore ships a **file-drop workbench adapter** (`workbench/outbox` → `workbench/inbox`, Markdown + JSON). **M4 builds a Juggler extension** (`orchestrator-bridge`; spec in `docs/milestones/M4_juggler_bridge.md`) using the JavaScript SDK's slash commands, model-callable tools, loop strategies, info cards and pinboard tabs to cover the draft's Tool Design list: conversation selection, model selection, prompt insertion, model outputs, error messages. **Licensing:** Juggler's core is AGPL-3.0 and its SDK Apache-2.0. The system is for personal project development, so no licensing action is needed now; revisit if the stack starts producing products for sale (CFO, 2026-11-03).
 
 **Production repository.** A separate local git folder. The app writes only accepted artifacts to each packet's `repo_target_path`; commit messages carry the packet ref and run ID; corrections are new commits (reversible, with provenance).
 
@@ -278,6 +303,12 @@ A custom prompt (GUI or CLI) sets `control_state.paused`. No new channel runs st
 | D8 | Juggler via file-drop adapter in v1 | No public API; avoids AGPL coupling | Proposed |
 | D9 | CLI with Typer | Scriptable; mirrors GUI actions | Proposed |
 | D10 | Version scheme MAJOR.MINOR.PATCH.BUILD; package `1.0.0.0.devN` until acceptance | PEP 440 compliant | Proposed |
+| D11 | Versioned migrations (Alembic) own tables, triggers, views and seeds | Safe upgrades across milestones; identical schema on both dialects | Adopted (R0) |
+| D12 | Every milestone reviewed by a three-model panel with six-pass-style consensus | Independent, cross-checked review; mirrors the product's own design | Adopted (CFO request) |
+| D13 | v1.0.0.0 = a working prototype of the kernel, not a production system | Sets the acceptance bar for this phase | **Confirmed by CFO** 2026-11-03 |
+| D14 | Deliberate pace: pace budgets and drift guards over throughput (§11.1) | The system runs all day and must not go down unforeseen rabbit holes | **Confirmed by CFO** 2026-11-03 |
+| D15 | Juggler integration via an `orchestrator-bridge` extension (M4) | Turns the workbench into a real unattended consumer | **Confirmed by CFO** 2026-11-03 |
+| D16 | Personal-use licensing posture (Juggler AGPL acceptable) | No commercial distribution planned | **Confirmed by CFO** 2026-11-03 |
 
 ---
 
@@ -285,7 +316,9 @@ A custom prompt (GUI or CLI) sets `control_state.paused`. No new channel runs st
 
 **In scope:** everything in §3–§13 at prototype fidelity — ingestion, data model with immutability, field registry, six-pass evaluator, SQL consensus/statistics/thresholds/priority, branching, three channels with run contracts and retries, kernel loop with pause/interrupt, autonomy scopes and approval queue, repo writer, SonarQube client, file-drop workbench, local web GUI, CLI, end-to-end demo, CI.
 
-**Out of scope (v1.1+):** native Juggler extension; GPU residency and batching optimisation; SQL-driven dynamic pass counts per packet; frontier-model extraction provider beyond a stub; secrets scanner; multi-user auth; installer/packaging for end users; design-vision artwork.
+**Committed next (M4):** the Juggler `orchestrator-bridge` extension.
+
+**Out of scope (v1.1+):** GPU residency and batching optimisation; SQL-driven dynamic pass counts per packet; frontier-model extraction provider beyond a stub; secrets scanner; multi-user auth; installer/packaging for end users; design-vision artwork.
 
 ---
 
@@ -294,10 +327,12 @@ A custom prompt (GUI or CLI) sets `control_state.paused`. No new channel runs st
 | Milestone | Content | Spec | Status |
 |---|---|---|---|
 | **M0** | Plan, agent guide and repo seeded | this document, `CLAUDE.md` | ✅ Done 2026-11-03 |
-| **M1** | Kernel foundation — packaging, contracts, field registry, schema with immutability triggers, lifecycle, deterministic ingestion, CLI, CI | `docs/milestones/M1_foundation.md` | 🔍 Implemented incl. R0 amendments A1–A7; PR in review |
+| **R0** | Panel review of plan + specs → 24 findings, 20 adopted as amendments A1–A7, B1–B8, C1–C7 | `docs/reviews/R0_consensus.md` | ✅ Done 2026-11-03 |
+| **M1** | Kernel foundation — packaging, contracts, field registry, schema with immutability triggers, lifecycle, deterministic ingestion, CLI, CI (+ R0 amendments A1–A7) | `docs/milestones/M1_foundation.md` | ⏳ In progress |
 | **M2** | Evaluation engine & SQL layer — providers, six-pass evaluator, consensus/statistics/threshold/priority views, branching, LLM extraction contract | `docs/milestones/M2_evaluation_engine.md` | Planned |
 | **M3** | Orchestration & interface — kernel loop, channels, workbench adapter, repo writer, SonarQube client, interruption, autonomy enforcement, GUI, demo | `docs/milestones/M3_orchestration_interface.md` | Planned |
-| **M4** | Hardening & v1.1 backlog | §15 out-of-scope list | Backlog |
+| **M4** | Juggler bridge extension — orchestrator queue API + `orchestrator-bridge` extension (commands, tools, strategy, info card) | `docs/milestones/M4_juggler_bridge.md` | Planned (CFO priority) |
+| **M5** | Hardening & v1.1 backlog — real-model benchmarks, multi-hour soak, GPU residency/batching, secrets scanner | §15 out-of-scope list | Backlog |
 
 **Definition of done (every milestone):** tests green locally and in CI; ruff clean; Copilot review triaged (accepted / deferred / declined, with reasons); `docs/PROGRESS.md` updated; PM verification in an independent environment; merged to `main`.
 
@@ -310,9 +345,17 @@ A custom prompt (GUI or CLI) sets `control_state.paused`. No new channel runs st
 | CFO / sponsor | Sam | Approves decisions marked *Needs CFO*, budget and scope changes |
 | Project manager | Claude (PM agent) | Owns this plan and the milestone specs; prompts the engineer; triages reviews; merges; verifies |
 | Main engineer | Claude Code | Implements milestone specs on `claude/*` branches; opens PRs; keeps `docs/PROGRESS.md` current |
-| Reviewer | GitHub Copilot | Reviews each PR for bugs, security, design drift; proposes concrete changes |
+| Review panel | Microsoft Copilot (GPT-6.1, CFO's freelance sandbox) · Gemini (Argon) · GitHub Copilot (Free; reads the repo directly) | Independent reviews of each milestone, then scoring of each other's findings |
 
-**Review triage.** Each Copilot suggestion is classed **Accept** (implement now), **Defer** (backlog) or **Decline** (with reason) using the Key Idea filter (§2), and logged in `docs/PROGRESS.md`.
+**Review panel — a mixture-of-experts consensus (mirrors §7).**
+1. **Extract:** each reviewer independently returns its top findings, in a fixed table format, from the same review pack (files are attached, or read from the repo).
+2. **Cross/self evaluate:** each reviewer scores *every* finding 0–10 and tags it SUPPORT or CONTRADICTION.
+3. **Aggregate:** `confidence = (0.6 × mean cross + 0.4 × self) / 10`.
+   - ACCEPT: ≥ 0.70 and no contradiction.
+   - ACCEPT-AMENDED: ≥ 0.70 with a contradiction; the PM reconciles.
+   - PARTIAL / DEFER: 0.50–0.70.
+   - DECLINE: < 0.50.
+4. **Filter and schedule:** the PM applies the Key Idea filter, schedules adopted changes into milestone specs or engineer prompts, and records everything in `docs/reviews/`.
 
 **Branching.** All code changes go through pull requests into `main` (squash merge). Only PM documentation may be committed to `main` directly.
 
@@ -325,13 +368,14 @@ A custom prompt (GUI or CLI) sets `control_state.paused`. No new channel runs st
 | Small local models return unreliable structured output | High | High | Pydantic contracts + retries; JSON mode; coarse scales; dual-model consensus; evidence verification; exemplars |
 | Immutability blocks legitimate corrections | Medium | Medium | Supersede with a new version; never edit in place |
 | Juggler has no stable API | Medium | High | Adapter boundary; file-drop now; extension later |
-| AGPL licensing of Juggler core | Medium (if commercialised) | Medium | Separate process; legal advice before distribution |
+| AGPL licensing of Juggler core | Low (personal use) | Low | No action while personal; revisit before selling anything built on the stack |
 | SonarQube free edition analyses one branch only | Medium | Certain | Per-branch project keys; separate secrets scanner |
-| Runaway autonomy (wrong work, wasted time/cost) | High | Medium | Costly stages default to `confirm`; per-channel attempt limits; pause/kill switch; full event log |
+| Runaway autonomy — rabbit holes the user did not foresee | High | Medium | Pace budgets and drift guards (§11.1); costly stages default to `confirm`; per-channel attempt limits; pause/kill switch; daily digest; full event log |
 | Scope creep (the draft is broad) | High | High | Milestone specs; Key Idea filter; explicit backlog |
 | VRAM too small for two resident models | Medium | Medium | Small quantised models; measure; fall back to swap-loading |
 | Agent-written code quality | Medium | Medium | Tests, CI, Copilot review, independent PM verification |
-| AI subscription usage limits (Claude Pro) | Medium | Medium | Work in milestone-sized rounds; lighter models for routine work |
+| AI subscription usage limits (Claude Pro; GitHub Copilot Free monthly chat cap; Gemini Argon heavier usage) | Medium | Medium | Work in milestone-sized rounds; two panel prompts per reviewer per milestone; lighter models for routine work |
+| Review panel converges on fashionable but low-value changes | Medium | Low | Deterministic scoring with self-bias damped (0.6 cross / 0.4 self); PM Key Idea filter; contradictions reconciled explicitly |
 
 ---
 
@@ -353,12 +397,13 @@ No prices are quoted here; obtain current quotes before purchase.
 
 ## 20. Open questions and decisions for the CFO
 
+*Answered 2026-11-03:* v1 bar (D13), deliberate pace (D14), Juggler extension (D15), personal-use licensing (D16).
+
 1. **D3** — combined vs split evaluation passes (§7).
 2. Default autonomy modes (§11) — acceptable as a starting point?
 3. Score scale 0–10 — acceptable?
 4. GUI as a local web UI (D6) rather than a desktop app?
 5. Frontier model for messy-document extraction: which provider and what monthly budget?
-6. Commercial intent for anything built on juggler.studio (AGPL)?
 7. Design-vision images for GUI states — who produces them, and when?
 8. The draft's sentence "Both models stay loaded and …" is unfinished — assumed to mean *stay resident and serve stateless calls*.
 9. Which local models for A and B? (benchmark against ground-truth exemplars)
@@ -370,7 +415,8 @@ No prices are quoted here; obtain current quotes before purchase.
 | Date | Event |
 |---|---|
 | 2026-11-03 | Plan v0.2 drafted from the CFO's draft; repository seeded (plan, agent guide, milestone specs, archived draft); M1 started with Claude Code. |
-| 2026-11-04 | M1 implemented by Claude Code (with R0 amendments A1–A7) on `claude/optimistic-allen-ts03d8`; tests green on SQLite and PostgreSQL 16; PR opened for review. |
+| 2026-11-03 | Review R0. The three-model panel (Microsoft Copilot, Gemini, GitHub Copilot) raised 24 findings on the plan and specs; cross/self scoring adopted 20 (18 accepted, 2 accepted with amendments), 2 partially and deferred 2 already covered elsewhere. Amendments A1–A7 were sent to the engineer during M1; B1–B8 and C1–C7 were folded into the M2/M3 specs. Plan → v0.3. |
+| 2026-11-03 | CFO check-in: v1 bar confirmed (working prototype of the kernel); slow, deliberate pace preferred → pace and drift governor (§11.1); Juggler extension committed as M4; personal-use licensing. Plan → v0.4. |
 
 ---
 
@@ -379,4 +425,5 @@ No prices are quoted here; obtain current quotes before purchase.
 - **Read in this order:** `CLAUDE.md` → this plan → `docs/PROGRESS.md` → the milestone spec in progress.
 - The original draft is preserved, unedited, in `docs/archive/` — treat it as provenance, not as the spec.
 - Respect the Key Idea filter (§2) and the immutability rule (Requirement F) above all else.
-- Update §16 status, §21 progress log and `docs/PROGRESS.md` at the end of every session.
+- **Ownership:** the PM owns this plan, the milestone specs and `docs/reviews/`; the engineer owns code, `README.md`, `docs/PROGRESS.md` and technical docs (`docs/ARCHITECTURE.md`, `docs/RUNBOOK.md`). Engineers should propose plan changes in `docs/PROGRESS.md` rather than edit this file, so parallel branches don't conflict.
+- Update `docs/PROGRESS.md` at the end of every session; the PM folds it into §16 and §21.
