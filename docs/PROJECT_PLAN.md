@@ -342,6 +342,7 @@ Deliberate pace is a feature, not a performance gap. The kernel enforces:
 | D14 | Deliberate pace: pace budgets and drift guards over throughput (§11.1) | The system runs all day and must not go down unforeseen rabbit holes | **Confirmed by CFO** 2026-11-03 |
 | D15 | Juggler integration via an `orchestrator-bridge` extension (M4) | Turns the workbench into a real unattended consumer | **Confirmed by CFO** 2026-11-03 |
 | D16 | Personal-use licensing posture (Juggler AGPL acceptable) | No commercial distribution planned | **Confirmed by CFO** 2026-11-03 |
+| D17 | Hardware envelope for v1: **at most 20 GB VRAM** (runs on an RTX 3090 24 GB or a 32 GB M2 Max with OS headroom); model choice deferred — shortlist in `docs/reviews/D3_*` | Hardware may be upgraded later; build a working system first | **Confirmed by CFO** 2026-11-04 |
 
 ---
 

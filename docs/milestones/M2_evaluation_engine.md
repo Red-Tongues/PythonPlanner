@@ -119,3 +119,6 @@ Implement TC-01 to TC-52 as parametrised tests on both dialects. Derive the expe
 - Each provider config names a model **and its SHA-256 digest**. At startup the OpenAI-compatible/Ollama provider checks `/api/tags` (or an equivalent) against the allowlist and refuses to run evaluations on a mismatch (evented, visible in `orchestrator status`).
 - Record model digest, quantisation, `num_ctx` and decoding options in each `eva_packets.model_config`, so they form part of the content address (D1).
 - Always send an explicit `num_ctx` and `think: false` where supported. Use JSON-Schema structured outputs (`response_format` json_schema / native `format`) generated from the Pydantic contracts, then validate with Pydantic.
+
+- **Hardware envelope (D17):** evaluator configuration must fit in ≤ 20 GB VRAM in total, on CUDA (RTX 3090) or Apple Metal (32 GB M2 Max). Provider code must not assume CUDA. Model choice is configuration, not code.
+- **D5 clarifications:** see `docs/reviews/D5_contracts_notes.md` (integer boundaries, tag-map nulls, tie evidence, the pure consensus oracle plus SQL parity tests).
