@@ -23,7 +23,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model, model_validator
 
-from orchestrator.contracts import FieldKind
+from orchestrator.contracts.enums import FieldKind
 
 REASON_MAX = 280
 QUOTE_MAX = 500

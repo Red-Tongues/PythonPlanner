@@ -54,6 +54,14 @@ from orchestrator.contracts import (
     PassPlanName,
     RunStatus,
 )
+from orchestrator.contracts.evaluation import (
+    CONTRACT_VERSION,
+    EVALUATION_CONTRACTS,
+    candidate_model,
+    concise_error,
+    json_schema,
+    tag_map_model,
+)
 from orchestrator.db.models import (
     CandidateFieldDefinitionRow,
     ChannelRun,
@@ -73,14 +81,6 @@ from orchestrator.db.refs import allocate
 from orchestrator.db.seed import current_registry_revision
 from orchestrator.errors import ImmutableRecordError, OrchestratorError
 from orchestrator.evaluation import prompts
-from orchestrator.evaluation.contracts import (
-    CONTRACT_VERSION,
-    EVALUATION_CONTRACTS,
-    candidate_model,
-    concise_error,
-    json_schema,
-    tag_map_model,
-)
 from orchestrator.evaluation.normalise import (
     OutputFormatError,
     extract_json,

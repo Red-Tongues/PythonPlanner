@@ -119,7 +119,7 @@ def subtasks_with_llm(
     session: Session, packet: Packet, provider: LLMProvider, *, max_attempts: int = 3
 ) -> SubtaskList:
     """A validated ``subtask_list`` from the Local Generation model (retries with corrections)."""
-    from orchestrator.evaluation.contracts import concise_error, json_schema
+    from orchestrator.contracts.evaluation import concise_error, json_schema
     from orchestrator.evaluation.evaluator import packet_document
     from orchestrator.evaluation.normalise import OutputFormatError, extract_json
     from orchestrator.evaluation.prompts import correction_suffix, subtask_prompt
