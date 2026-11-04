@@ -160,3 +160,11 @@ def test_architecture_doc_publishes_the_tables() -> None:
 def test_pair_lists_are_sorted_and_complete() -> None:
     assert packet_pairs() == sorted(PACKET_TRANSITIONS)
     assert set(run_pairs()) == {k for k in RUN_TRANSITIONS if k[0] != k[1]}
+
+
+def test_d9_r1_branch_kill_blocks_and_never_closes() -> None:
+    close = PACKET_TRANSITIONS[("ready", "closed_unverified")]
+    assert "branch kill is a BLOCK" in close.trigger
+    for src in ("draft", "evaluating_pre", "ready", "queued", "needs_review", "failed", "held"):
+        assert "branch kill" in PACKET_TRANSITIONS[(src, "blocked")].trigger
+    check_packet(S.BLOCKED, S.EVALUATING_PRE, USER)  # undone by revoking the BLOCK

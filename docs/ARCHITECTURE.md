@@ -171,8 +171,8 @@ change (DB-enforced).
 
 | From → To | Actor | Trigger | Guard | Dev. |
 |---|---|---|---|---|
-| `awaiting_confirmation` → `blocked` | user | BLOCK | G bumped in scope (C35) |  |
-| `awaiting_confirmation` → `closed_unverified` | user | close or branch kill | reason required; locks; in-flight runs staled |  |
+| `awaiting_confirmation` → `blocked` | user | BLOCK, incl. branch kill (D9-R1: a branch-scope BLOCK, reversible) | G bumped in scope (C35) |  |
+| `awaiting_confirmation` → `closed_unverified` | user | explicit owner close (branch kill is a BLOCK, not a close: D9-R1) | reason required; locks; in-flight runs staled |  |
 | `awaiting_confirmation` → `completed` | user | optional-scan approval | E5 completion guard; the approval covers only that gate ERROR, never a hard constraint; locks |  |
 | `awaiting_confirmation` → `evaluating_post` | user | repo_write / optional-scan approval | E4: repo_write needs the full publication guard of running → evaluating_post (R1 for the targeted run); a mismatch stales the run |  |
 | `awaiting_confirmation` → `evaluating_pre` | kernel / user | approval but H stale (C25); candidate-promotion approval (E1) | targets the current version and context; promotion and C25 gate bump atomic; readiness recomputed; a stale approval does not apply |  |
@@ -180,66 +180,66 @@ change (DB-enforced).
 | `awaiting_confirmation` → `queued` | user | failure-budget or 48 h approval | H current |  |
 | `awaiting_confirmation` → `running` | user | exit-3 approval | R1; then the shared dispatch guard (E3); resumes the same conversation exactly once |  |
 | `awaiting_confirmation` → `waiting_for_children` | user | split approval | E10 split guard; the confirmation is validated and C25 applied |  |
-| `blocked` → `closed_unverified` | user | close or branch kill | reason required; locks; in-flight runs staled |  |
+| `blocked` → `closed_unverified` | user | explicit owner close (branch kill is a BLOCK, not a close: D9-R1) | reason required; locks; in-flight runs staled |  |
 | `blocked` → `evaluating_pre` | kernel / user | last BLOCK revoked / blocker cleared; no HOLD | — |  |
 | `blocked` → `held` | user | last BLOCK revoked, HOLD remains | — |  |
-| `draft` → `blocked` | user | BLOCK | G bumped in scope (C35) |  |
-| `draft` → `closed_unverified` | user | close or branch kill | reason required; locks; in-flight runs staled |  |
+| `draft` → `blocked` | user | BLOCK, incl. branch kill (D9-R1: a branch-scope BLOCK, reversible) | G bumped in scope (C35) |  |
+| `draft` → `closed_unverified` | user | explicit owner close (branch kill is a BLOCK, not a close: D9-R1) | reason required; locks; in-flight runs staled |  |
 | `draft` → `evaluating_pre` | kernel | tick step 2 | H = current fingerprint (B9, C25) |  |
 | `draft` → `held` | kernel / user | HOLD (user) or alignment hold (governor) | no active BLOCK |  |
-| `evaluating` → `closed_unverified` | user | close or branch kill | reason required; locks; in-flight runs staled |  |
+| `evaluating` → `closed_unverified` | user | explicit owner close (branch kill is a BLOCK, not a close: D9-R1) | reason required; locks; in-flight runs staled |  |
 | `evaluating` → `evaluating_pre` | kernel | legacy M1 row re-enters evaluation | — | P3 |
 | `evaluating_post` → `awaiting_confirmation` | kernel | optional-scan ERROR | — |  |
 | `evaluating_post` → `blocked` | kernel | required scanner unavailable, or execution/report retrieval failed | E6 |  |
-| `evaluating_post` → `closed_unverified` | user | close or branch kill | reason required; locks; in-flight runs staled |  |
+| `evaluating_post` → `closed_unverified` | user | explicit owner close (branch kill is a BLOCK, not a close: D9-R1) | reason required; locks; in-flight runs staled |  |
 | `evaluating_post` → `completed` | kernel / user | completion | E5: every required post field complete, accepted and current for M from C29-verified evaluators; scan bound to the commit SHA; quality policy (C30); all hard gates; no hold or block; locks | P2 |
 | `evaluating_post` → `held` | kernel | alignment < 7,500 (governor) | — |  |
 | `evaluating_post` → `needs_review` | kernel | post-eval failed / returned required-scan gate ERROR | E6: a gate ERROR bound to the commit SHA also raises a confirmation |  |
 | `evaluating_pre` → `awaiting_confirmation` | kernel | promotion/branch | scope = confirm |  |
-| `evaluating_pre` → `blocked` | user | BLOCK | G bumped in scope (C35) |  |
-| `evaluating_pre` → `closed_unverified` | user | close or branch kill | reason required; locks; in-flight runs staled |  |
+| `evaluating_pre` → `blocked` | user | BLOCK, incl. branch kill (D9-R1: a branch-scope BLOCK, reversible) | G bumped in scope (C35) |  |
+| `evaluating_pre` → `closed_unverified` | user | explicit owner close (branch kill is a BLOCK, not a close: D9-R1) | reason required; locks; in-flight runs staled |  |
 | `evaluating_pre` → `held` | kernel / user | HOLD (user) or alignment hold (governor) | no active BLOCK |  |
 | `evaluating_pre` → `needs_review` | kernel | evaluation | tier-1 dispute, B12, ambiguity |  |
 | `evaluating_pre` → `ready` | kernel | readiness | required tiers accepted or soft-waived; no hard failure; dependencies; approvals; ambiguity ≤ 4,000; H current |  |
 | `evaluating_pre` → `waiting_for_children` | kernel | split | E10: depth < 2; descendant and fan-out caps; atomic capacity reservation (C36); B5 idempotency on (packet id + version, rule id, rule version); branching scope auto |  |
 | `failed` → `awaiting_confirmation` | kernel | failure budget exhausted | one confirmation |  |
-| `failed` → `blocked` | user | BLOCK | G bumped in scope (C35) |  |
-| `failed` → `closed_unverified` | user | close or branch kill | reason required; locks; in-flight runs staled |  |
+| `failed` → `blocked` | user | BLOCK, incl. branch kill (D9-R1: a branch-scope BLOCK, reversible) | G bumped in scope (C35) |  |
+| `failed` → `closed_unverified` | user | explicit owner close (branch kill is a BLOCK, not a close: D9-R1) | reason required; locks; in-flight runs staled |  |
 | `failed` → `evaluating_pre` | kernel | fingerprint or readiness changed | H ≠ current or not ready; the kernel commits (M2.1 ruling 4) |  |
 | `failed` → `held` | kernel / user | HOLD (user) or alignment hold (governor) | no active BLOCK |  |
 | `failed` → `queued` | kernel | retry | within budget and backoff, or config changed; H current |  |
-| `held` → `blocked` | user | BLOCK | G bumped in scope (C35) |  |
-| `held` → `closed_unverified` | user | close or branch kill | reason required; locks; in-flight runs staled |  |
+| `held` → `blocked` | user | BLOCK, incl. branch kill (D9-R1: a branch-scope BLOCK, reversible) | G bumped in scope (C35) |  |
+| `held` → `closed_unverified` | user | explicit owner close (branch kill is a BLOCK, not a close: D9-R1) | reason required; locks; in-flight runs staled |  |
 | `held` → `evaluating_pre` | user | last HOLD revoked / owner clears hold | never automatic |  |
-| `in_progress` → `closed_unverified` | user | close or branch kill | reason required; locks; in-flight runs staled |  |
+| `in_progress` → `closed_unverified` | user | explicit owner close (branch kill is a BLOCK, not a close: D9-R1) | reason required; locks; in-flight runs staled |  |
 | `in_progress` → `evaluating_pre` | kernel | legacy M1 row re-enters evaluation | — | P3 |
-| `needs_review` → `blocked` | user | BLOCK | G bumped in scope (C35) |  |
-| `needs_review` → `closed_unverified` | user | close or branch kill | reason required; locks; in-flight runs staled |  |
+| `needs_review` → `blocked` | user | BLOCK, incl. branch kill (D9-R1: a branch-scope BLOCK, reversible) | G bumped in scope (C35) |  |
+| `needs_review` → `closed_unverified` | user | explicit owner close (branch kill is a BLOCK, not a close: D9-R1) | reason required; locks; in-flight runs staled |  |
 | `needs_review` → `evaluating_post` | user | soft waiver (post) | G bumped |  |
 | `needs_review` → `evaluating_pre` | user | soft waiver (pre) or definition/exemplar edit | G bumped |  |
 | `needs_review` → `held` | kernel / user | HOLD (user) or alignment hold (governor) | no active BLOCK |  |
-| `processed` → `closed_unverified` | user | close or branch kill | reason required; locks; in-flight runs staled |  |
+| `processed` → `closed_unverified` | user | explicit owner close (branch kill is a BLOCK, not a close: D9-R1) | reason required; locks; in-flight runs staled |  |
 | `processed` → `evaluating_pre` | kernel | legacy M1 row re-enters evaluation | — | P3 |
 | `queued` → `awaiting_confirmation` | kernel | failure budget / 48 h touch | one confirmation |  |
-| `queued` → `blocked` | kernel / user | WP routing with no consumer (C5); BLOCK | G bumped in scope (C35) |  |
-| `queued` → `closed_unverified` | user | close or branch kill | reason required; locks; in-flight runs staled |  |
+| `queued` → `blocked` | kernel / user | WP routing with no consumer (C5); BLOCK, incl. branch kill (D9-R1: a branch-scope BLOCK, reversible) | G bumped in scope (C35) |  |
+| `queued` → `closed_unverified` | user | explicit owner close (branch kill is a BLOCK, not a close: D9-R1) | reason required; locks; in-flight runs staled |  |
 | `queued` → `evaluating_pre` | kernel | fingerprint or readiness changed | H ≠ current or not ready; the kernel commits (M2.1 ruling 4) |  |
 | `queued` → `held` | kernel / user | HOLD (user) or alignment hold (governor) | no active BLOCK |  |
 | `queued` → `running` | kernel | claim | E9: H recomputed, then the full readiness predicate; guarded UPDATE (status, version, H, G, lease); not paused (C26); budget reserved (C36); snapshot written and F incremented in the same transaction |  |
 | `ready` → `awaiting_confirmation` | kernel | failure budget | one confirmation | P1 |
-| `ready` → `blocked` | user | BLOCK | G bumped in scope (C35) |  |
-| `ready` → `closed_unverified` | user | close or branch kill | reason required; locks; in-flight runs staled |  |
+| `ready` → `blocked` | user | BLOCK, incl. branch kill (D9-R1: a branch-scope BLOCK, reversible) | G bumped in scope (C35) |  |
+| `ready` → `closed_unverified` | user | explicit owner close (branch kill is a BLOCK, not a close: D9-R1) | reason required; locks; in-flight runs staled |  |
 | `ready` → `evaluating_pre` | kernel | fingerprint or readiness changed | H ≠ current or not ready; the kernel commits (M2.1 ruling 4) |  |
 | `ready` → `held` | kernel / user | HOLD (user) or alignment hold (governor) | no active BLOCK |  |
 | `ready` → `queued` | kernel | admit_next | E9: H recomputed, then the full readiness predicate (C12); guarded UPDATE on status, version, H, G; no BLOCK/HOLD; within failure budget |  |
 | `ready` → `waiting_for_children` | kernel | split | E10: depth < 2; descendant and fan-out caps; atomic capacity reservation (C36); B5 idempotency on (packet id + version, rule id, rule version); branching scope auto |  |
 | `running` → `awaiting_confirmation` | kernel | exit 3 / repo_write = confirm | — |  |
 | `running` → `blocked` | kernel | execution check under NoRunner (C31) | — |  |
-| `running` → `closed_unverified` | user | close or branch kill | reason required; locks; in-flight runs staled |  |
+| `running` → `closed_unverified` | user | explicit owner close (branch kill is a BLOCK, not a close: D9-R1) | reason required; locks; in-flight runs staled |  |
 | `running` → `evaluating_post` | kernel | write + commit | publication guard: run accepted; run F = packet F; G, H match; expected HEAD; C32 ownership and base hash; write authorised; idempotent write + commit; M and commit SHA recorded first |  |
 | `running` → `evaluating_pre` | kernel | stale run | E7: only if the packet's active run ID and F match this run, it is still running, and no hold, block, pause or confirmation applies (V2) |  |
 | `running` → `failed` | kernel | run failed | F matches |  |
-| `waiting_for_children` → `closed_unverified` | user | close or branch kill | reason required; locks; in-flight runs staled |  |
+| `waiting_for_children` → `closed_unverified` | user | explicit owner close (branch kill is a BLOCK, not a close: D9-R1) | reason required; locks; in-flight runs staled |  |
 | `waiting_for_children` → `completed` | kernel / user | roll-up | ≥ 1 child and all children completed (closed_unverified does not count); locks | P2 |
 
 #### 7.2 Run transitions (`generation_runs.state`)
@@ -293,3 +293,7 @@ run ID and F. E8 → `accepted → stale` also on an H mismatch or a superseded 
 admission and claim run the full readiness predicate after recomputing H (already so in M2.1).
 E10 → split guards on both split rows. E11 → deadline expiry is a timeout failure, recorded once
 per operation ID.
+
+**D9-R1 (PM ruling, 2026-11-04).** Branch kill is a BLOCK override at branch scope: the
+packets move to `blocked` and the kill can be undone by revoking it. Closing
+(`→ closed_unverified`) is only ever a separate, explicit owner action with a reason.
