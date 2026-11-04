@@ -1,0 +1,22 @@
+# Pass plans (PROJECT_PLAN §7, D3 confirmed by the CFO with bounded hybrid escalation — B12).
+#
+# A plan is data: which model runs each pass, what it does, and which calls a pass makes.
+# `combined` is canonical: one call per evaluation pass returns score + evidence + reason
+# (6 calls per field). `split` asks for accuracy and evidence separately (10 calls per field);
+# it is used for one re-run of an unresolved field (B12) or when a preset pre-routes a field to it.
+# Text fields use passes 1-4 only (B3); passes that would evaluate a NULL value are skipped
+# (D2 ruling 2).
+version: "1"
+passes:
+  - {number: 1, model: a, role: extract}
+  - {number: 2, model: b, role: extract}
+  - {number: 3, model: a, role: cross, target: 2}
+  - {number: 4, model: b, role: cross, target: 1}
+  - {number: 5, model: a, role: self, target: 1}
+  - {number: 6, model: b, role: self, target: 2}
+text_passes: [1, 2, 3, 4]
+plans:
+  combined:
+    calls: [evaluate]
+  split:
+    calls: [accuracy, evidence]
