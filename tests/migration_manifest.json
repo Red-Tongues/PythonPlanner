@@ -1,0 +1,121 @@
+{
+  "postgresql": {
+    "0001": {
+      "functions": {},
+      "triggers": {},
+      "views": {}
+    },
+    "0002": {
+      "functions": {
+        "orch_append_only_guard": "fd16a42601e7720e",
+        "orch_artifacts_guard": "94fcc3d112a000e2",
+        "orch_autonomy_fixed_guard": "ca8b56d71263140f",
+        "orch_locked_guard": "bcf26a66637ff799",
+        "orch_packets_completion_guard": "fd464774b93a9b38"
+      },
+      "triggers": {
+        "trg_artifacts_guard": "96f4fb72058b720a",
+        "trg_autonomy_fixed_guard": "d3b8f945bebedaa5",
+        "trg_evaluation_passes_append_only": "aa58ed9e8f4b7c1b",
+        "trg_evaluation_passes_no_truncate": "d5abbfc3501c8e25",
+        "trg_events_append_only": "d0113e77e706b074",
+        "trg_events_no_truncate": "59edd931efbe9819",
+        "trg_objectives_locked": "e3bcc787ae54fea9",
+        "trg_packets_completion": "db14a75069fba982",
+        "trg_packets_locked": "0bf3857f591bc289",
+        "trg_projects_locked": "ae5641976c8527b8"
+      },
+      "views": {
+        "v_objective_heads": "6655b8f91e9ddc5b",
+        "v_packet_heads": "bd40987e3cb15b2e",
+        "v_project_heads": "7fc62255ab622767"
+      }
+    },
+    "0003": {
+      "functions": {
+        "orch_append_only_guard": "fd16a42601e7720e",
+        "orch_artifacts_guard": "94fcc3d112a000e2",
+        "orch_autonomy_fixed_guard": "ca8b56d71263140f",
+        "orch_locked_guard": "bcf26a66637ff799",
+        "orch_packets_completion_guard": "fd464774b93a9b38"
+      },
+      "triggers": {
+        "trg_artifacts_guard": "96f4fb72058b720a",
+        "trg_autonomy_fixed_guard": "d3b8f945bebedaa5",
+        "trg_evaluation_passes_append_only": "aa58ed9e8f4b7c1b",
+        "trg_evaluation_passes_no_truncate": "d5abbfc3501c8e25",
+        "trg_events_append_only": "d0113e77e706b074",
+        "trg_events_no_truncate": "59edd931efbe9819",
+        "trg_objectives_locked": "e3bcc787ae54fea9",
+        "trg_packets_completion": "db14a75069fba982",
+        "trg_packets_locked": "0bf3857f591bc289",
+        "trg_projects_locked": "ae5641976c8527b8"
+      },
+      "views": {
+        "v_objective_heads": "6655b8f91e9ddc5b",
+        "v_packet_heads": "bd40987e3cb15b2e",
+        "v_project_heads": "7fc62255ab622767"
+      }
+    }
+  },
+  "sqlite": {
+    "0001": {
+      "triggers": {},
+      "views": {}
+    },
+    "0002": {
+      "triggers": {
+        "trg_artifacts_accepted_at_insert": "0aaef0dea1aab9a5",
+        "trg_artifacts_accepted_at_update": "737d80e632732c09",
+        "trg_artifacts_accepted_no_delete": "4ff61eea915e64e4",
+        "trg_artifacts_accepted_no_update": "72bc1c296079904d",
+        "trg_autonomy_fixed_no_delete": "891b1715d6e3181c",
+        "trg_autonomy_fixed_no_update": "7c47da5184f8f0eb",
+        "trg_evaluation_passes_append_only_delete": "b0fff3526a789af1",
+        "trg_evaluation_passes_append_only_update": "a209d6321f69988a",
+        "trg_events_append_only_delete": "0f901c0535a7e585",
+        "trg_events_append_only_update": "046266deaf9f2b72",
+        "trg_objectives_locked_no_delete": "78e787fc3964657a",
+        "trg_objectives_locked_no_update": "29c4a789351d701f",
+        "trg_packets_completion_locks_insert": "047b3b6879462d5e",
+        "trg_packets_completion_locks_update": "93513b9a490094ce",
+        "trg_packets_locked_no_delete": "0bc5c4b813f7ec34",
+        "trg_packets_locked_no_update": "4c12f594398cf2c0",
+        "trg_projects_locked_no_delete": "49251e15eda32b5a",
+        "trg_projects_locked_no_update": "f82b97831574599d"
+      },
+      "views": {
+        "v_objective_heads": "71e24483316c6c6c",
+        "v_packet_heads": "1978ef6ad138641e",
+        "v_project_heads": "363ec33d8a20f91e"
+      }
+    },
+    "0003": {
+      "triggers": {
+        "trg_artifacts_accepted_at_insert": "0aaef0dea1aab9a5",
+        "trg_artifacts_accepted_at_update": "737d80e632732c09",
+        "trg_artifacts_accepted_no_delete": "4ff61eea915e64e4",
+        "trg_artifacts_accepted_no_update": "72bc1c296079904d",
+        "trg_autonomy_fixed_no_delete": "891b1715d6e3181c",
+        "trg_autonomy_fixed_no_update": "7c47da5184f8f0eb",
+        "trg_evaluation_passes_append_only_delete": "b0fff3526a789af1",
+        "trg_evaluation_passes_append_only_update": "a209d6321f69988a",
+        "trg_events_append_only_delete": "0f901c0535a7e585",
+        "trg_events_append_only_update": "046266deaf9f2b72",
+        "trg_objectives_locked_no_delete": "78e787fc3964657a",
+        "trg_objectives_locked_no_update": "29c4a789351d701f",
+        "trg_packets_completion_locks_insert": "047b3b6879462d5e",
+        "trg_packets_completion_locks_update": "93513b9a490094ce",
+        "trg_packets_locked_no_delete": "0bc5c4b813f7ec34",
+        "trg_packets_locked_no_update": "4c12f594398cf2c0",
+        "trg_projects_locked_no_delete": "49251e15eda32b5a",
+        "trg_projects_locked_no_update": "f82b97831574599d"
+      },
+      "views": {
+        "v_objective_heads": "71e24483316c6c6c",
+        "v_packet_heads": "1978ef6ad138641e",
+        "v_project_heads": "363ec33d8a20f91e"
+      }
+    }
+  }
+}

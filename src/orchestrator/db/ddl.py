@@ -18,8 +18,11 @@ Rules enforced identically on SQLite and PostgreSQL (amendment A1):
 Views (portable SQL, same text on both dialects): ``v_project_heads``, ``v_objective_heads``,
 ``v_packet_heads`` — for every row, the current head of its lineage, following ``supersedes_id``.
 
-This module is called from migrations; ``install()`` drops and recreates everything, so it is
-idempotent and a later migration can simply call it again after a change.
+Since R1 fix 4 the migration revisions hold **frozen copies** of this SQL and never import this
+module (``tests/test_migrations_frozen.py`` checks both the imports and the resulting triggers,
+views and functions per revision). This module is the *authoring* reference: to change a rule,
+edit it here, then write a NEW revision containing the literal statements and regenerate the
+manifest. ``is_immutability_violation`` is the runtime helper the CLI uses.
 """
 
 from __future__ import annotations
