@@ -84,6 +84,14 @@ def ensure_text_field(session: Session) -> None:
     session.flush()
 
 
+def definition_row(session: Session, field_name: str) -> CandidateFieldDefinitionRow:
+    row = session.scalar(
+        select(CandidateFieldDefinitionRow).where(CandidateFieldDefinitionRow.name == field_name)
+    )
+    assert row is not None, field_name
+    return row
+
+
 def kind_of(session: Session, field_name: str) -> FieldKind:
     row = session.scalar(
         select(CandidateFieldDefinitionRow).where(CandidateFieldDefinitionRow.name == field_name)
@@ -150,6 +158,7 @@ def seed_eva(
         cycle_id=cycle.id,
         preset_id=preset.id,
         field_name=field_name,
+        definition_version=definition_row(session, field_name).version,
         phase=phase,
         plan=PassPlanName.COMBINED,
         item_keys=keys,
@@ -285,3 +294,58 @@ def accept_all(
         value = {FieldKind.SCORE: "5", FieldKind.BOOL: "true", FieldKind.TEXT: "x"}.get(kind)
         key = "other" if kind is FieldKind.TAGSET else ""
         seed_eva(session, packet, name, {key: Item(value or "on", value or "on", eights, support)})
+
+
+def add_artifact(session: Session, packet: Packet, content: str | None = None):  # type: ignore[no-untyped-def]
+    """An artifact row for ``packet`` (evented); its sha256 is what post-phase work targets."""
+    import hashlib
+
+    from orchestrator.db.models import Artifact
+
+    content = content or f"output of {packet.ref} v{packet.version} #{new_id()[:8]}"
+    artifact = Artifact(
+        id=new_id(),
+        packet_id=packet.id,
+        path=f"out/{packet.ref}.md",
+        sha256=hashlib.sha256(content.encode()).hexdigest(),
+        content=content,
+    )
+    session.add(artifact)
+    record_event(
+        session,
+        actor=FIXTURE,
+        action="test.artifact",
+        entity_type="artifact",
+        entity_id=artifact.id,
+    )
+    session.flush()
+    return artifact
+
+
+#: values that pass the default post-phase gates (requirement_alignment/correctness >= 6,
+#: security_risk <= 6)
+POST_VALUES = {"requirement_alignment": "8", "correctness": "8", "security_risk": "2"}
+
+
+def accept_post(session: Session, packet: Packet, artifact) -> None:  # type: ignore[no-untyped-def]
+    eights = {3: 8, 4: 8, 5: 8, 6: 8}
+    support = {4: (1, 0, 0), 5: (1, 0, 0)}
+    for name, value in POST_VALUES.items():
+        seed_eva(
+            session,
+            packet,
+            name,
+            {"": Item(value, value, eights, support)},
+            phase="post",
+            target_hash=artifact.sha256,
+        )
+
+
+def complete_with_evidence(session: Session, packet: Packet, actor) -> None:  # type: ignore[no-untyped-def]
+    """Complete ``packet`` the only way the gate allows: an artifact plus accepted post-phase
+    evaluations of exactly that artifact (M2.1 fixes 3 and 5)."""
+    from orchestrator.contracts import PacketStatus
+    from orchestrator.lifecycle import transition
+
+    accept_post(session, packet, add_artifact(session, packet))
+    transition(packet, PacketStatus.COMPLETED, actor, "accepted with post-evaluation evidence")

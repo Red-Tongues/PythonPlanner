@@ -21,7 +21,7 @@ from orchestrator.lifecycle import transition
 from orchestrator.llm import FakeProvider
 from orchestrator.repository import get_packet, set_autonomy_mode, set_setting
 from tests.conftest import KERNEL, SMALL_TREE, USER
-from tests.evafixtures import Item, accept_all, seed_eva
+from tests.evafixtures import Item, accept_all, complete_with_evidence, seed_eva
 
 EIGHTS = {3: 8, 4: 8, 5: 8, 6: 8}
 SUP = {4: (1, 0, 0), 5: (1, 0, 0)}
@@ -55,7 +55,7 @@ def test_split_creates_linked_children_and_keeps_the_trunk(session: Session, tre
     assert len(session.scalars(select(BranchApplication)).all()) == 1
     # roll-up: the trunk completes when every child does
     for child in children:
-        transition(child, PacketStatus.COMPLETED, USER, "done by hand")
+        complete_with_evidence(session, child, USER)
     assert rollup_trunks(session) == [trunk.ref]
     assert get_packet(session, trunk.ref).locked
 

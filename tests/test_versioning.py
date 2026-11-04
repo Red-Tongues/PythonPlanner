@@ -23,6 +23,7 @@ from orchestrator.repository import (
     update_packet,
 )
 from tests.conftest import KERNEL, USER
+from tests.evafixtures import complete_with_evidence
 
 
 def _row(session: Session, packet_id: str) -> dict:
@@ -33,7 +34,7 @@ def _row(session: Session, packet_id: str) -> dict:
 
 def test_supersede_locked_packet_creates_new_version(session: Session, tree) -> None:
     old = tree.packets[0]
-    transition(old, PacketStatus.COMPLETED, USER, "done")
+    complete_with_evidence(session, old, USER)
     session.commit()
     before = _row(session, old.id)
 

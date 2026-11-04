@@ -40,7 +40,6 @@ from orchestrator.contracts import (
 from orchestrator.db.models import (
     Artifact,
     Confirmation,
-    EvaPacket,
     EvaPreset,
     Packet,
     PacketDependency,
@@ -232,8 +231,11 @@ def unmet_dependencies(session: Session, packet: Packet) -> tuple[str, ...]:
 
     lineage = select(Packet.id).where(Packet.ref == packet.ref)
     unmet: list[str] = []
+    revoked = select(Revocation.target_id).where(Revocation.target_type == "dependency")
     for dep in session.scalars(
-        select(PacketDependency).where(PacketDependency.packet_id.in_(lineage))
+        select(PacketDependency).where(
+            PacketDependency.packet_id.in_(lineage), PacketDependency.id.not_in(revoked)
+        )
     ):
         target = session.get(Packet, dep.depends_on_id)
         assert target is not None
@@ -273,8 +275,27 @@ def readiness(session: Session, packet: Packet) -> ReadinessReport:
     )
 
 
+def newest_artifact(session: Session, packet: Packet) -> Artifact | None:
+    return session.scalar(
+        select(Artifact)
+        .where(Artifact.packet_id == packet.id)
+        .order_by(Artifact.created_at.desc(), Artifact.id.desc())
+        .limit(1)
+    )
+
+
 def completion_blockers(session: Session, packet: Packet, current: PacketStatus) -> list[str]:
-    """Why a system actor may not complete (lock) this packet yet."""
+    """Why this packet may not be completed (locked as a success) yet — for every actor.
+
+    * A split trunk completes by roll-up once every child is completed (B5).
+    * Anything else needs an artifact, and the post-phase evaluation set of **exactly the newest
+      artifact** must pass (M2.1 fix 3). ``v_field_consensus`` binds post-phase consensus to
+      that artifact's hash, so an older artifact's acceptance, or an incomplete evaluation of the
+      newest one, reads as ``pending`` and blocks.
+    * Hard gates can never be bypassed; soft fields pass only through a waiver for this packet
+      version and the post phase (M2.1 fix 5). Closing without that evidence is
+      ``closed_unverified``, never ``completed``.
+    """
     if current is PacketStatus.WAITING_FOR_CHILDREN:
         from orchestrator.branching import children_of
 
@@ -286,36 +307,9 @@ def completion_blockers(session: Session, packet: Packet, current: PacketStatus)
             for c in children
             if PacketStatus(c.status) is not PacketStatus.COMPLETED
         ]
-    if current is not PacketStatus.EVALUATING_POST:
-        return [f"system completion only follows evaluating_post (now {current.value})"]
-    report = evaluation_verdict(session, packet, EvaPhase.POST)
-    blockers = list(report.blockers)
-    artifact = session.scalar(
-        select(Artifact)
-        .where(Artifact.packet_id == packet.id)
-        .order_by(Artifact.created_at.desc())
-        .limit(1)
-    )
-    if artifact is not None:
-        stale = session.scalars(
-            select(EvaPacket.field_name).where(
-                EvaPacket.packet_id == packet.id,
-                EvaPacket.phase == EvaPhase.POST,
-                EvaPacket.target_hash != artifact.sha256,
-                EvaPacket.state != "superseded",
-            )
-        ).all()
-        current_ok = session.scalars(
-            select(EvaPacket.field_name).where(
-                EvaPacket.packet_id == packet.id,
-                EvaPacket.phase == EvaPhase.POST,
-                EvaPacket.target_hash == artifact.sha256,
-            )
-        ).all()
-        missing = sorted(set(stale) - set(current_ok))
-        if missing:
-            blockers.append(f"post-evaluation of {missing} does not target the final artifact")
-    return blockers
+    if newest_artifact(session, packet) is None:
+        return ["no artifact has been generated, so there is nothing to accept"]
+    return list(evaluation_verdict(session, packet, EvaPhase.POST).blockers)
 
 
 # --------------------------------------------------------------------------- writes
@@ -407,4 +401,7 @@ def request_review(
         reason="evaluation needs a human decision",
     )
     session.flush()
+    from orchestrator.gates import note_confirmation
+
+    note_confirmation(session, confirmation, actor=actor)
     return confirmation

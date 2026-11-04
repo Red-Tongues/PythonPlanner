@@ -49,13 +49,16 @@ def test_end_to_end(db_url: str) -> None:
     assert result.exit_code == 0, result.output
     assert "Barcode scanning" in result.output and "draft" in result.output
 
+    # M2.1 fix 5: completing needs evidence; closing without it is closed_unverified
     result = cli(db_url, "packet", "complete", "PP-000001")
+    assert result.exit_code == 1 and "cannot complete yet" in result.output
+    result = cli(db_url, "packet", "close", "PP-000001", "--reason", "done by hand")
     assert result.exit_code == 0, result.output
-    assert "locked" in result.output
-    result = cli(db_url, "packet", "complete", "PP-000001")
+    assert "closed (unverified) and locked" in result.output
+    result = cli(db_url, "packet", "close", "PP-000001", "--reason", "again")
     assert result.exit_code == 1
     assert "locked" in result.output
-    assert "[completed, locked]" in cli(db_url, "tree").output
+    assert "[closed_unverified, locked]" in cli(db_url, "tree").output
 
     result = cli(db_url, "events", "--limit", "3")
     assert result.exit_code == 0

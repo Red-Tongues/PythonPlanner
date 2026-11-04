@@ -48,6 +48,7 @@ from orchestrator.repository import (
     update_packet,
 )
 from tests.conftest import KERNEL, SMALL_TREE, USER, make_cycle
+from tests.evafixtures import complete_with_evidence
 from tests.test_migrations_frozen import MANIFEST, fingerprint
 
 LLM = Actor.llm("model-a")
@@ -199,7 +200,7 @@ def test_fix3_insert_or_replace_cannot_bypass_delete_triggers(engine, session, t
         assert connection.execute(text("PRAGMA recursive_triggers")).scalar() == 1
 
     packet = tree.packets[0]
-    transition(packet, PacketStatus.COMPLETED, USER, "done")
+    complete_with_evidence(session, packet, USER)
     session.commit()
     locked = row_of(engine, "packets", packet.id)
     replacement = {
@@ -479,7 +480,10 @@ def test_fix11_only_users_complete_or_archive_by_hand(session: Session, tree) ->
         transition(tree.packets[0], PacketStatus.COMPLETED, "user:cli")  # type: ignore[arg-type]
     with pytest.raises(TypeError):
         record_event(session, actor="user:cli", action="x", entity_type="x")  # type: ignore[arg-type]
-    transition(tree.packets[0], PacketStatus.COMPLETED, USER, "by hand")
+    # M2.1 fix 5: by hand, a user closes unverified work (completion needs evidence)
+    with pytest.raises(InvalidTransitionError, match="cannot complete yet"):
+        transition(tree.packets[0], PacketStatus.COMPLETED, USER, "by hand")
+    transition(tree.packets[0], PacketStatus.CLOSED_UNVERIFIED, USER, "by hand")
     assert tree.packets[0].locked
 
 

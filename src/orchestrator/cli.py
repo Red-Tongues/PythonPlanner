@@ -281,7 +281,8 @@ def packet_complete(
         str, typer.Option("--reason", help="Why the packet is complete.")
     ] = "completed manually via CLI",
 ) -> None:
-    """Mark a packet completed. This LOCKS it: it can never be edited again, only superseded."""
+    """Mark a packet completed. Only allowed when the completion gate passes (post-evaluation of
+    its newest artifact, or all children completed); otherwise use `packet close`. LOCKS it."""
     from orchestrator.lifecycle import transition
     from orchestrator.repository import get_packet
 
@@ -289,6 +290,22 @@ def packet_complete(
         packet = get_packet(session, ref)
         transition(packet, PacketStatus.COMPLETED, CLI_ACTOR, reason)
         typer.echo(f"{packet.ref} v{packet.version} completed and locked")
+
+
+@packet_app.command("close")
+def packet_close(
+    ref: Annotated[str, typer.Argument(help="Packet ref, e.g. PP-000001.")],
+    reason: Annotated[str, typer.Option("--reason", help="Why it is closed (required).")],
+) -> None:
+    """Close a packet WITHOUT a passing evaluation (closed_unverified). LOCKS it; never counts
+    as completed."""
+    from orchestrator.lifecycle import transition
+    from orchestrator.repository import get_packet
+
+    with _session() as session:
+        packet = get_packet(session, ref)
+        transition(packet, PacketStatus.CLOSED_UNVERIFIED, CLI_ACTOR, reason)
+        typer.echo(f"{packet.ref} v{packet.version} closed (unverified) and locked")
 
 
 # --------------------------------------------------------------------------- M2 commands
@@ -585,13 +602,22 @@ def status() -> None:
         last = session.scalar(
             select(Event)
             .where(
-                Event.action.in_(["evaluation.model_pinning_failed", "evaluation.models_verified"])
+                Event.action.in_(
+                    [
+                        "evaluation.model_pinning_failed",
+                        "evaluation.models_verified",
+                        "evaluation.fake_provider",
+                    ]
+                )
             )
             .order_by(Event.created_at.desc())
             .limit(1)
         )
         if last is not None:
-            mark = "OK" if last.action.endswith("verified") else "REFUSED"
+            mark = {
+                "evaluation.models_verified": "OK (digests verified)",
+                "evaluation.fake_provider": "not applicable (FakeProvider)",
+            }.get(last.action, "REFUSED")
             detail = (last.after or {}).get("error", "")
             typer.echo(f"model pinning: {mark} at {last.created_at:%Y-%m-%d %H:%M} {detail}")
         counts = session.execute(

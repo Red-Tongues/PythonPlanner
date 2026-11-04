@@ -51,6 +51,9 @@ from tests.evafixtures import (
     TEXT_FIELD,
     Item,
     accept_all,
+    accept_post,
+    add_artifact,
+    complete_with_evidence,
     ensure_text_field,
     kind_of,
     oracle_inputs,
@@ -92,11 +95,11 @@ CASES = [
         "8",
     ),
     Case(
-        "TC-02",
+        "TC-02",  # ruling 5 (M2.1 fix 10): disputed agreement reports max(0.60, 0.58)
         SCORE,
         {"": Item("8", "8", s(5, 6, 6, 7), ev(p4=(1, 0), p5=(1, 0)))},
         "disputed",
-        "0.5900",
+        "0.6000",
     ),
     Case(
         "TC-03",
@@ -277,7 +280,8 @@ CASES = [
         "0.6000",
         "alpha",
     ),
-    Case("TC-30", TEXT, {"": Item("alpha", "alpha", s(6, 5), ev(p4=(1, 0)))}, "disputed", "0.5500"),
+    # mean 0.55 < 0.60 → disputed; reports max(conf_a 0.50, conf_b 0.60) (ruling 5, fix 10)
+    Case("TC-30", TEXT, {"": Item("alpha", "alpha", s(6, 5), ev(p4=(1, 0)))}, "disputed", "0.6000"),
     Case(
         "TC-31",
         TEXT,
@@ -307,7 +311,7 @@ CASES = [
     Case("TC-37", TEXT, {"": Item("alpha", "alpha", s(8))}, "pending", None, missing={4}),
 ]
 #: Gemini's confidences where the integer rewrite reaches a different value (ruling 6).
-D2_CONF = {"TC-09": "0.69", "TC-18": "0.69", "TC-25": "0.65", "TC-30": "0.59", "TC-32": "0.70"}
+D2_CONF = {"TC-02": "0.59", "TC-09": "0.69", "TC-18": "0.69", "TC-25": "0.65", "TC-30": "0.59"}
 
 
 # --------------------------------------------------------------------------- one DB per dialect
@@ -358,8 +362,8 @@ def test_consensus_case(factory: sessionmaker[Session], case: Case) -> None:
             row = rows[key]
             # 1. the SQL view equals the oracle (parity)
             assert row.status == oracle.status.value, (case.id, key)
-            sql_conf = None if row.confidence is None else q(row.confidence)
-            assert sql_conf == oracle.confidence, (case.id, key)
+            assert row.confidence_e4 == oracle.confidence_e4, (case.id, key)
+            assert (None if row.confidence is None else q(row.confidence)) == oracle.confidence
             assert (row.winning_value if row.status == "accepted" else None) == oracle.final_value
             assert bool(row.agreement) == oracle.agreement
             assert (row.supports, row.contradictions, row.unverified) == (
@@ -537,7 +541,7 @@ def test_tc48_tc49_dependencies_and_approvals(factory: sessionmaker[Session]) ->
         other = _packet(session)
         add_dependency(session, p.ref, other.ref, actor=USER)
         assert any("dependency" in b for b in readiness(session, p).blockers)
-        transition(other, PacketStatus.COMPLETED, USER, "done by hand")
+        complete_with_evidence(session, other, USER)
         assert readiness(session, p).ready
         from orchestrator.db.models import Confirmation
 
@@ -584,40 +588,130 @@ def test_tc51_tier3_never_gates(factory: sessionmaker[Session]) -> None:
         session.rollback()
 
 
+def _to_post(session: Session) -> Packet:
+    p = _ready_packet(session)
+    for status in (
+        PacketStatus.READY,
+        PacketStatus.QUEUED,
+        PacketStatus.RUNNING,
+        PacketStatus.EVALUATING_POST,
+    ):
+        transition(p, status, KERNEL)
+    return p
+
+
 def test_tc52_post_evaluation_gates_completion(factory: sessionmaker[Session]) -> None:
     with factory() as session:
-        p = _ready_packet(session)
-        for status in (
-            PacketStatus.READY,
-            PacketStatus.QUEUED,
-            PacketStatus.RUNNING,
-            PacketStatus.EVALUATING_POST,
-        ):
-            transition(p, status, KERNEL)
+        p = _to_post(session)
+        art = add_artifact(session, p)
         for name in ("requirement_alignment", "security_risk"):
-            seed_eva(session, p, name, {"": Item("3", "3", EIGHTS, SUP)}, phase="post")
-        seed_eva(session, p, "correctness", {"": Item("8", "4", s(6, 6, 6, 6), SUP)}, phase="post")
+            seed_eva(
+                session,
+                p,
+                name,
+                {"": Item("3", "3", EIGHTS, SUP)},
+                phase="post",
+                target_hash=art.sha256,
+            )
+        seed_eva(
+            session,
+            p,
+            "correctness",
+            {"": Item("8", "4", s(6, 6, 6, 6), SUP)},
+            phase="post",
+            target_hash=art.sha256,
+        )
         with pytest.raises(InvalidTransitionError, match="cannot complete yet"):
             transition(p, PacketStatus.COMPLETED, KERNEL)
+        with pytest.raises(InvalidTransitionError, match="cannot complete yet"):
+            transition(p, PacketStatus.COMPLETED, USER)  # users too (M2.1 fix 5)
         assert not p.locked
         session.rollback()
         # all post fields accepted and within their gates → the kernel may complete and lock
-        p = _ready_packet(session)
-        for status in (
-            PacketStatus.READY,
-            PacketStatus.QUEUED,
-            PacketStatus.RUNNING,
-            PacketStatus.EVALUATING_POST,
-        ):
-            transition(p, status, KERNEL)
-        for name, value in (
-            ("requirement_alignment", "8"),
-            ("correctness", "8"),
-            ("security_risk", "2"),
-        ):
-            seed_eva(session, p, name, {"": Item(value, value, EIGHTS, SUP)}, phase="post")
+        p = _to_post(session)
+        accept_post(session, p, add_artifact(session, p))
         transition(p, PacketStatus.COMPLETED, KERNEL, "post-evaluation accepted")
         assert p.locked
+        session.rollback()
+
+
+def test_post_consensus_binds_the_exact_newest_artifact(factory: sessionmaker[Session]) -> None:
+    """M2.1 fix 3: accepted artifact A, then an incomplete evaluation of artifact B, must not
+    complete; nor may B complete on A's evaluation alone."""
+    with factory() as session:
+        p = _to_post(session)
+        accept_post(session, p, add_artifact(session, p, "artifact A"))
+        b = add_artifact(session, p, "artifact B")  # the newest artifact
+        seed_eva(
+            session,
+            p,
+            "correctness",
+            {"": Item("8", None)},
+            phase="post",
+            target_hash=b.sha256,
+            missing={2, 3, 4, 5, 6},
+        )
+        statuses = dict(
+            session.execute(
+                text(
+                    "SELECT field_name, status FROM v_field_status WHERE packet_id = :id "
+                    "AND phase = 'post'"
+                ),
+                {"id": p.id},
+            ).all()
+        )
+        assert statuses["correctness"] == "pending"
+        assert statuses["requirement_alignment"] == "pending"  # A's result is not B's
+        with pytest.raises(InvalidTransitionError, match="cannot complete yet"):
+            transition(p, PacketStatus.COMPLETED, KERNEL)
+        accept_post(session, p, b)  # B fully evaluated and accepted → completes
+        transition(p, PacketStatus.COMPLETED, KERNEL, "B accepted")
+        assert p.locked
+        session.rollback()
+
+
+def test_soft_post_field_passes_only_with_a_post_phase_waiver(factory) -> None:  # type: ignore[no-untyped-def]
+    """M2.1 fix 5: a disputed soft post field needs a version- and phase-bound waiver; a hard
+    post gate (security_risk) is never waivable, not even for a user."""
+    with factory() as session:
+        p = _to_post(session)
+        art = add_artifact(session, p)
+        accept_post(session, p, art)
+        seed_eva(
+            session,
+            p,
+            "correctness",
+            {"": Item("8", "4", s(6, 6, 6, 6), SUP)},
+            phase="post",
+            target_hash=art.sha256,
+        )
+        with pytest.raises(InvalidTransitionError):
+            transition(p, PacketStatus.COMPLETED, USER)
+        grant_waiver(session, p.ref, "correctness", actor=USER, reason="fine", phase=EvaPhase.POST)
+        seed_eva(
+            session,
+            p,
+            "security_risk",
+            {"": Item("9", "9", EIGHTS, SUP)},
+            phase="post",
+            target_hash=art.sha256,
+        )
+        with pytest.raises(GovernanceError, match="hard gate"):
+            grant_waiver(
+                session, p.ref, "security_risk", actor=USER, reason="x", phase=EvaPhase.POST
+            )
+        with pytest.raises(InvalidTransitionError, match="hard gate"):
+            transition(p, PacketStatus.COMPLETED, USER)
+        seed_eva(
+            session,
+            p,
+            "security_risk",
+            {"": Item("2", "2", EIGHTS, SUP)},
+            phase="post",
+            target_hash=art.sha256,
+        )
+        transition(p, PacketStatus.COMPLETED, USER, "accepted with a soft waiver")
+        assert p.locked and p.status is PacketStatus.COMPLETED
         session.rollback()
 
 

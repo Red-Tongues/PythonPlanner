@@ -104,14 +104,13 @@ class OpenAICompatibleProvider:
         )
 
     def verify_models(self, specs: list[ModelSpec]) -> dict[str, str]:
-        """OpenAI-compatible servers do not report digests: pinned digests cannot be verified,
-        so any spec that *has* a digest is refused rather than silently trusted (B11)."""
-        pinned = [s.name for s in specs if s.digest]
-        if pinned and not self.capabilities.reports_digests:
-            raise ModelPinningError(
-                f"{self.name} cannot verify model digests for {pinned}; use the ollama provider"
-            )
-        return {s.name: "unverified" for s in specs}
+        """OpenAI-compatible servers do not report model digests, so nothing can be verified:
+        refuse outright (B11 fails closed — M2.1 fix 8). Use the ollama provider for pinned
+        evaluators."""
+        raise ModelPinningError(
+            f"{self.name} cannot verify model digests for {[s.name for s in specs]}; "
+            "use the ollama provider with pinned digests"
+        )
 
 
 @dataclass

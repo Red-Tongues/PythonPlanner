@@ -89,7 +89,14 @@ from orchestrator.evaluation.normalise import (
 )
 from orchestrator.evaluation.plan import PassSpec, load_plan
 from orchestrator.events import record_event
-from orchestrator.llm import LLMProvider, ModelPinningError, ModelSpec, ProviderError, model_specs
+from orchestrator.llm import (
+    FakeProvider,
+    LLMProvider,
+    ModelPinningError,
+    ModelSpec,
+    ProviderError,
+    model_specs,
+)
 from orchestrator.repository import is_head, packet_snapshot
 from orchestrator.settings_store import get_int
 
@@ -129,6 +136,7 @@ class EvaluationReport:
     fields: dict[str, str] = field(default_factory=dict)  # field → evaPacket state
     reused: list[str] = field(default_factory=list)
     escalated: list[str] = field(default_factory=list)
+    unresolved: list[str] = field(default_factory=list)  # escalations still failed/disputed
     status: str | None = None  # packet status afterwards
     stale: bool = False
     calls: int = 0
@@ -216,6 +224,22 @@ def current_presets(
     return sorted(result, key=lambda pair: (pair[0].tier, pair[0].field_name))
 
 
+def definition_fingerprint(definition: CandidateFieldDefinitionRow) -> str:
+    """SHA-256 of the field definition as an evaPacket sees it (M2.1 fix 4)."""
+    return sha256(
+        definition.name,
+        definition.version,
+        definition.label,
+        FieldKind(definition.kind).value,
+        definition.vocabulary,
+        definition.scale,
+        definition.max_chars,
+        definition.max_passes,
+        definition.prompt_hint,
+        definition.contract,
+    )
+
+
 def field_info(definition: CandidateFieldDefinitionRow) -> prompts.FieldInfo:
     return prompts.FieldInfo(
         name=definition.name,
@@ -263,11 +287,40 @@ class Evaluator:
     # ------------------------------------------------------------------ pinning (B11)
 
     def verify_models(self) -> None:
+        """B11, fail closed (M2.1 fix 8). Only the deterministic ``FakeProvider`` may run
+        unpinned. Every other provider must report digests, every evaluator spec must carry a
+        pin, and every pin must match what the server serves. Anything else is refused and
+        evented; an unverified model is never recorded as verified."""
         if self._verified:
             return
         specs = [self.specs["a"], self.specs["b"]]
+        if isinstance(self.provider, FakeProvider):
+            record_event(
+                self.session,
+                actor=self.actor,
+                action="evaluation.fake_provider",
+                entity_type="provider",
+                after={"provider": self.provider.name, "models": [s.name for s in specs]},
+                reason="deterministic FakeProvider: no model pinning applies",
+            )
+            self._verified = True
+            return
         try:
+            if not self.provider.capabilities.reports_digests:
+                raise ModelPinningError(
+                    f"{self.provider.name} cannot verify model digests; refusing to evaluate"
+                )
+            unpinned = [s.name for s in specs if not s.digest]
+            if unpinned:
+                raise ModelPinningError(f"no pinned digest for {unpinned} (ORCH_MODEL_*_DIGEST)")
             digests = self.provider.verify_models(specs)
+            wrong = [
+                s.name
+                for s in specs
+                if digests.get(s.name) != (s.digest or "").lower().removeprefix("sha256:")
+            ]
+            if wrong:
+                raise ModelPinningError(f"provider did not confirm the pinned digest of {wrong}")
         except ModelPinningError as exc:
             record_event(
                 self.session,
@@ -275,7 +328,7 @@ class Evaluator:
                 action="evaluation.model_pinning_failed",
                 entity_type="provider",
                 after={"provider": self.provider.name, "error": str(exc)},
-                reason="evaluator models do not match the pinned digests; evaluation refused",
+                reason="evaluator models are not pinned and verified; evaluation refused",
             )
             self.session.flush()
             raise
@@ -306,7 +359,6 @@ class Evaluator:
         *,
         phase: EvaPhase = EvaPhase.PRE,
         fields: Iterable[str] | None = None,
-        output: str | None = None,
     ) -> EvaluationReport:
         session = self.session
         report = EvaluationReport(packet.ref, packet.version, phase)
@@ -323,14 +375,17 @@ class Evaluator:
             if status is not PacketStatus.EVALUATING_PRE:
                 self._transition(packet, PacketStatus.EVALUATING_PRE, "evaluation started")
         else:
+            from orchestrator.evaluation.readiness import newest_artifact
+
             if status is not PacketStatus.EVALUATING_POST:
                 raise EvaluationError(
                     f"{packet.ref} is {status.value}; post-evaluation needs evaluating_post"
                 )
-            if not output:
-                raise EvaluationError("post-phase evaluation needs the generated output")
-            document = output
-            target = hashlib.sha256(output.encode()).hexdigest()
+            artifact = newest_artifact(session, packet)
+            if artifact is None or artifact.content is None:
+                raise EvaluationError(f"{packet.ref} has no artifact content to post-evaluate")
+            # M2.1 fix 3: post-phase evaPackets target the exact newest artifact
+            document, target = artifact.content, artifact.sha256
 
         self.verify_models()
         cycle = self._open_cycle(packet, phase, target)
@@ -363,6 +418,13 @@ class Evaluator:
                     retry = [self._escalate(w, cycle, report) for w in escalate]
                     self._run(retry, document)
                     self._finish(retry, report)
+                    # B12 / M2.1 fix 9: a split re-run that is still unresolved needs a human,
+                    # whatever the field's tier
+                    report.unresolved += [
+                        w.preset.field_name
+                        for w in retry
+                        if EvaState(w.eva.state) in (EvaState.FAILED, EvaState.DISPUTED)
+                    ]
                 if tier == 1 and any(
                     report.fields.get(p.field_name) in ("disputed", "failed")
                     for p, _ in tiers[tier]
@@ -473,6 +535,8 @@ class Evaluator:
         item_keys = list(definition.vocabulary or []) if kind is FieldKind.TAGSET else [""]
         config = self.model_config(plan.label)
         config_hash = sha256(config)
+        # M2.1 fix 4: everything the prompt is built from is part of the address — the field
+        # definition as evaluated (version and content) and the exemplars it includes
         content_address = sha256(
             target,
             preset.id,
@@ -482,6 +546,8 @@ class Evaluator:
             config_hash,
             item_keys,
             CONTRACT_VERSION,
+            definition_fingerprint(definition),
+            [(e.input_text, e.expected_value) for e in self._exemplars(definition.name)],
         )
         key = sha256(packet.id, packet.version, preset.phase, content_address, escalation)
         info = field_info(definition)
@@ -507,6 +573,7 @@ class Evaluator:
             cycle_id=cycle.id,
             preset_id=preset.id,
             field_name=preset.field_name,
+            definition_version=definition.version,
             phase=preset.phase,
             plan=plan.name,
             item_keys=item_keys,
@@ -644,15 +711,25 @@ class Evaluator:
         return {r.item_key: r for r in rows}
 
     def _check_current(self, eva: EvaPacket) -> None:
-        """Stale-write guard (B9): the packet must still be the head with the same inputs."""
+        """Stale-write guard (B9, M2.1 fix 1): before every write the packet must still be the
+        unlocked head, and the evaPacket's target must still be current — for the pre phase the
+        fingerprint *recomputed from the current packet, project and objective heads* (so a
+        superseded project or objective is caught even though ``packets.input_hash`` has not
+        been refreshed yet); for the post phase the sha256 of the packet's newest artifact."""
+        from orchestrator.evaluation.readiness import newest_artifact
+
         packet = self.session.get(Packet, eva.packet_id)
         self.session.refresh(packet)  # type: ignore[arg-type]
         stale = packet is None or not is_head(self.session, packet) or packet.locked
         if not stale and eva.phase is EvaPhase.PRE:
-            stale = packet.input_hash != eva.target_hash  # type: ignore[union-attr]
+            _, current = packet_document(self.session, packet)  # type: ignore[arg-type]
+            stale = current != eva.target_hash or packet.input_hash != eva.target_hash  # type: ignore[union-attr]
+        elif not stale:
+            artifact = newest_artifact(self.session, packet)  # type: ignore[arg-type]
+            stale = artifact is None or artifact.sha256 != eva.target_hash
         if stale:
-            self._set_state(eva, EvaState.SUPERSEDED, "the packet changed during evaluation")
-            raise StaleEvaluation(f"{eva.field_name}: packet changed during evaluation")
+            self._set_state(eva, EvaState.SUPERSEDED, "the packet or its context changed")
+            raise StaleEvaluation(f"{eva.field_name}: packet or context changed during evaluation")
 
     def _set_state(self, eva: EvaPacket, state: EvaState, reason: str | None = None) -> None:
         if eva.state is state:
@@ -991,16 +1068,21 @@ class Evaluator:
         )
         self.session.flush()
         verdict = evaluation_verdict(self.session, packet, EvaPhase.PRE)
-        if verdict.ok and not unresolved_tier1:
+        unresolved = unresolved_tier1 or bool(report.unresolved)
+        if verdict.ok and not unresolved:
             from orchestrator.branching import promote_consensus
 
             self._transition(packet, PacketStatus.READY, "evaluation set complete and accepted")
             promote_consensus(self.session, packet, actor=self.actor)
-        elif verdict.needs_review or unresolved_tier1:
+        elif verdict.needs_review or unresolved:
             self._transition(
                 packet,
                 PacketStatus.NEEDS_REVIEW,
-                "; ".join(verdict.blockers) or "tier-1 field unresolved",
+                "; ".join(
+                    verdict.blockers
+                    + [f"{f}: unresolved after the split re-run (B12)" for f in report.unresolved]
+                )
+                or "tier-1 field unresolved",
             )
             request_review(self.session, packet, verdict, self.actor)
 
@@ -1024,18 +1106,18 @@ def evaluate_packet(
     *,
     phase: EvaPhase = EvaPhase.PRE,
     fields: Iterable[str] | None = None,
-    output: str | None = None,
     specs: dict[str, ModelSpec] | None = None,
     actor: Actor = EVALUATOR,
 ) -> EvaluationReport:
     return Evaluator(session, provider, specs=specs, actor=actor).evaluate(
-        packet, phase=phase, fields=fields, output=output
+        packet, phase=phase, fields=fields
     )
 
 
 def pending_packets(session: Session, limit: int | None = None) -> list[Packet]:
-    """Head genPackets whose pre-phase evaluation set is missing or stale (needs_review is left
-    alone: no evaluation loop on a dispute — B9)."""
+    """Head genPackets whose pre-phase evaluation set is missing or stale — changed inputs or
+    context, or results no longer current for the active definitions and presets (needs_review
+    is left alone: no evaluation loop on a dispute — B9)."""
     from orchestrator.repository import _heads
 
     candidates = session.scalars(
@@ -1057,6 +1139,10 @@ def pending_packets(session: Session, limit: int | None = None) -> list[Packet]:
     for packet in candidates:
         _, target = packet_document(session, packet)
         stale = packet.input_hash != target or PacketStatus(packet.status) is not PacketStatus.READY
+        if not stale:  # M2.1 fix 4: a new definition or preset revision makes results pending
+            from orchestrator.evaluation.readiness import evaluation_verdict
+
+            stale = not evaluation_verdict(session, packet, EvaPhase.PRE).ok
         if stale:
             result.append(packet)
         if limit is not None and len(result) >= limit:
