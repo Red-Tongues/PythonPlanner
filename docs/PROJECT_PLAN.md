@@ -328,7 +328,7 @@ Deliberate pace is a feature, not a performance gap. The kernel enforces:
 |---|---|---|---|
 | D1 | Python ≥ 3.11, `src/` layout, hatchling | Modern typing; standard packaging | Proposed |
 | D2 | SQLAlchemy 2.0; PostgreSQL target; SQLite for dev and tests | Runs anywhere; PostgreSQL proven in CI | Proposed |
-| D3 | Six passes = 2 extractions + 4 combined evaluations (cross, then self) | Matches the draft's listing; fewer calls | **Needs CFO confirmation** |
+| D3 | Six passes = 2 extractions + 4 combined evaluations (cross, then self), with bounded hybrid escalation to split prompts for unresolved fields | Matches the draft's listing; fewer calls; panel analysis in `docs/reviews/D6_*` | **Recommended — needs CFO confirmation** |
 | D4 | Scores are integers 0–10 | Small models are more reliable on coarse scales | Proposed |
 | D5 | Immutability enforced by DB triggers + app guard | The AI cannot bypass it through an app bug | Proposed |
 | D6 | GUI: FastAPI + Jinja2 + HTMX (local web UI) | No JS build; testable | Proposed |
@@ -451,6 +451,7 @@ No prices are quoted here; obtain current quotes before purchase.
 |---|---|
 | 2026-11-03 | Plan v0.2 drafted from the CFO's draft; repository seeded (plan, agent guide, milestone specs, archived draft); M1 started with Claude Code. |
 | 2026-11-03 | Review R0. The three-model panel (Microsoft Copilot, Gemini, GitHub Copilot) raised 24 findings on the plan and specs; cross/self scoring adopted 20 (18 accepted, 2 accepted with amendments), 2 partially and deferred 2 already covered elsewhere. Amendments A1–A7 were sent to the engineer during M1; B1–B8 and C1–C7 were folded into the M2/M3 specs. Plan → v0.3. |
+| 2026-11-04 | PR #1 (M1 + M1.1) squash-merged by the CFO (3068e35). M2 started in a fresh Claude Code session with B1–B11 and the D1–D5 panel records. M3 amended (C9–C21). D17 hardware envelope ≤ 20 GB VRAM. |
 | 2026-11-04 | Sprint 2: CFO clarified the genPacket / evaPacket distinction. Panel design round D1 (three independent designs, cross-scored) → consensus adopted as M2 amendment B9. Plan → v0.6. |
 | 2026-11-04 | Review R1 on M1 code: 24 findings; 18 accepted, 2 partial, 2 deferred to M2, 2 declined as verified false positives. CI green (SQLite on Python 3.11 and 3.12; PostgreSQL 16). M1.1 fix list (12 fixes) sent to the engineer on PR #1. Juggler source checked out: `juggler run` headless CLI and MCP client support make M4 simpler (spec updated). |
 | 2026-11-03 | CFO check-in: v1 bar confirmed (working prototype of the kernel); slow, deliberate pace preferred → pace and drift governor (§11.1); Juggler extension committed as M4; personal-use licensing. Plan → v0.4. |
