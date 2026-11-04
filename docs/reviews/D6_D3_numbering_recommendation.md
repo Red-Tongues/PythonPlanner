@@ -8,4 +8,4 @@
 4. **Keep the consensus formula** `(0.6 × cross + 0.4 × self)/10`, applied per candidate.
 5. **Rationale:** score and evidence are parts of one judgement. Asking for them together yields one coherent, auditable record and a third fewer calls. Neither option's accuracy advantage can be known until the actual models are benchmarked.
 
-**PM view:** agree. This matches the current default (B-series specs) and the deliberate-pace preference; hybrid escalation fits naturally into the evaPacket retry and `needs_review` flow. **Awaiting CFO confirmation of D3.**
+**PM view:** agree. This matches the current default (B-series specs) and the deliberate-pace preference; hybrid escalation fits naturally into the evaPacket retry and `needs_review` flow. **CFO decision 2026-11-04: approved — combined by default, with bounded hybrid escalation.**

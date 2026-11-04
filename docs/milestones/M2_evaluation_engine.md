@@ -122,3 +122,6 @@ Implement TC-01 to TC-52 as parametrised tests on both dialects. Derive the expe
 
 - **Hardware envelope (D17):** evaluator configuration must fit in ≤ 20 GB VRAM in total, on CUDA (RTX 3090) or Apple Metal (32 GB M2 Max). Provider code must not assume CUDA. Model choice is configuration, not code.
 - **D5 clarifications:** see `docs/reviews/D5_contracts_notes.md` (integer boundaries, tag-map nulls, tie evidence, the pure consensus oracle plus SQL parity tests).
+
+## B12 — D3 confirmed (CFO, 2026-11-04)
+The combined six-call pass plan is canonical. **Hybrid escalation:** a field whose combined evaluation fails validation after one targeted repair, or ends `disputed` on a tier-1 field, is re-run once using the split plan (separate accuracy and evidence prompts). If it is still unresolved, it goes to `needs_review`. The pass plan stays data-driven, so specific field classes can be pre-routed to split by configuration.

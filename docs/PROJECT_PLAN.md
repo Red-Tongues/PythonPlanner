@@ -328,7 +328,7 @@ Deliberate pace is a feature, not a performance gap. The kernel enforces:
 |---|---|---|---|
 | D1 | Python ≥ 3.11, `src/` layout, hatchling | Modern typing; standard packaging | Proposed |
 | D2 | SQLAlchemy 2.0; PostgreSQL target; SQLite for dev and tests | Runs anywhere; PostgreSQL proven in CI | Proposed |
-| D3 | Six passes = 2 extractions + 4 combined evaluations (cross, then self), with bounded hybrid escalation to split prompts for unresolved fields | Matches the draft's listing; fewer calls; panel analysis in `docs/reviews/D6_*` | **Recommended — needs CFO confirmation** |
+| D3 | Six passes = 2 extractions + 4 combined evaluations (cross, then self), with bounded hybrid escalation to split prompts for unresolved fields | Matches the draft's listing; fewer calls; panel analysis in `docs/reviews/D6_*` | **Confirmed by CFO** 2026-11-04 (hybrid) |
 | D4 | Scores are integers 0–10 | Small models are more reliable on coarse scales | Proposed |
 | D5 | Immutability enforced by DB triggers + app guard | The AI cannot bypass it through an app bug | Proposed |
 | D6 | GUI: FastAPI + Jinja2 + HTMX (local web UI) | No JS build; testable | Proposed |
@@ -434,7 +434,7 @@ No prices are quoted here; obtain current quotes before purchase.
 
 *Answered 2026-11-03:* v1 bar (D13), deliberate pace (D14), Juggler extension (D15), personal-use licensing (D16).
 
-1. **D3** — combined vs split evaluation passes (§7).
+1. ~~D3 — combined vs split evaluation passes~~ — *answered 2026-11-04: combined by default, with bounded hybrid escalation to split prompts.*
 2. Default autonomy modes (§11) — acceptable as a starting point?
 3. Score scale 0–10 — acceptable?
 4. GUI as a local web UI (D6) rather than a desktop app?
