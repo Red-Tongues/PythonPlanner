@@ -4,6 +4,49 @@ Newest entries first. Every agent session appends an entry: what changed, decisi
 
 ---
 
+## 2026-11-04 — M2.1: review R2 fix list (Claude Code)
+
+All 12 fixes from `docs/reviews/R2_consensus.md` are on PR #2 (branch `claude/clever-keller-jogsc2`), after merging `origin/main` at 7795b16 (docs only). GE7 is deferred to M3; GE8 and GE10 were declined and not implemented. Migrations 0001–0005 are untouched: all schema work is in the new frozen **0006**, and its trigger and view DDL live in the dialect modules (`db/ddl.py`, `sql/views.py`), with tests that the frozen literals equal them. Earlier the helper script `scripts/ask_gemini.py` was reverted (0e83b02) so the PR stays strictly M2.
+
+**Suite:** 410 passed and 4 skipped on SQLite plus PostgreSQL 16 locally. The 4 skipped tests are dialect-specific and skipped on the other dialect. Ruff is clean.
+
+### The 12 fixes
+| # | Fix | Where | Tests |
+|---|---|---|---|
+| 1 | Context binding: the fingerprint is recomputed from the current packet, project and objective heads at every evaluation write, at admission and at claim. A mismatch → `evaluating_pre` plus a `packet.context_changed` event. The guarded UPDATE also requires those heads to still be heads | `gates.require_current_context`, `evaluator._check_current`, `queue` | `test_fix1_*` |
+| 2 | Gate revision: waiver, override, revocation, dependency and confirmation writers bump `packets.gate_revision`. Admission and claim read it before the check, build the snapshot in the same transaction, and compare-and-set it | 0006; `gates.bump_gate`, `guarded_status_update` | `test_fix2_*`, including two-session barrier races (waiver revoked, BLOCK added) on both dialects |
+| 3 | Post-phase consensus binds the sha256 of the newest artifact; completion needs a passing post-phase verdict for exactly that artifact; post-evaluation reads the artifact itself | `v_field_consensus`; `readiness.completion_blockers`; evaluator | `test_post_consensus_binds_the_exact_newest_artifact` (A accepted, then B incomplete → blocks), TC-52 |
+| 4 | The content address includes the field-definition fingerprint and the exemplars. Consensus is current only for the active preset revision and the current definition version; anything else is `pending`. `evaluate_pending` re-evaluates `ready` packets whose results went stale | evaluator; 0006 `eva_packets.definition_version`; view | `test_fix4_*` (definition only, exemplars only, preset only) |
+| 5 | The completion gate applies to users too. Hard gates are never bypassed; soft gates pass only through a version- and phase-bound waiver. Closing without evidence is `closed_unverified` (locked, never a success; CLI `packet close`) | `lifecycle`, `cli` | lifecycle tests; `test_soft_post_field_passes_only_with_a_post_phase_waiver`; `test_fix5_*` |
+| 6 | Frozen evaluation-cycle bindings and evaPacket identity columns; append-only `packet_dependencies` (changes go through revocations); PostgreSQL TRUNCATE guards on `generation_runs`, `packet_dependencies`, `evaluation_cycles` and `eva_packets`. The other M2 append-only tables already had them from 0005 and are re-tested | 0006 triggers; `guards` | `test_fix6_*`, raw SQL on both dialects |
+| 7 | Integer fixed point (×10⁴, half up) for weights, thresholds and confidences in the oracle and both dialects | `consensus.py`, `v_eva_item_consensus` | MC5's exact case (oracle and SQL); random parity under three weightings |
+| 8 | Pinning fails closed: only FakeProvider runs unpinned; a provider that cannot report digests refuses; every spec needs a digest the server confirms; unverified is never recorded as verified | `Evaluator.verify_models`, `OpenAICompatibleProvider` | `test_fix8_*` |
+| 9 | An unresolved split escalation sends the packet to `needs_review` at any tier | evaluator | `test_fix9_*` (tier 3) |
+| 10 | Ruling 5: disputed rows, including disputed agreement, report max(conf_a, conf_b); an accepted agreement keeps the mean | oracle and view | TC-02 and TC-30 now 0.60; unit test |
+| 11 | `admit_next` uses the guarded UPDATE with a rowcount check | `queue.admit_next` | `test_fix11_*`, including two concurrent ticks |
+| 12 | An exhausted failure budget → audited `awaiting_confirmation` plus a `failure_budget` confirmation. Approve = a fresh budget (failures before the approval stop counting); reject = `failed` | `queue.enforce_failure_budgets`, `confirmations`, `v_queue` | `test_fix12_*` |
+
+### Bugs found while doing this (fixed)
+- `approve()` ignored `failure_budget` confirmations: it only loaded the packet for `packet`/`packet_review`.
+- The guarded UPDATE wrote the raw status string back onto the ORM object (`'running'` instead of the enum).
+
+### Judgement calls (please check)
+1. **Registry binding is per field.** "Current consensus requires the registry revision" is implemented as: the evaPacket's `definition_version` must equal that field's current definition version. Editing *another* field (a new registry revision) does not invalidate every packet's consensus. I read the intent as "evaluated against the definition now in force"; binding the global revision would force re-evaluating everything on any YAML edit.
+2. **Exemplars only change the content address** (no reuse); they do not make existing consensus `pending`, because the PM text lists only preset and registry for currency.
+3. **`closed_unverified` is a locking terminal status.** It is user-only, from any non-terminal status.
+4. **A context mismatch at claim raises `ContextChanged`** (a `ClaimError`) with the audited revert to `evaluating_pre` pending in the session; the caller commits it. At admission the packet is simply skipped.
+5. **On SQLite the losing side of a race can surface as a database lock or snapshot error** rather than a `ClaimError` (single writer, WAL). Tests accept either; no claim or admission is ever duplicated. On PostgreSQL the compare-and-set returns 0 rows.
+6. **A gate bump skips a locked head** (terminal work has no gate). Overrides are bound by ref, so they bump the lineage head.
+7. **Settings are quantised to 4 dp** by the fixed point. Values with more decimals are rounded half up once (validation on write is GE7, deferred to M3).
+8. **Failure budgets are enforced by sweeping `ready`/`queued` packets** at each admission tick. Failures of `running` packets arrive with M3's channels.
+9. **The transition table gains `queued → awaiting_confirmation`** for fix 12.
+
+### Next steps
+- PM verification; merge PR #2 when CI is green.
+- M3 backlog: GE7 (validate numeric settings on write).
+
+---
+
 ## 2026-11-04 — M2: evaluation engine, genPackets and evaPackets (Claude Code)
 
 Branch `claude/clever-keller-jogsc2` from `main` at 3068e35, with `main` fast-forwarded to 5666780 (B12) during the session. All of M2 is built, including amendments B1–B12, the D1–D5 records and the R1 deferrals GH6 and GE6. `docs/PROJECT_PLAN.md` was not touched.
