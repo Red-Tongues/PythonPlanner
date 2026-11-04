@@ -22,6 +22,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from orchestrator.budgets import Demand, reserve
@@ -86,6 +87,16 @@ def _both(*workers: Callable[[], str]) -> list[str]:
     for t in threads:
         t.join(60)
     return results
+
+
+def _run_threads(*targets: Callable[[], None], timeout: float = 60) -> None:
+    """Start the workers, join them, and fail (never hang or pass silently) on a timeout."""
+    threads = [threading.Thread(target=t) for t in targets]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout)
+    assert not any(t.is_alive() for t in threads), "a worker did not finish in time"
 
 
 def _effects(factory: sessionmaker[Session]) -> int:
@@ -560,3 +571,58 @@ def test_concurrent_ticks_admit_once(factory: sessionmaker[Session]) -> None:
     assert results.count(ref) == 1
     with factory() as s:
         assert s.scalar(select(func.count()).select_from(QueueAdmission)) == 1
+
+
+# --------------------------------------------------------------------------- MR1 binding guard
+
+
+def test_a_governance_write_after_the_binding_check_stops_the_dispatch(
+    factory: sessionmaker[Session],
+) -> None:
+    """R4 MR1: session A has read and checked the bindings; session B commits a waiver (a gate
+    bump) before A writes. A's binding guard is part of the write, so A dispatches nothing."""
+    from orchestrator.governance import grant_waiver
+    from orchestrator.runs import StaleRun
+
+    with factory() as s:
+        packet, run = claimed_run(s)
+        s.commit()
+        ref, run_id = packet.ref, run.id
+    checked, written = threading.Event(), threading.Event()
+    outcome: list[str] = []
+
+    def dispatcher() -> None:
+        with factory() as a:
+            run = a.get(GenerationRun, run_id)
+            assert run is not None
+
+            def seam() -> None:
+                checked.set()
+                assert written.wait(15), "the writer never committed"
+
+            try:
+                authorise_dispatch(a, run, before_scopes=seam)
+                a.commit()
+                outcome.append("dispatched")
+            except StaleRun:
+                a.rollback()
+                outcome.append("stale")
+            except OperationalError:  # SQLite: the snapshot is out of date (ruling 5)
+                a.rollback()
+                outcome.append("locked")
+
+    def writer() -> None:
+        assert checked.wait(15)
+        try:
+            with factory() as b:
+                grant_waiver(b, ref, "tools_needed", actor=USER, reason="changed meanwhile")
+                b.commit()
+        finally:
+            written.set()
+
+    _run_threads(dispatcher, writer)
+    assert outcome in (["stale"], ["locked"]), outcome
+    assert _effects(factory) == 0
+    with factory() as s:
+        run = s.get(GenerationRun, run_id)
+        assert run is not None and run.state is R.PLANNED

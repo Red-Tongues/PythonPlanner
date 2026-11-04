@@ -225,6 +225,44 @@ def binding_mismatch(
     return None
 
 
+def _binding_conditions(run: GenerationRun, status: PacketStatus) -> list[Any]:
+    """The packet-row conditions every binding-dependent run write re-checks atomically."""
+    table = Packet.__table__
+    successor = table.alias("successor")
+    return [
+        table.c.id == run.packet_id,
+        table.c.version == run.packet_version,
+        table.c.status == status.value,
+        table.c.locked.is_(False),
+        table.c.active_run_id == run.id,
+        table.c.fencing_token == run.fencing_token,
+        table.c.gate_revision == run.gate_revision,
+        table.c.input_hash == run.input_hash,
+        ~select(successor.c.id).where(successor.c.supersedes_id == table.c.id).exists(),
+    ]
+
+
+def guard_bindings(
+    session: Session, run: GenerationRun, *, status: PacketStatus = PacketStatus.RUNNING
+) -> None:
+    """MR1: make the binding check part of the write. One compare-and-set on the packet row in
+    the caller's transaction re-checks version, status, lock, ownership (active run and F), G,
+    H and headship; it also takes the row lock (PostgreSQL) or the write lock (SQLite), so a
+    governance write committed after ``binding_mismatch`` read the row makes it match nothing.
+    Raises ``StaleRun``; the caller rolls back (or records a stale disposition)."""
+    if run.fencing_token is None or run.gate_revision is None:
+        raise StaleRun(f"run {run.id}: legacy run without a fencing token")
+    session.flush()
+    table = Packet.__table__
+    result = session.connection().execute(
+        update(table)
+        .where(*_binding_conditions(run, status))
+        .values(gate_revision=table.c.gate_revision)  # a no-op write that locks the row
+    )
+    if result.rowcount != 1:
+        raise StaleRun(f"run {run.id}: the packet changed under it (bindings no longer hold)")
+
+
 def _restricted(session: Session, packet: Packet) -> str | None:
     """A hold, block, pause or confirmation that keeps a packet where it is (C25 / V2 / E7)."""
     from orchestrator.governance import active_overrides
@@ -380,6 +418,7 @@ def authorise_dispatch(
     assert packet is not None
     if before_scopes is not None:
         before_scopes()
+    guard_bindings(session, run)  # MR1: the check and the write are one statement
     authorise_scopes(session, packet_scopes(session, packet))
     attempt_no = run.attempts + 1
     if run.max_attempts is not None and attempt_no > run.max_attempts and not parked:
@@ -510,6 +549,7 @@ def accept_run(
     if why is not None:
         stale_run(session, run, why, actor=actor)
         raise StaleRun(f"run {run.id}: {why}")
+    guard_bindings(session, run)
     move_run(session, run, R.ACCEPTED, actor, "checks passed", manifest_hash=manifest_hash)
 
 
@@ -531,6 +571,7 @@ def assert_publishable(
     if why is not None:
         stale_run(session, run, why, actor=actor)
         raise StaleRun(f"run {run.id}: {why}")
+    guard_bindings(session, run)  # MR1: held until the publication transaction commits
 
 
 # --------------------------------------------------------------------------- parked runs (exit 3)
@@ -543,9 +584,9 @@ def _bump_pair(session: Session, packet: Packet, run: GenerationRun, cause: str,
     observed = run.gate_revision
     if observed is None or packet.gate_revision != observed:
         raise StaleRun(f"run {run.id}: gate revision changed")
-    a = session.connection().execute(
+    a = session.connection().execute(  # MR1: every binding, not only G, in the same CAS
         update(table)
-        .where(table.c.id == packet.id, table.c.gate_revision == observed)
+        .where(*_binding_conditions(run, PacketStatus.AWAITING_CONFIRMATION))
         .values(gate_revision=observed + 1)
     )
     b = session.connection().execute(
@@ -580,6 +621,7 @@ def park_run(session: Session, run: GenerationRun, *, actor: Actor = KERNEL) -> 
         raise StaleRun(f"run {run.id}: {why}")
     packet = session.get(Packet, run.packet_id)
     assert packet is not None
+    guard_bindings(session, run)
     move_run(session, run, R.AWAITING_CONFIRMATION, actor, "exit 3: parked for the owner")
     _packet_cas(
         session,
