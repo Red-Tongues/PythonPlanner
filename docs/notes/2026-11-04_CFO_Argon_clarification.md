@@ -1,14 +1,14 @@
 # CFO ↔ Argon clarification session — 4 November 2026 (evening)
 
-**Source:** Sam's own Gemini chat "Project Planner Architectural Review" (Argon), with a repo zip of main @ f869e6a. Extracted by the PM at Sam's request.
+**Source:** the CFO's own Gemini chat "Project Planner Architectural Review" (Argon), with a repo zip of main @ f869e6a. Extracted by the PM at the CFO's request.
 **Status:** *authoritative product clarification.* Where this note conflicts with earlier specs, this note wins until the specs are updated.
 
-## Part A — What was clarified (in Sam's words where possible)
+## Part A — What was clarified (in the CFO's words where possible)
 
 ### A1. The entry point is the prompt window, and it pauses the loop
 - "Injecting a project plan or idea or prompt is the first entry point. **Doing so pauses the loop** (which re-triggers after loop readiness is achieved)."
 - The **prompt window** takes a markdown project file or a plain-text prompt. It enumerates it **via a frontier model through Juggler** into a standardised SQL database.
-- Because the project database is SQL, **Sam can also drill into it and edit or add to it manually**.
+- Because the project database is SQL, **the CFO can also drill into it and edit or add to it manually**.
 
 ### A2. Course changes use the same mechanism and branch the project
 - "It's the same mechanism if mid-way through the project you decide to change course completely." The enumerating LLM simply gets more context: the existing SQL database and/or repo.
@@ -32,13 +32,13 @@ Juggler is "the bridge/router that connects your prompt window and SQL database 
    - **M3a**: the genPacket loop and pause/branch working in SQL.
    - **M3b**: the mobile digest and interface on top of it.
    
-   Sam can inspect SQL directly, so M3a doesn't need the digest.
+   The CFO can inspect SQL directly, so M3a doesn't need the digest.
 4. **Old meeting notes confusing the AI coder.** 20 R/D files in `docs/reviews/`, and tests named after review rounds. Fix: fold every final decision into the master docs (ARCHITECTURE, the milestone file) and move debate files to `docs/archive/`. Name tests by capability, not by review round.
 
 ### A6. Crash during a run
 Confirm "never re-run automatically" for workbench/generation runs. The genPacket's output field simply stays NULL. Local eva_packets are different: they are stateless, local, and have no side effects, so they **quietly restart** after a crash.
 
-## Part B — Sam's follow-up to the PM (20:11)
+## Part B — the CFO's follow-up to the PM (20:11)
 - **Q1 (roadmap):** not certain. Concern: **meta confusion**. When does a prompt or suggestion apply to *the product*, and when to *our build workflow*?
 - **Q2:** park Tailscale. **Split M3 into M3a and M3b** (decided).
 - **Q3:** do **not** bring a separate project (stem organisation) into this; it adds confusion.
@@ -48,7 +48,7 @@ Confirm "never re-run automatically" for workbench/generation runs. The genPacke
 - **New gap raised:** empty output is rare; **poor or messy output is the real problem**, and Pydantic alone can't solve it. We need a more sophisticated **output and recorded-thinking evaluation tool**, so a genPacket can be reassessed quickly after a generation attempt (Juggler can read the thinking). Open for discussion.
 - **PM accountability:** managing the project includes spotting confusion and resolving it through **direct discussion**.
 
-## Part C — The working style to replicate (Sam's method with Argon)
+## Part C — The working style to replicate (the CFO's method with Argon)
 1. **Open with a broad diagnostic question**, not a task list: "review the project… look for where the objectives are not completely clear or perhaps confused".
 2. **Take it piece by piece:** "please respond only to the points I am addressing".
 3. **Explain the owner's mental model in plain words**, then ask "does that make more sense?"
@@ -57,8 +57,8 @@ Confirm "never re-run automatically" for workbench/generation runs. The genPacke
 6. **Use the model to sanity-check a decision** with a short "how about this concern?", rather than a long specification.
 
 **PM commitments from this:**
-- Use short, conversational, one-topic exchanges with panel models (and with Sam) for clarification work. Save the long structured prompts for reviews of code or specs that are already settled.
-- Before generating more design, run a **confusion check**: ask a model what is unclear or contradictory, and bring those points to Sam as plain questions.
+- Use short, conversational, one-topic exchanges with panel models (and with the CFO) for clarification work. Save the long structured prompts for reviews of code or specs that are already settled.
+- Before generating more design, run a **confusion check**: ask a model what is unclear or contradictory, and bring those points to the CFO as plain questions.
 - Label every decision and document as **PRODUCT** (how the orchestrator behaves) or **BUILD PROCESS** (how our team builds it).
 
 ## Part D — CFO answers to the PM (21:11) — authoritative
