@@ -68,7 +68,7 @@
 | needs_review → evaluating_pre / evaluating_post | soft waiver for the phase, or definition/exemplar edit · user | G bumped |
 | *non-terminal* → evaluating_pre (new version) | core edit or interrupt · user/kernel | unlocked; versioning rule above (C37) |
 | completed → evaluating_pre (new version) | supersede confirmation on a locked interrupt match · user | old row untouched (C37) |
-| *non-terminal* → closed_unverified | close or branch kill · user | reason required; locks; in-flight runs staled |
+| *non-terminal* → closed_unverified | close (branch kill → `blocked` via BLOCK, per D9-R1) · user | reason required; locks; in-flight runs staled |
 
 ## 3. Run transitions (`generation_runs`)
 | From → To | Trigger · actor | Guard |
