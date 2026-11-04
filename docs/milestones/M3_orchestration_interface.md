@@ -273,3 +273,18 @@ These take precedence over the text above where they conflict.
 - GUI CRUD forms;
 - live SonarQube provisioning;
 - console wording for idle/paused/blocked states (GA15, backlog).
+
+## C39 — Placeholder flagging (CFO decision Q-P6, 2026-11-04; absolute requirement)
+- **What is detected.** The static validator detects placeholders in every generated code output (`python_module`, `test_module` and fenced code in other contracts):
+  - function or class bodies that are only `pass`, `...` or a docstring;
+  - `raise NotImplementedError`;
+  - `TODO` / `FIXME` / `XXX` / "placeholder" / "stub" markers in comments or strings;
+  - test functions with no assertion.
+- **Flagging is mandatory.**
+  - Every detected item is recorded as an immutable flag on the output: kind, path, line, snippet hash.
+  - The output's manifest gets `has_placeholders = true`.
+  - An event is written.
+  - The flag appears on every surface that shows the output: digest cards, packet detail, CLI status, and the repo-write confirmation.
+- **Flagged output is never presented as clean.** Flagging alone does not reject: retry/reject automation is not required and stays off unless the CFO enables it.
+- **Exemptions.** A packet may declare an explicit, evented allowance (e.g. "scaffold only"). Even then the flags are still recorded and shown.
+- **Tests.** One per placeholder kind; no false flag on real `pass` in an `except` clause where other statements exist; flags shown in the digest and the CLI; the manifest field is set.

@@ -455,11 +455,11 @@ No prices are quoted here; obtain current quotes before purchase.
 
 ### 20.1 Decisions from product brainstorm P1 (CFO answers 2026-11-04 13:20 — see `docs/reviews/P1_product_brainstorm.md`)
 - **Q-P1 Version naming — decided:** the naming doesn't matter to the CFO. Keep D13's labels and add an **operational acceptance gate after M4** (a small project built unattended) before relying on it at work.
-- **Q-P2 Acceptance project — open:** csv-profiler is only a *test-drive* project fed into the orchestrator, not part of the product. The CFO may substitute one of his own small music or software ideas.
+- **Q-P2 Acceptance project — decided:** once the PM judges the prototype ready, the CFO will run the acceptance test himself with his own **"stem organisation"** project idea. Until then the PM chooses how components and integrations are tested (synthetic fixtures; csv-profiler-style scenarios where useful).
 - **Q-P3 One-tap bundled approval — deferred:** revisit with UI settings. **New backlog item (M6): an "involvement level" setting** (a slider or multi-level toggle: "how involved do you want to be?"), implemented as named presets over the existing per-stage autonomy scopes, each preset defining how approvals and consultations are handled.
-- **Q-P4 Remote access — more information requested:** a security and customisation note on Tailscale vs alternatives (SSH tunnel, self-hosted WireGuard, desktop only) is to be prepared. No remote access until the CFO decides.
-- **Q-P5 Roadmap — summarised to the CFO:** M5 trust (sandboxed test runs, model benchmarking, secrets scan); M6 five-minute owner (phone digest, existing-repo awareness, optional summaries, involvement slider); M7 efficiency. Never-build list as current boundaries.
-- **Q-P6 Placeholder ("stub-only") code — default adopted unless the CFO objects:** flag, don't reject; revisit after real-model evidence (M5).
+- **Q-P4 Remote access — leaning Tailscale:** the CFO's brief assessment is positive; the decision depends on how configurable it is. A configurability and security note is to be prepared. No remote access until the CFO decides.
+- **Q-P5 Roadmap — delegated to panel consensus for now:** the CFO will review in detail later. Meanwhile the PM uses a three-model consensus to settle the M5–M7 order and proceeds on it (`docs/reviews/R4_roadmap_consensus.md`).
+- **Q-P6 Placeholder code — decided (absolute requirement):** all generated code containing placeholders **must be flagged**, never passed silently as clean. Automatic rejection is not required. See M3 C39.
 
 ## 21. Progress log
 
