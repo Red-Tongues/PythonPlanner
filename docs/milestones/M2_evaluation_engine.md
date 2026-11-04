@@ -80,3 +80,24 @@ These take precedence over the text above where they conflict.
   - Retry corrections are one concise line, not raw tracebacks.
   - FakeProvider gains a `noisy` mode (fences, preambles, smart quotes, trailing commas).
 - **B8 Schemas in prompts.** Pass a compact JSON schema of the expected contract in the prompt. Providers declare capabilities (JSON mode, grammar) with graceful fallback.
+
+## B9 — genPackets and evaPackets (CFO clarification + D1 panel consensus, 2026-11-04)
+
+**Takes precedence over the earlier sections where they conflict.** Full rationale: `docs/reviews/D1_consensus.md`.
+
+- **Terminology.** `packets` rows are **genPackets**: the generative work items. **evaPackets** are stateless, preset evaluative prompts that fill a genPacket's evaluation fields. Evaluating generated output is done by evaPackets aimed at the output, never by new genPackets.
+- **Migration 0004** (additive and frozen; never edit 0001–0003). It creates:
+  - `evaluation_cycles`, `eva_presets` (field, phase pre/post, tier 1–3, prompt template, schema version, policy version) and `eva_packets` (packet + version, cycle, preset revision, phase, target hash, model config, state, attempt, idempotency key, unique content address);
+  - `queue_overrides` and `waivers` (append-only, version-bound, with separate revocation events), `packet_dependencies` (typed edges), and `generation_runs` with a frozen `evaluation_snapshot`;
+  - on `packets`: `tags` and `scores` JSON projections plus `input_hash`;
+  - on `evaluation_passes`: `eva_packet_id`, with `eval_cycle_id` becoming a foreign key;
+  - a CHECK that bans new `content_eval` packets.
+- **genPacket lifecycle:** `draft → evaluating_pre → ready → queued → running → evaluating_post → completed (locked)`, plus `needs_review`, `held`, `blocked` and `failed`. An edit creates a new version and returns it to `evaluating_pre`.
+- **evaPacket lifecycle:** `planned → extracting (P1–P2) → cross_scoring (P3–P6) → consensus | disputed | failed | superseded`.
+- **Readiness.** A pure Python predicate, re-checked at admission and at atomic claim, plus an explanatory `v_ready_candidates` view. Requires:
+  - every required tier-1/2 field has a current consensus at or above its threshold, or a valid version-bound waiver for a soft field;
+  - no hard-constraint failure; typed dependencies satisfied; approvals present.
+- **Queue.** Algorithmic rank (normalised, capped ageing, dependency-unlock value), then human overrides with precedence BLOCK > HOLD > FORCE > PIN > REORDER > NORMAL. FORCE is priority only. One normal admission is reserved per N forced/pinned admissions.
+- **Scheduling.** Tiered lazy gating; content-addressed reuse; all model-A passes, then all model-B passes; single-model concurrency by default; pace budgets (D14).
+- **Guards.** Stale writes are rejected by input hash. Superseded in-flight work never blocks the current version. Every override, waiver and state change is evented.
+- **Tests** (both dialects): edit during evaluation and just before claim; dispute deadlock → `needs_review` with no loop; waiver lapses on edit; FORCE cannot bypass hard gates; reserved fair admission under constant pinning; reuse only when the full content address matches; post-evaluation must pass before locking.
