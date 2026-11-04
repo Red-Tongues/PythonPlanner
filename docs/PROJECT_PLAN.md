@@ -453,13 +453,13 @@ No prices are quoted here; obtain current quotes before purchase.
 
 ---
 
-### 20.1 New decisions for the CFO (from product brainstorm P1, 2026-11-04 — see `docs/reviews/P1_product_brainstorm.md`)
-- **Q-P1 v1.0.0.0 bar.** Option A (Argon): M3 = v0.9 and v1.0.0.0 = M4 + a light isolated runner. Option B (GPT-6.1): keep D13 (v1.0.0.0 = M3 kernel prototype) and add an *operational acceptance gate* after M4 before relying on it unattended. *PM recommends B:* same substance, no decision reopened.
-- **Q-P2 Acceptance scenario.** Is `csv-profiler` (a stdlib CSV profiling CLI with PII flags) a project you'd actually want built? If not, name one of similar size.
-- **Q-P3 Bundled approval.** May a single approval cover "dispatch + auto-commit if post-evaluation ≥ 8,000"? *PM recommends deferring:* it changes authority and needs its own tested contract.
-- **Q-P4 Remote access.** OK to document Tailscale (`tailscale serve`) as the way to reach the GUI from your phone? It needs no code changes.
-- **Q-P5 Roadmap.** Endorse the M5–M7 sketch (with GPT-6.1's reordering) and the "never build" list as current boundaries?
-- **Q-P6 Stub rejection.** Should modules that are only stubs (`pass`, TODO, NotImplementedError) be *rejected* by default, or just *flagged*? PM proposes flagging until you decide.
+### 20.1 Decisions from product brainstorm P1 (CFO answers 2026-11-04 13:20 — see `docs/reviews/P1_product_brainstorm.md`)
+- **Q-P1 Version naming — decided:** the naming doesn't matter to the CFO. Keep D13's labels and add an **operational acceptance gate after M4** (a small project built unattended) before relying on it at work.
+- **Q-P2 Acceptance project — open:** csv-profiler is only a *test-drive* project fed into the orchestrator, not part of the product. The CFO may substitute one of his own small music or software ideas.
+- **Q-P3 One-tap bundled approval — deferred:** revisit with UI settings. **New backlog item (M6): an "involvement level" setting** (a slider or multi-level toggle: "how involved do you want to be?"), implemented as named presets over the existing per-stage autonomy scopes, each preset defining how approvals and consultations are handled.
+- **Q-P4 Remote access — more information requested:** a security and customisation note on Tailscale vs alternatives (SSH tunnel, self-hosted WireGuard, desktop only) is to be prepared. No remote access until the CFO decides.
+- **Q-P5 Roadmap — summarised to the CFO:** M5 trust (sandboxed test runs, model benchmarking, secrets scan); M6 five-minute owner (phone digest, existing-repo awareness, optional summaries, involvement slider); M7 efficiency. Never-build list as current boundaries.
+- **Q-P6 Placeholder ("stub-only") code — default adopted unless the CFO objects:** flag, don't reject; revisit after real-model evidence (M5).
 
 ## 21. Progress log
 
