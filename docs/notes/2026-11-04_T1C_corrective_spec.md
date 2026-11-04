@@ -19,7 +19,7 @@ The design separates **immutable facts** from **derived state**.
 - the current episode's status;
 - queue fields (priority, position, indicators).
 
-These are SQL views, or materialised tables recomputed only by the kernel. Sam's "read it straight from `packets`" convenience becomes a **`v_packet_current` view** with the same columns.
+These are SQL views, or materialised tables recomputed only by the kernel. The CFO's "read it straight from `packets`" convenience becomes a **`v_packet_current` view** with the same columns.
 
 **What "immutable" means (A2) [CFO]:** every revision, attempt, closed episode and sealed bundle is immutable. *Re-opening* a completed packet opens a **new episode**; the completed episode and its sealed bundle never change. *This is how we propose to satisfy "completed work is immutable" while letting fields be amended.*
 
