@@ -455,6 +455,8 @@ No prices are quoted here; obtain current quotes before purchase.
 | 2026-11-04 | PR #1 (M1 + M1.1) squash-merged by the CFO (3068e35). M2 started in a fresh Claude Code session with B1–B11 and the D1–D5 panel records. M3 amended (C9–C21). D17 hardware envelope ≤ 20 GB VRAM. |
 | 2026-11-04 | Sprint 2: CFO clarified the genPacket / evaPacket distinction. Panel design round D1 (three independent designs, cross-scored) → consensus adopted as M2 amendment B9. Plan → v0.6. |
 | 2026-11-04 | Review R1 on M1 code: 24 findings; 18 accepted, 2 partial, 2 deferred to M2, 2 declined as verified false positives. CI green (SQLite on Python 3.11 and 3.12; PostgreSQL 16). M1.1 fix list (12 fixes) sent to the engineer on PR #1. Juggler source checked out: `juggler run` headless CLI and MCP client support make M4 simpler (spec updated). |
+| 2026-11-04 | PR #2 (M2) opened; CI green (350 tests). Review R2 on the M2 code: 25 findings. 21 accepted, 1 deferred (GE7 → M3), 2 declined (GE8 documented and tested; GE10 superseded by MC8 fail-closed). The M2.1 fix list (12 fixes, migration 0006) was sent to the engineer on PR #2. |
+| 2026-11-04 | Review R3: pre-implementation review of the M3 spec. 46 findings: 40 accepted, 3 accepted with amendments, 3 partial, 1 deferred, none declined. Six scope cuts agreed: real Juggler → M4; embedding divergence later; governor ladder → M5 (v1 is deterministic caps + holds); GUI read-only for settings; generated-code execution only through an isolated runner (default: blocked); live SonarQube optional. Written into M3 as amendments C22–C38. |
 | 2026-11-03 | CFO check-in: v1 bar confirmed (working prototype of the kernel); slow, deliberate pace preferred → pace and drift governor (§11.1); Juggler extension committed as M4; personal-use licensing. Plan → v0.4. |
 
 ---
@@ -468,12 +470,9 @@ No prices are quoted here; obtain current quotes before purchase.
 - Update `docs/PROGRESS.md` at the end of every session; the PM folds it into §16 and §21.
 
 ### 22.1 Resume plan (next session)
-1. **Finish M1.1.**
-   - Reopen the existing Claude Code session ("Milestone M1 kernel foundation", branch `claude/optimistic-allen-ts03d8`).
-   - Ask it to complete the remaining fixes from `docs/reviews/R1_consensus.md`, using its checkpoint in `docs/PROGRESS.md`.
-   - Get CI green on all three jobs, then squash-merge PR #1.
-2. **M2 in a fresh Claude Code session from `main`.** Implement `docs/milestones/M2_evaluation_engine.md` including amendments B1–B8, plus the R1 deferrals: UTC-aware datetimes (GH6) and idempotent re-seeding on init-db (GE6). Panel review R2 → consensus → fixes → merge.
-3. **M3**, then the **M4 spike**. The spike needs Juggler installed on the CFO's machine and a connected folder; the session is linked to that computer.
+1. **Finish M2.1 on PR #2.** The engineer session is "M2 evaluation engine", branch `claude/clever-keller-jogsc2`. It implements fixes 1–12 from `docs/reviews/R2_consensus.md` (migration 0006). Then: CI green on all three jobs → PM spot-check → the CFO squash-merges PR #2.
+2. **M3 in a fresh Claude Code session from `main`.** Implement `docs/milestones/M3_orchestration_interface.md`, *reading the R3 amendments C22–C38 first* (they take precedence). Then panel review R4 on the code → fixes → merge.
+3. **M4 spike.** It needs Juggler installed on the CFO's machine and a connected folder; the session is linked to that computer.
 4. Fold each engineer checkpoint into §0, §16 and §21. Regenerate the Word handover document from this file.
 
 ### 22.2 Operating notes for the PM agent (learned this session)
@@ -486,4 +485,5 @@ No prices are quoted here; obtain current quotes before purchase.
   - GitHub Copilot reads the repo and PRs directly. Copilot Free has a monthly chat cap, so use about two prompts per review round.
 - **CI:** GitHub won't run `pull_request` CI while a PR has merge conflicts. The PM edits only PM-owned files on `main`; the engineer owns `docs/PROGRESS.md`.
 - **The PM container could not reach PyPI.** Independent verification relies on GitHub Actions (three jobs), plus PM spot-checks of panel claims in the source.
+- **Calibrate reviewers.** In R3 Gemini supported every finding it scored, so the contradictions (mostly from GPT-6.1) carried the signal. Check each contradiction in the spec or code.
 - **Review consensus works.** In R1 the cross-check removed two plausible but false findings (MC2, MC8) before they reached the engineer. Always verify concrete claims in the code before relaying them.
