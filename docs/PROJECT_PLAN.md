@@ -3,21 +3,29 @@
 | | |
 |---|---|
 | **Document** | Project Plan — replaces the draft `Python Planner.docx` (archived at `docs/archive/`) |
-| **Plan version** | 0.6 — adds the genPacket / evaPacket model (CFO clarification + D1 panel consensus) |
+| **Plan version** | 0.7 — R2 (M2 code) and R3 (M3 spec) consensus; M2.1 complete; M3 scope cuts |
 | **Product target** | v1.0.0.0 prototype of the Python Orchestrator (package version `1.0.0.0.devN` until acceptance) |
 | **Sponsor / CFO** | Sam (redtongues) |
 | **Project manager** | Claude (PM agent) |
 | **Main engineer** | Claude Code (cloud session, GitHub-connected) |
 | **Review panel** | Microsoft Copilot · Gemini (Argon) · GitHub Copilot — consensus-scored (see §17) |
 | **Repository** | `github.com/redtongues/PythonPlanner` (private) |
-| **Last updated** | 2026-11-04 (checkpoint) |
+| **Last updated** | 2026-11-04 12:00 (checkpoint) |
 
 ---
 
-## 0. Status at a glance — checkpoint 2026-11-04 00:20
+## 0. Status at a glance — checkpoint 2026-11-04 12:00
 
 | Item | State |
 |---|---|
+| Plan | v0.7 (this document) |
+| M0 — plan and repo | Done |
+| M1 + M1.1 — kernel foundation | **Merged** (PR #1, 3068e35) after reviews R0 and R1 |
+| M2 — evaluation engine | **PR #2**: M2 plus the 12 M2.1 fixes from review R2 (migration 0006). 410 tests; CI green on all three jobs @ 2fcfda1; mergeable. **Waiting for the CFO's squash-merge** |
+| R2 — panel review of M2 code | Done: 25 findings → 21 accepted, 1 deferred (GE7 → M3), 2 declined. Engineer's 7 open notes ruled (all accepted) |
+| M3 — orchestration and interface | Spec reviewed *before* coding (R3: 46 findings, 43 adopted, 3 partial) and independently verified (V1–V11). Six scope cuts. State-machine reference D8. **Ready for a fresh Claude Code session after PR #2 merges** |
+| M4 — Juggler bridge | Spec ready; now also owns the real `juggler run` CLI and worktrees (moved from M3) |
+---|---|
 | Plan | v0.5 (this document) — CFO decisions D13–D16 recorded; D3 and §20 questions still open |
 | M0 — plan and repo | Done |
 | R0 — panel review of plan | Done: 24 findings → 20 adopted (A1–A7, B1–B8, C1–C7) |
