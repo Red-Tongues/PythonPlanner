@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Document** | Project Plan — replaces the draft `Python Planner.docx` (archived at `docs/archive/`) |
-| **Plan version** | 0.5 — living document; checkpoint at end of session 1 (2026-11-04) |
+| **Plan version** | 0.6 — adds the genPacket / evaPacket model (CFO clarification + D1 panel consensus) |
 | **Product target** | v1.0.0.0 prototype of the Python Orchestrator (package version `1.0.0.0.devN` until acceptance) |
 | **Sponsor / CFO** | Sam (redtongues) |
 | **Project manager** | Claude (PM agent) |
@@ -80,6 +80,10 @@ The Python Orchestrator is the **custom Python kernel** at the centre of an auto
 |---|---|
 | **Project / Objective / Task** | The three-level core tree. A Task *is* a Prompt Packet: `Project > Objective > Task (Prompt Packet)`. |
 | **Prompt Packet** | Federated task metadata recursively evaluated to fill and substantiate fields. New packets are created for new independent or parsed tasks. Parsed packets do not remove the original but create branches with a linked history. A packet carries three layers: **core fields** (authoritative definition), **master governance fields** (operational state) and **candidate fields** (evaluative layer). |
+| **genPacket** | A *generative* prompt packet — a real work item (Task). It is stored in Postgres, carries core fields plus evaluation fields (tags and scores), and enters the generation queue only when the deterministic readiness check passes. (Rows of `packets`.) |
+| **evaPacket** | An *evaluative* sub-packet: a preset, stateless prompt to a local model that fills one evaluation field of one genPacket version, for one pass. High-volume and content-addressed; results go to the append-only `evaluation_passes` and are aggregated deterministically. Also used after generation to evaluate the output. |
+| **Readiness** | The deterministic rule deciding when a genPacket may join the generation queue (current consensus on required fields or a human waiver for soft fields, hard gates, dependencies, approvals). |
+| **Waiver** | A recorded, version-bound human decision to accept a disputed or low-confidence *soft* field. It never applies to hard constraints. |
 | **Core fields** | The stable definition established at set-up: what the work is and where it belongs. |
 | **Master governance fields** | Fields Python and SQL use to manage a packet: unique ID, prompt description, response structure, channel, priority level, status, timestamps, evaluation count, repo target path, plus SQL statistics. |
 | **Candidate field** | Data-validated tags and scores filled by local-LLM evaluations and SQL. Consensus values may promote into master governance fields. |
@@ -172,6 +176,19 @@ flowchart TB
 - Columns for claims and leases (`claimed_by`, `lease_expires_at`, `heartbeat_at`), lineage (`depth`, `packet_kind`) and durable runs (`state`, `idempotency_key`, `input_hash`, `output_hash`, `policy_revision`, `deadline_at`) exist from M1.
 
 ---
+
+### 6.1 genPackets and evaPackets (CFO clarification, D1 consensus — `docs/reviews/D1_consensus.md`)
+
+genPackets are enriched by evaPackets until the readiness check admits them to the generation queue. Python and Pydantic run the loop deterministically:
+
+1. Issue evaPackets for missing or stale fields, tier by tier.
+2. Validate every pass.
+3. Aggregate consensus.
+4. Recompute readiness.
+
+The generation-queue order is algorithmic, but human input can reorder, pin, hold, block or force it. FORCE changes priority only and never waives evidence; a separate, version-bound **waiver** handles soft fields the small models cannot agree on. Each generation run freezes the evaluation snapshot it used. Post-generation evaPackets must accept the exact output before the genPacket locks.
+
+**Invariant:** no genPacket executes unless its exact version has a complete, current, validated and auditable evaluation set, or a recorded human waiver for specific soft fields.
 
 ## 7. Six-pass quickfire evaluation
 
@@ -433,6 +450,7 @@ No prices are quoted here; obtain current quotes before purchase.
 |---|---|
 | 2026-11-03 | Plan v0.2 drafted from the CFO's draft; repository seeded (plan, agent guide, milestone specs, archived draft); M1 started with Claude Code. |
 | 2026-11-03 | Review R0. The three-model panel (Microsoft Copilot, Gemini, GitHub Copilot) raised 24 findings on the plan and specs; cross/self scoring adopted 20 (18 accepted, 2 accepted with amendments), 2 partially and deferred 2 already covered elsewhere. Amendments A1–A7 were sent to the engineer during M1; B1–B8 and C1–C7 were folded into the M2/M3 specs. Plan → v0.3. |
+| 2026-11-04 | Sprint 2: CFO clarified the genPacket / evaPacket distinction. Panel design round D1 (three independent designs, cross-scored) → consensus adopted as M2 amendment B9. Plan → v0.6. |
 | 2026-11-04 | Review R1 on M1 code: 24 findings; 18 accepted, 2 partial, 2 deferred to M2, 2 declined as verified false positives. CI green (SQLite on Python 3.11 and 3.12; PostgreSQL 16). M1.1 fix list (12 fixes) sent to the engineer on PR #1. Juggler source checked out: `juggler run` headless CLI and MCP client support make M4 simpler (spec updated). |
 | 2026-11-03 | CFO check-in: v1 bar confirmed (working prototype of the kernel); slow, deliberate pace preferred → pace and drift governor (§11.1); Juggler extension committed as M4; personal-use licensing. Plan → v0.4. |
 
