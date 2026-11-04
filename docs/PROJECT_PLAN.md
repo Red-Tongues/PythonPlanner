@@ -453,6 +453,13 @@ No prices are quoted here; obtain current quotes before purchase.
 
 ---
 
+### 20.1 New decisions for the CFO (from product brainstorm P1, 2026-11-04 — see `docs/reviews/P1_product_brainstorm.md`)
+- **Q-P1 v1.0.0.0 bar.** Keep D13 (v1 = M3 kernel prototype), or move it so that M3 = v0.9 and v1.0.0.0 = M4 Juggler bridge + a light isolated test runner? *PM recommends moving it:* a v1 that can't run a test or dispatch a real Juggler task proves the state machine, not the product.
+- **Q-P2 Acceptance scenario.** Is `csv-profiler` (a stdlib CSV profiling CLI with PII flags) a project you'd actually want built? If not, name one of similar size.
+- **Q-P3 Bundled approval.** May a single approval cover "dispatch + auto-commit if post-evaluation ≥ 8,000", as an opt-in per approval?
+- **Q-P4 Remote access.** OK to document Tailscale (`tailscale serve`) as the way to reach the GUI from your phone? It needs no code changes.
+- **Q-P5 Roadmap.** Endorse the M5–M7 sketch and the "never build" list?
+
 ## 21. Progress log
 
 | Date | Event |
