@@ -169,3 +169,10 @@ Unknown or external failures don't move the indicator, but they still count in `
 1. **Model upgrades:** should swapping or upgrading the local evaluator models leave existing evaluations valid (Argon's proposal), or force re-evaluation?
 2. **Fresh start after a fix** (GPT-6.1): after an approved clarification or split, does the job keep its review indicator, or start a **new evidence window**, keeping the old history but not carrying the score forward?
 3. **Partial work:** keep useful partial output as a separate field revision while `generation_output` stays NULL (PM's provisional view)?
+
+## CFO answers to round 3 (21:54)
+1. **Model upgrades do not make evaluations stale by themselves:** agreed (Argon's proposal stands).
+2. **After an approved clarification or split:** the principle is to **retain a linked history**. A new evidence window may start, but it stays linked to the old one; nothing is discarded.
+   - *Backlog (later, once fields and database structure are better defined):* define what is **objectively enforceable** versus not, so it can weight the **"user involvement" slider**. Much of this lives in **objective categories within task families**, e.g. the family "tasks that create more tasks", broken down further.
+3. **Partial work:** yes, keep it.
+   - **New concept, "repo inclusion thresholds":** whether output (including failed or partial work) may enter the repo depends on where it's writing. **In uncharted repo space it's fine to include failures, as long as they are commented/tagged as such.** *(Fits C39: placeholders and failures are always flagged, never passed off as clean.)*
