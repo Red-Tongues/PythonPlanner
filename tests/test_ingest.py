@@ -8,10 +8,12 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from orchestrator.contracts import AutonomyMode, PacketStatus, Stage
-from orchestrator.db.models import AutonomyScope, Confirmation, Event, Packet
+from orchestrator.db.models import Confirmation, Event, Packet
 from orchestrator.errors import IngestionError
 from orchestrator.ingest import ingest_file, parse_text, read_document
 from orchestrator.ingest.parser import clean_inline, make_title, name_from_path
+from orchestrator.repository import set_autonomy_mode
+from tests.conftest import USER
 
 ROOT = Path(__file__).resolve().parent.parent
 SAMPLE = ROOT / "examples" / "sample_project_plan.md"
@@ -191,7 +193,7 @@ def test_txt_is_supported(tmp_path) -> None:  # type: ignore[no-untyped-def]
 
 
 def test_ingest_persists_drafts_events_and_confirmation(session: Session) -> None:
-    result = ingest_file(session, SAMPLE, actor="user:test")
+    result = ingest_file(session, SAMPLE, actor=USER)
     session.commit()
     assert result.project.ref == "P-0001"
     assert result.project.source_sha256 and result.project.tree_contract.startswith("ProjectTree@")
@@ -210,21 +212,20 @@ def test_ingest_persists_drafts_events_and_confirmation(session: Session) -> Non
     assert conf is not None and conf.stage is Stage.INGESTION and conf.entity_ref == "P-0001"
     assert conf.payload["contract"].startswith("ProjectTree@")
 
-    second = ingest_file(session, SAMPLE, actor="user:test")
+    second = ingest_file(session, SAMPLE, actor=USER)
     assert second.project.ref == "P-0002"
     assert second.objectives[0].ref == "O-0002-01"
     assert second.packets[0].ref == f"PP-{len(result.packets) + 1:06d}"
 
 
 def test_auto_ingestion_scope_skips_confirmation(session: Session) -> None:
-    session.get(AutonomyScope, Stage.INGESTION).mode = AutonomyMode.AUTO
-    session.flush()
-    result = ingest_file(session, SAMPLE, actor="user:test")
+    set_autonomy_mode(session, Stage.INGESTION, AutonomyMode.AUTO, actor=USER)
+    result = ingest_file(session, SAMPLE, actor=USER)
     assert result.confirmation is None
     assert session.scalar(select(func.count()).select_from(Confirmation)) == 0
     assert session.scalar(select(func.count()).select_from(Packet)) == len(result.packets)
 
 
 def test_ingest_archived_draft_persists(session: Session) -> None:
-    result = ingest_file(session, DRAFT, actor="user:test")
+    result = ingest_file(session, DRAFT, actor=USER)
     assert result.packets

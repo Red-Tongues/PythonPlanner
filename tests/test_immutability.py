@@ -11,8 +11,10 @@ from orchestrator.contracts import AutonomyMode, PacketStatus, Stage
 from orchestrator.db.ddl import is_immutability_violation
 from orchestrator.db.models import Artifact, AutonomyScope, EvaluationPass, Event, utcnow
 from orchestrator.errors import ImmutableRecordError
+from orchestrator.events import record_event
 from orchestrator.lifecycle import transition
 from orchestrator.repository import delete_packet, get_packet, lock_record, update_packet
+from tests.conftest import USER
 
 
 def raw(engine: Engine, sql: str, **params: object) -> None:
@@ -29,7 +31,7 @@ def assert_db_rejects(engine: Engine, sql: str, **params: object) -> None:
 @pytest.fixture
 def completed(tree, session: Session):  # type: ignore[no-untyped-def]
     packet = tree.packets[0]
-    transition(packet, PacketStatus.COMPLETED, "user:test", "done")
+    transition(packet, PacketStatus.COMPLETED, USER, "done")
     session.commit()
     return packet
 
@@ -72,9 +74,9 @@ def test_completion_requires_lock_on_update_and_insert(engine, tree) -> None:
 def test_app_guard_raises_before_touching_locked_packet(session: Session, completed) -> None:
     packet = get_packet(session, completed.ref)
     with pytest.raises(ImmutableRecordError):
-        update_packet(session, packet, {"title": "new"}, actor="user:test")
+        update_packet(session, packet, {"title": "new"}, actor=USER)
     with pytest.raises(ImmutableRecordError):
-        delete_packet(session, packet, actor="user:test")
+        delete_packet(session, packet, actor=USER)
     # even a direct ORM edit is stopped at flush, before the database is asked
     packet.title = "sneaky"
     with pytest.raises(ImmutableRecordError):
@@ -83,8 +85,8 @@ def test_app_guard_raises_before_touching_locked_packet(session: Session, comple
 
 def test_unlocked_packet_update_and_delete_are_evented(session: Session, tree) -> None:
     packet = get_packet(session, tree.packets[1].ref)
-    update_packet(session, packet, {"title": "Write the better CLI"}, actor="user:test")
-    delete_packet(session, get_packet(session, tree.packets[2].ref), actor="user:test")
+    update_packet(session, packet, {"title": "Write the better CLI"}, actor=USER)
+    delete_packet(session, get_packet(session, tree.packets[2].ref), actor=USER)
     session.commit()
     actions = [e.action for e in session.query(Event).filter(Event.entity_type == "packet")]
     assert "packet.updated" in actions and "packet.deleted" in actions
@@ -94,8 +96,8 @@ def test_unlocked_packet_update_and_delete_are_evented(session: Session, tree) -
 
 
 def test_locked_project_and_objective_reject_update_and_delete(engine, session, tree) -> None:
-    lock_record(session, tree.project, actor="user:test")
-    lock_record(session, tree.objectives[1], actor="user:test")
+    lock_record(session, tree.project, actor=USER)
+    lock_record(session, tree.objectives[1], actor=USER)
     session.commit()
     for table, row_id in (("projects", tree.project.id), ("objectives", tree.objectives[1].id)):
         assert_db_rejects(engine, f"UPDATE {table} SET name = 'x' WHERE id = :id", id=row_id)
@@ -104,7 +106,7 @@ def test_locked_project_and_objective_reject_update_and_delete(engine, session, 
         )
         assert_db_rejects(engine, f"DELETE FROM {table} WHERE id = :id", id=row_id)
     with pytest.raises(ImmutableRecordError):
-        lock_record(session, tree.project, actor="user:test")
+        lock_record(session, tree.project, actor=USER)
 
 
 # --------------------------------------------------------------------------- artifacts
@@ -117,6 +119,7 @@ def test_accepted_artifact_is_immutable(engine, session: Session, tree) -> None:
         packet_id=packet.id, path="b.md", sha256="1" * 64, accepted=True, accepted_at=utcnow()
     )
     session.add_all([draft, accepted])
+    record_event(session, actor=USER, action="artifact.created", entity_type="artifact")
     session.commit()
 
     raw(engine, "UPDATE artifacts SET content = 'v2' WHERE id = :id", id=draft.id)
@@ -159,6 +162,7 @@ def test_evaluation_passes_are_append_only(engine, session: Session, tree) -> No
         role="extract",
         value=7,
         score=None,
+        eval_cycle_id="cycle-1",
     )
     session.add(ev)
     session.commit()

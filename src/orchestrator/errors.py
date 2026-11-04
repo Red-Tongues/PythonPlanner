@@ -29,3 +29,7 @@ class IngestionError(OrchestratorError):
 
 class AlreadySupersededError(OrchestratorError):
     """Raised when superseding a packet that already has a newer version (history is linear)."""
+
+
+class UnauditedWriteError(OrchestratorError):
+    """Raised when a domain row would change without an event in the same flush (R1 fix 7)."""

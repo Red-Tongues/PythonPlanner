@@ -1,4 +1,8 @@
-"""The audit log. Every state change writes exactly one ``events`` row (golden rule 5)."""
+"""The audit log. Every state change writes an ``events`` row (golden rule 5).
+
+Callers record the event *before* flushing their change: the flush guard (R1 fix 7) rejects any
+domain write that has no event in the same flush.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +12,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from orchestrator.actors import Actor
 from orchestrator.db.models import Event
 
 log = logging.getLogger(__name__)
@@ -16,7 +21,7 @@ log = logging.getLogger(__name__)
 def record_event(
     session: Session,
     *,
-    actor: str,
+    actor: Actor,
     action: str,
     entity_type: str,
     entity_id: str | None = None,
@@ -26,8 +31,10 @@ def record_event(
     after: dict[str, Any] | None = None,
     reason: str | None = None,
 ) -> Event:
+    if not isinstance(actor, Actor):
+        raise TypeError("record_event needs a typed Actor (see orchestrator.actors)")
     event = Event(
-        actor=actor,
+        actor=str(actor),
         action=action,
         entity_type=entity_type,
         entity_id=entity_id,

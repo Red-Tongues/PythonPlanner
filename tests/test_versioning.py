@@ -22,6 +22,7 @@ from orchestrator.repository import (
     supersede_project,
     update_packet,
 )
+from tests.conftest import KERNEL, USER
 
 
 def _row(session: Session, packet_id: str) -> dict:
@@ -32,7 +33,7 @@ def _row(session: Session, packet_id: str) -> dict:
 
 def test_supersede_locked_packet_creates_new_version(session: Session, tree) -> None:
     old = tree.packets[0]
-    transition(old, PacketStatus.COMPLETED, "user:test", "done")
+    transition(old, PacketStatus.COMPLETED, USER, "done")
     session.commit()
     before = _row(session, old.id)
 
@@ -40,7 +41,7 @@ def test_supersede_locked_packet_creates_new_version(session: Session, tree) -> 
         session,
         old.ref,
         {"title": "Write the parser, properly"},
-        actor="user:test",
+        actor=USER,
         reason="correction",
     )
     session.commit()
@@ -66,30 +67,30 @@ def test_supersede_locked_packet_creates_new_version(session: Session, tree) -> 
 
 def test_history_is_linear_and_never_edited(session: Session, tree) -> None:
     ref = tree.packets[1].ref
-    supersede_packet(session, ref, {"prompt_description": "v2"}, actor="user:test")
+    supersede_packet(session, ref, {"prompt_description": "v2"}, actor=USER)
     with pytest.raises(AlreadySupersededError):
-        supersede_packet(session, f"{ref}@1", {}, actor="user:test")
+        supersede_packet(session, f"{ref}@1", {}, actor=USER)
     with pytest.raises(ImmutableRecordError, match="superseded"):
-        update_packet(session, get_packet(session, f"{ref}@1"), {"title": "x"}, actor="user:test")
+        update_packet(session, get_packet(session, f"{ref}@1"), {"title": "x"}, actor=USER)
     with pytest.raises(ImmutableRecordError):
-        transition(get_packet(session, f"{ref}@1"), PacketStatus.QUEUED, "kernel")
-    v3 = supersede_packet(session, ref, {"prompt_description": "v3"}, actor="user:test")
+        transition(get_packet(session, f"{ref}@1"), PacketStatus.QUEUED, KERNEL)
+    v3 = supersede_packet(session, ref, {"prompt_description": "v3"}, actor=USER)
     assert v3.version == 3
 
 
 def test_supersede_validates_changes(session: Session, tree) -> None:
     with pytest.raises(ValueError, match="cannot change"):
-        supersede_packet(session, tree.packets[0].ref, {"status": "completed"})
+        supersede_packet(session, tree.packets[0].ref, {"status": "completed"}, actor=USER)
     with pytest.raises(Exception, match="unknown response structure"):
-        supersede_packet(session, tree.packets[0].ref, {"response_structure": "haiku"})
+        supersede_packet(session, tree.packets[0].ref, {"response_structure": "haiku"}, actor=USER)
     with pytest.raises(NotFoundError):
-        supersede_packet(session, "PP-424242", {})
+        supersede_packet(session, "PP-424242", {}, actor=USER)
 
 
 def test_packet_heads_view_follows_supersedes_chain(session: Session, tree) -> None:
     ref = tree.packets[2].ref
-    v2 = supersede_packet(session, ref, {"title": "Release v2"}, actor="user:test")
-    v3 = supersede_packet(session, ref, {"title": "Release v3"}, actor="user:test")
+    v2 = supersede_packet(session, ref, {"title": "Release v2"}, actor=USER)
+    v3 = supersede_packet(session, ref, {"title": "Release v3"}, actor=USER)
     session.commit()
     rows = session.execute(
         text("SELECT id, head_id, head_version, is_head FROM v_packet_heads WHERE head_ref = :r"),
@@ -104,11 +105,9 @@ def test_packet_heads_view_follows_supersedes_chain(session: Session, tree) -> N
 
 
 def test_supersede_project_and_objective_keep_children(session: Session, tree) -> None:
-    project = supersede_project(
-        session, tree.project.ref, {"brief": "Sharper brief"}, actor="user:test"
-    )
+    project = supersede_project(session, tree.project.ref, {"brief": "Sharper brief"}, actor=USER)
     objective = supersede_objective(
-        session, tree.objectives[0].ref, {"name": "Build it"}, actor="user:test"
+        session, tree.objectives[0].ref, {"name": "Build it"}, actor=USER
     )
     session.commit()
     assert get_project(session, tree.project.ref).id == project.id
@@ -125,12 +124,12 @@ def test_supersede_project_and_objective_keep_children(session: Session, tree) -
         == 2
     )
     with pytest.raises(ValueError):
-        supersede_project(session, tree.project.ref, {"ref": "P-9999"})
+        supersede_project(session, tree.project.ref, {"ref": "P-9999"}, actor=USER)
 
 
 def test_settings_carry_a_version(session: Session) -> None:
-    row = set_setting(session, "aggregation.dispute_margin", 0.2, actor="user:test")
+    row = set_setting(session, "aggregation.dispute_margin", 0.2, actor=USER)
     assert (row.value, row.version) == (0.2, 2)
     assert session.get(Setting, "aggregation.cross_weight").version == 1
     with pytest.raises(NotFoundError):
-        set_setting(session, "nope", 1, actor="user:test")
+        set_setting(session, "nope", 1, actor=USER)

@@ -237,12 +237,16 @@ class EvaluationPass(Base):
     """Every pass of every evaluation. **Append-only** (DB-enforced)."""
 
     __tablename__ = "evaluation_passes"
-    __table_args__ = (UniqueConstraint("eval_cycle_id", "field_name", "pass_no", "attempt"),)
+    # R1 fix 5: one row per (packet, cycle, field, pass, attempt); the cycle id is mandatory so
+    # NULLs can never slip past the uniqueness rule.
+    __table_args__ = (
+        UniqueConstraint("packet_id", "eval_cycle_id", "field_name", "pass_no", "attempt"),
+    )
 
     id: Mapped[str] = _id()
     packet_id: Mapped[str] = mapped_column(ForeignKey("packets.id"), nullable=False, index=True)
     field_name: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-    eval_cycle_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    eval_cycle_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     run_id: Mapped[str | None] = mapped_column(String(32), index=True)
     model: Mapped[str] = mapped_column(String(128), nullable=False)
     pass_no: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -419,7 +423,7 @@ class Event(Base):
     actor: Mapped[str] = mapped_column(String(64), nullable=False)
     action: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     entity_type: Mapped[str] = mapped_column(String(64), nullable=False)
-    entity_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    entity_id: Mapped[str | None] = mapped_column(String(128), index=True)  # ids and setting keys
     entity_ref: Mapped[str | None] = mapped_column(String(16))
     entity_version: Mapped[int | None] = mapped_column(Integer)
     before: Mapped[dict[str, Any] | None] = mapped_column(JSON)
@@ -455,6 +459,31 @@ class Exemplar(Base):
     updated_at: Mapped[datetime] = _updated()
 
 
+class RefCounter(Base):
+    """Atomic ref allocation (R1 fix 6): one row per counter, incremented in the transaction."""
+
+    __tablename__ = "ref_counters"
+
+    name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class FieldRegistryRevision(Base):
+    """Snapshot of the candidate-field registry each time it changes (R1 fix 12). Append-only.
+
+    M2 evaluation cycles reference ``id`` so every evaluation names the exact definitions used.
+    """
+
+    __tablename__ = "field_registry_revisions"
+
+    id: Mapped[str] = _id()
+    revision: Mapped[int] = mapped_column(Integer, unique=True, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    field_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    definitions: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = _created()
+
+
 TABLE_NAMES: tuple[str, ...] = (
     "projects",
     "objectives",
@@ -471,4 +500,6 @@ TABLE_NAMES: tuple[str, ...] = (
     "events",
     "control_state",
     "exemplars",
+    "ref_counters",
+    "field_registry_revisions",
 )

@@ -13,6 +13,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
 from orchestrator import __version__
+from orchestrator.actors import Actor
 from orchestrator.config import configure_logging, get_settings
 from orchestrator.contracts import FieldLevel, PacketStatus
 from orchestrator.db import init_db, make_engine, make_session_factory, session_scope
@@ -31,7 +32,8 @@ app = typer.Typer(
 packet_app = typer.Typer(help="Inspect and manage individual Prompt Packets.", no_args_is_help=True)
 app.add_typer(packet_app, name="packet")
 
-CLI_ACTOR = "user:cli"
+#: The CLI is a trusted boundary: a person at a terminal (R1 fix 11).
+CLI_ACTOR = Actor.user("cli")
 
 
 class _State:
@@ -112,7 +114,7 @@ def init_db_command() -> None:
     typer.echo(
         "candidate fields: "
         f"{len(fields['inserted'])} inserted, {len(fields['updated'])} updated, "
-        f"{len(fields['disabled'])} disabled"
+        f"{len(fields['disabled'])} disabled; registry revision {summary['registry_revision']}"
     )
 
 

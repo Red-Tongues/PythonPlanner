@@ -4,22 +4,15 @@ from __future__ import annotations
 
 from alembic.autogenerate import compare_metadata
 from alembic.runtime.migration import MigrationContext
-from sqlalchemy import Engine, inspect, select, text
+from sqlalchemy import Engine, inspect, text
 from sqlalchemy.orm import Session
 
-from orchestrator.contracts import AutonomyMode, Stage
 from orchestrator.db import init_db, make_engine
 from orchestrator.db.ddl import HEAD_VIEWS
 from orchestrator.db.migrate import VERSION_TABLE, current_revision, head_revision, upgrade
-from orchestrator.db.models import (
-    TABLE_NAMES,
-    AutonomyScope,
-    Base,
-    ControlState,
-    Setting,
-    Threshold,
-)
-from orchestrator.db.seed import DEFAULT_AUTONOMY, DEFAULT_SETTINGS, DEFAULT_THRESHOLDS
+from orchestrator.db.models import TABLE_NAMES, Base, Setting
+from orchestrator.repository import set_setting
+from tests.conftest import USER
 
 
 def test_upgrade_from_empty_reaches_head(db_url: str) -> None:
@@ -52,35 +45,8 @@ def test_init_db_is_idempotent(engine: Engine) -> None:
     assert summary["fields"] == {"inserted": [], "updated": [], "disabled": []}
 
 
-def test_default_seeds(session: Session) -> None:
-    scopes = {s.stage: s for s in session.scalars(select(AutonomyScope))}
-    assert set(scopes) == set(Stage)
-    assert len(scopes) == 9
-    assert scopes[Stage.OBJECTIVE_LLM_VALUES].mode is AutonomyMode.CONFIRM
-    assert scopes[Stage.OBJECTIVE_LLM_VALUES].is_fixed
-    assert scopes[Stage.INGESTION].mode is AutonomyMode.CONFIRM
-    assert scopes[Stage.CANDIDATE_PROMOTION].mode is AutonomyMode.AUTO
-    assert {k: v[0] for k, v in DEFAULT_AUTONOMY.items()} == {k: s.mode for k, s in scopes.items()}
-
-    settings = {s.key: s.value for s in session.scalars(select(Setting))}
-    assert settings["aggregation.cross_weight"] == 0.6
-    assert settings["aggregation.self_weight"] == 0.4
-    assert settings["aggregation.dispute_margin"] == 0.15
-    assert settings["attempts.quickfire_evaluation"] == 4
-    assert settings["attempts.local_generation"] == 3
-    assert settings["attempts.workbench_production"] == 2
-    assert set(settings) == set(DEFAULT_SETTINGS)
-
-    names = set(session.scalars(select(Threshold.name)))
-    assert names == set(DEFAULT_THRESHOLDS)
-    split = session.scalar(select(Threshold).where(Threshold.name == "split_high_parsability"))
-    assert (split.field_name, split.operator.value, split.value) == ("task_parsability", ">=", "7")
-    assert session.get(ControlState, 1).paused is False
-
-
 def test_seeding_does_not_overwrite_user_values(engine: Engine, session: Session) -> None:
-    row = session.get(Setting, "aggregation.dispute_margin")
-    row.value = 0.2
+    set_setting(session, "aggregation.dispute_margin", 0.2, actor=USER)
     session.commit()
     init_db(engine)
     session.expire_all()

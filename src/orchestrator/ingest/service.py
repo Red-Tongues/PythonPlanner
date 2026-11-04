@@ -9,6 +9,7 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
+from orchestrator.actors import Actor
 from orchestrator.contracts import (
     AutonomyMode,
     PacketKind,
@@ -46,14 +47,19 @@ def persist_tree(
     session: Session,
     tree: ProjectTree,
     *,
-    actor: str,
+    actor: Actor,
     source: str = DETERMINISTIC_SOURCE,
     source_path: str | None = None,
     source_sha256: str | None = None,
 ) -> IngestResult:
-    """Write the tree as a new project with ``draft`` packets. Every row gets an event."""
+    """Write the tree as a new project with ``draft`` packets. Every row gets an event.
+
+    Ids are assigned up front and each event is recorded before its row is flushed, so every
+    flush carries the events that cover it (R1 fix 7).
+    """
     core = tree.project
     project = Project(
+        id=new_id(),
         ref=next_project_ref(session),
         name=core.name,
         brief=core.brief,
@@ -69,7 +75,6 @@ def persist_tree(
         tree_contract=ProjectTree.contract_id(),
     )
     session.add(project)
-    session.flush()
     record_event(
         session,
         actor=actor,
@@ -86,6 +91,7 @@ def persist_tree(
     packets: list[Packet] = []
     for position, node in enumerate(tree.objectives, start=1):
         objective = Objective(
+            id=new_id(),
             ref=next_objective_ref(session, project.ref),
             project_id=project.id,
             position=position,
@@ -94,7 +100,6 @@ def persist_tree(
             source=source,
         )
         session.add(objective)
-        session.flush()
         objectives.append(objective)
         record_event(
             session,
@@ -127,7 +132,6 @@ def persist_tree(
                 source=source,
             )
             session.add(packet)
-            session.flush()
             packets.append(packet)
             record_event(
                 session,
@@ -149,6 +153,7 @@ def persist_tree(
     mode = ingestion_mode(session)
     if mode is AutonomyMode.CONFIRM:
         confirmation = Confirmation(
+            id=new_id(),
             stage=Stage.INGESTION,
             entity_type="project",
             entity_id=project.id,
@@ -161,7 +166,6 @@ def persist_tree(
             payload={"contract": ProjectTree.contract_id(), "tree": tree.model_dump(mode="json")},
         )
         session.add(confirmation)
-        session.flush()
         record_event(
             session,
             actor=actor,
@@ -189,12 +193,13 @@ def persist_tree(
         },
         reason=f"ingested from {source_path or 'text'}",
     )
+    session.flush()
     log.info("ingested %s: %d objectives, %d packets", project.ref, len(objectives), len(packets))
     return IngestResult(project, objectives, packets, confirmation)
 
 
 def ingest_file(
-    session: Session, path: str | Path, *, project_name: str | None = None, actor: str = "user"
+    session: Session, path: str | Path, *, actor: Actor, project_name: str | None = None
 ) -> IngestResult:
     """Read, parse, validate and persist a planning document."""
     path = Path(path)

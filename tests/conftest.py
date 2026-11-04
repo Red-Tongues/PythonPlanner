@@ -15,11 +15,14 @@ import pytest
 from sqlalchemy import Engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
+from orchestrator.actors import Actor
 from orchestrator.contracts import ProjectTree
 from orchestrator.db import init_db, make_engine, make_session_factory
 from orchestrator.ingest import persist_tree
 
 POSTGRES_URL = os.environ.get("ORCH_TEST_POSTGRES_URL")
+USER = Actor.user("test")
+KERNEL = Actor.system("kernel")
 
 DIALECT_PARAMS = [
     pytest.param("sqlite", id="sqlite"),
@@ -96,6 +99,6 @@ SMALL_TREE = {
 @pytest.fixture
 def tree(session: Session):  # type: ignore[no-untyped-def]
     """The SMALL_TREE persisted and committed; returns the IngestResult."""
-    result = persist_tree(session, ProjectTree.model_validate(SMALL_TREE), actor="user:test")
+    result = persist_tree(session, ProjectTree.model_validate(SMALL_TREE), actor=USER)
     session.commit()
     return result

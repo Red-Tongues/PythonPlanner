@@ -16,6 +16,10 @@ Rules (M1 spec §7, with the graceful-degradation choices recorded in docs/PROGR
 5. Messy input never fails: no headings → one "General" objective whose tasks are the list items
    or, failing those, the paragraphs; an objective with text but no tasks gets one task carrying
    that text. Only an empty document raises ``IngestionError``.
+6. Limits degrade gracefully (R1 fix 9): a title that cleans to nothing becomes "Untitled task";
+   a description over ``DESCRIPTION_MAX`` is split at paragraph (then line, then hard) boundaries
+   into "Title (part i/n)" tasks, each carrying a note, so no text is lost and unattended
+   ingestion keeps going. Anything still failing contract validation raises ``IngestionError``.
 """
 
 from __future__ import annotations
@@ -24,11 +28,16 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from orchestrator.contracts import ObjectiveNode, ProjectCore, ProjectTree, TaskCore
 from orchestrator.errors import IngestionError
 
 TITLE_MAX = 120
+DESCRIPTION_MAX = 20_000  # TaskCore.prompt_description limit
+PART_BUDGET = DESCRIPTION_MAX - 200  # room for the part note
 GENERAL_OBJECTIVE = "General"
+UNTITLED_TASK = "Untitled task"
 
 _ATX = re.compile(r"^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$")
 _SETEXT = re.compile(r"^\s{0,3}(=+|-+)\s*$")
@@ -258,7 +267,12 @@ def parse_text(text: str, *, fallback_name: str, project_name: str | None = None
             b.brief.append(line.text)
         b.prev_blank = False
 
-    return _finish(b, project_heading, fallback_name, project_name)
+    try:
+        return _finish(b, project_heading, fallback_name, project_name)
+    except ValidationError as exc:  # pragma: no cover - defensive; rules above avoid it
+        raise IngestionError(
+            f"document could not be turned into a valid ProjectTree: {exc}"
+        ) from exc
 
 
 def _paragraphs(lines: list[str]) -> list[str]:
@@ -270,6 +284,50 @@ def _paragraphs(lines: list[str]) -> list[str]:
             paras.append(" ".join(s.strip() for s in current))
             current = []
     return paras
+
+
+def split_text(text: str, budget: int = PART_BUDGET) -> list[str]:
+    """Split ``text`` into chunks of at most ``budget`` characters, preferring paragraph, then line
+    boundaries, and cutting hard only inside a single over-long line."""
+    if len(text) <= budget:
+        return [text]
+    chunks: list[str] = []
+    current = ""
+    pieces = re.split(r"(\n\s*\n)", text)  # keep paragraph separators
+    for piece in pieces:
+        candidates = [piece] if len(piece) <= budget else re.split(r"(\n)", piece)
+        for part in candidates:
+            while len(part) > budget:  # a single line longer than the budget
+                if current:
+                    chunks.append(current)
+                    current = ""
+                chunks.append(part[:budget])
+                part = part[budget:]
+            if len(current) + len(part) > budget:
+                chunks.append(current)
+                current = ""
+            current += part
+    if current.strip():
+        chunks.append(current)
+    return [c.strip() for c in chunks if c.strip()]
+
+
+def _tasks_for(title: str, description: str) -> list[TaskCore]:
+    title = title or UNTITLED_TASK
+    parts = split_text(description)
+    if len(parts) == 1:
+        return [TaskCore(title=title, prompt_description=parts[0])]
+    n = len(parts)
+    return [
+        TaskCore(
+            title=f"{title[: TITLE_MAX - 14]} (part {i}/{n})",
+            prompt_description=(
+                f"[Part {i} of {n} of one section that exceeded {DESCRIPTION_MAX} characters; "
+                f"split at paragraph boundaries by the deterministic parser.]\n\n{part}"
+            ),
+        )
+        for i, part in enumerate(parts, start=1)
+    ]
 
 
 def _finish(
@@ -289,13 +347,13 @@ def _finish(
 
     nodes: list[ObjectiveNode] = []
     for obj in b.objectives:
-        tasks = []
+        tasks: list[TaskCore] = []
         for task in obj.tasks:
-            description = _join(task.body) or task.title
-            tasks.append(TaskCore(title=task.title, prompt_description=description))
+            description = _join(task.body) or task.title or UNTITLED_TASK
+            tasks.extend(_tasks_for(task.title, description))
         brief = _join(obj.brief)
         if not tasks and brief:
-            tasks.append(TaskCore(title=make_title(obj.name), prompt_description=brief))
+            tasks.extend(_tasks_for(make_title(obj.name), brief))
         if obj.implicit and not brief:
             brief = "Tasks found outside any objective heading."
         nodes.append(ObjectiveNode(name=obj.name[:200], brief=brief, tasks=tasks))

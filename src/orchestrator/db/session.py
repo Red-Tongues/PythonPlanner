@@ -2,7 +2,8 @@
 
 SQLite connections get (A5): ``foreign_keys=ON`` (enforce FKs), ``journal_mode=WAL`` (readers
 never block the kernel's writer — the GUI/CLI can watch a running loop) and ``busy_timeout=5000``
-(wait up to 5 s for a lock instead of failing immediately).
+(wait up to 5 s for a lock instead of failing immediately), and ``recursive_triggers=ON`` so a
+conflict-replacing ``INSERT OR REPLACE`` fires DELETE triggers (R1 fix 3).
 """
 
 from __future__ import annotations
@@ -17,7 +18,14 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from orchestrator.db.guards import GuardedSession
 
-SQLITE_PRAGMAS: tuple[str, ...] = ("foreign_keys = ON", "journal_mode = WAL", "busy_timeout = 5000")
+SQLITE_PRAGMAS: tuple[str, ...] = (
+    "foreign_keys = ON",
+    "journal_mode = WAL",
+    "busy_timeout = 5000",
+    # R1 fix 3: without this, INSERT OR REPLACE deletes the conflicting row WITHOUT firing DELETE
+    # triggers, which would let it replace a locked packet or an append-only row.
+    "recursive_triggers = ON",
+)
 
 
 def make_engine(database_url: str, **kwargs: object) -> Engine:

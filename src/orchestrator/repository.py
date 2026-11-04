@@ -2,7 +2,8 @@
 
 Every write goes through here (or ``orchestrator.lifecycle``), which (1) refuses to touch locked,
 superseded or accepted rows with ``ImmutableRecordError`` before the database is asked, and
-(2) writes an ``events`` row for each state change.
+(2) records an ``events`` row for each state change *before* flushing it (the flush guard rejects
+unevented writes, R1 fix 7). Actors are typed (``orchestrator.actors.Actor``, R1 fix 11).
 
 Versioning (A2): a ref names a lineage. ``get_packet(s, "PP-000001")`` returns the current head;
 ``"PP-000001@1"`` addresses a specific version. ``supersede_*`` inserts a new version with the
@@ -18,16 +19,30 @@ from typing import Any, TypeVar
 from sqlalchemy import Select, select
 from sqlalchemy.orm import Session
 
+from orchestrator.actors import Actor
 from orchestrator.contracts import (
+    AutonomyMode,
     Channel,
     ObjectiveCore,
     PacketStatus,
     ProjectCore,
+    Stage,
     TaskCore,
     response_structure_id,
 )
-from orchestrator.db.guards import assert_mutable, describe
-from orchestrator.db.models import Objective, Packet, Project, Setting
+from orchestrator.db.guards import assert_deletable, assert_mutable, describe
+from orchestrator.db.models import (
+    Artifact,
+    AutonomyScope,
+    ChannelRun,
+    EvaluationPass,
+    Objective,
+    Packet,
+    Project,
+    QualityReport,
+    Setting,
+    new_id,
+)
 from orchestrator.errors import AlreadySupersededError, ImmutableRecordError, NotFoundError
 from orchestrator.events import record_event
 
@@ -195,14 +210,6 @@ def _validate_packet_changes(packet: Packet, changes: dict[str, Any]) -> dict[st
     return cleaned
 
 
-def _assert_head(session: Session, row: Project | Objective | Packet) -> None:
-    newer = successor_of(session, row)
-    if newer is not None:
-        raise ImmutableRecordError(
-            f"{describe(row)} is superseded by v{newer.version}; history is never edited"
-        )
-
-
 # --------------------------------------------------------------------------- writes
 
 
@@ -211,17 +218,15 @@ def update_packet(
     packet: Packet,
     changes: dict[str, Any],
     *,
-    actor: str,
+    actor: Actor,
     reason: str | None = None,
 ) -> Packet:
     """Edit an unlocked head packet in place. Locked/superseded → ``ImmutableRecordError``."""
-    assert_mutable(packet)
-    _assert_head(session, packet)
+    assert_mutable(packet, session)
     cleaned = _validate_packet_changes(packet, changes)
     before = packet_snapshot(packet)
     for name, value in cleaned.items():
         setattr(packet, name, value)
-    session.flush()
     record_event(
         session,
         actor=actor,
@@ -234,41 +239,62 @@ def update_packet(
         after=packet_snapshot(packet),
         reason=reason,
     )
+    session.flush()
     return packet
 
 
+def dependents_of(session: Session, packet: Packet) -> list[str]:
+    """What still refers to ``packet`` (children, evaluations, artifacts, runs, reports)."""
+    found: list[str] = []
+    children = select(Packet.ref).where(
+        Packet.id != packet.id, (Packet.parent_id == packet.id) | (Packet.root_id == packet.id)
+    )
+    found += [f"child packet {ref}" for ref in session.scalars(children)]
+    for model, label in (
+        (EvaluationPass, "evaluation passes"),
+        (Artifact, "artifacts"),
+        (ChannelRun, "channel runs"),
+        (QualityReport, "quality reports"),
+    ):
+        if session.scalar(select(model.id).where(model.packet_id == packet.id).limit(1)):
+            found.append(label)
+    return found
+
+
 def delete_packet(
-    session: Session, packet: Packet, *, actor: str, reason: str | None = None
+    session: Session, packet: Packet, *, actor: Actor, reason: str | None = None
 ) -> None:
-    """Delete an unlocked head packet. Locked/superseded → ``ImmutableRecordError``."""
-    assert_mutable(packet)
-    _assert_head(session, packet)
+    """Delete an unlocked v1 head packet nothing depends on; anything else → archive instead."""
+    assert_deletable(packet, session)
+    dependents = dependents_of(session, packet)
+    if dependents:
+        raise ImmutableRecordError(
+            f"{describe(packet)} has dependents ({', '.join(dependents)}); archive it instead"
+        )
     before = packet_snapshot(packet)
-    packet_id, ref, version = packet.id, packet.ref, packet.version
-    session.delete(packet)
-    session.flush()
     record_event(
         session,
         actor=actor,
         action="packet.deleted",
         entity_type="packet",
-        entity_id=packet_id,
-        entity_ref=ref,
-        entity_version=version,
+        entity_id=packet.id,
+        entity_ref=packet.ref,
+        entity_version=packet.version,
         before=before,
         reason=reason,
     )
+    session.delete(packet)
+    session.flush()
 
 
 def lock_record(
-    session: Session, row: Project | Objective, *, actor: str, reason: str | None = None
+    session: Session, row: Project | Objective, *, actor: Actor, reason: str | None = None
 ) -> None:
     """Lock a project or objective version (packets lock through the lifecycle)."""
     if isinstance(row, Packet):
         raise TypeError("packets are locked by completing/archiving them (lifecycle.transition)")
-    assert_mutable(row)
+    assert_mutable(row, session)
     row.locked = True
-    session.flush()
     record_event(
         session,
         actor=actor,
@@ -280,6 +306,7 @@ def lock_record(
         after={"locked": True},
         reason=reason,
     )
+    session.flush()
 
 
 def _check_supersedable(session: Session, old: Project | Objective | Packet) -> None:
@@ -296,7 +323,7 @@ def supersede_packet(
     old_ref: str,
     changes: dict[str, Any] | None = None,
     *,
-    actor: str = "user",
+    actor: Actor,
     reason: str | None = None,
 ) -> Packet:
     """Create a new version of a packet with ``changes`` applied. The old row is never edited.
@@ -308,8 +335,13 @@ def supersede_packet(
     _check_supersedable(session, old)
     cleaned = _validate_packet_changes(old, dict(changes or {}))
 
-    carried = {f: getattr(old, f) for f in EDITABLE_PACKET_FIELDS}
+    # Carried governance fields, then the validated changes (which include a recomputed
+    # response_contract when the response structure changes — R1 fix 8: one source per field).
+    fields: dict[str, Any] = {f: getattr(old, f) for f in EDITABLE_PACKET_FIELDS}
+    fields["response_contract"] = old.response_contract
+    fields.update(cleaned)
     new = Packet(
+        id=new_id(),
         ref=old.ref,
         version=old.version + 1,
         supersedes_id=old.id,
@@ -317,17 +349,15 @@ def supersede_packet(
         objective_id=old.objective_id,
         position=old.position,
         packet_kind=old.packet_kind,
-        response_contract=old.response_contract,
         parent_id=old.parent_id,
         root_id=old.root_id,
         depth=old.depth,
         status=PacketStatus.DRAFT,
         locked=False,
         source="supersede",
-        **{**carried, **cleaned},
+        **fields,
     )
     session.add(new)
-    session.flush()
     record_event(
         session,
         actor=actor,
@@ -340,6 +370,7 @@ def supersede_packet(
         after={**packet_snapshot(new), "changes": sorted(changes or {})},
         reason=reason,
     )
+    session.flush()
     return new
 
 
@@ -348,7 +379,7 @@ def supersede_project(
     old_ref: str,
     changes: dict[str, Any] | None = None,
     *,
-    actor: str = "user",
+    actor: Actor,
     reason: str | None = None,
 ) -> Project:
     """New version of a project's core fields. Objectives stay attached to the lineage."""
@@ -360,6 +391,7 @@ def supersede_project(
     ProjectCore.model_validate({PROJECT_FIELDS[c]: v for c, v in merged.items()})
 
     new = Project(
+        id=new_id(),
         ref=old.ref,
         version=old.version + 1,
         supersedes_id=old.id,
@@ -370,7 +402,6 @@ def supersede_project(
         **merged,
     )
     session.add(new)
-    session.flush()
     record_event(
         session,
         actor=actor,
@@ -383,6 +414,7 @@ def supersede_project(
         after={**project_snapshot(new), "changes": sorted(changes)},
         reason=reason,
     )
+    session.flush()
     return new
 
 
@@ -391,7 +423,7 @@ def supersede_objective(
     old_ref: str,
     changes: dict[str, Any] | None = None,
     *,
-    actor: str = "user",
+    actor: Actor,
     reason: str | None = None,
 ) -> Objective:
     """New version of an objective's core fields. Packets stay attached to the lineage."""
@@ -403,6 +435,7 @@ def supersede_objective(
     ObjectiveCore.model_validate({"name": merged["name"], "brief": merged["brief"]})
 
     new = Objective(
+        id=new_id(),
         ref=old.ref,
         version=old.version + 1,
         supersedes_id=old.id,
@@ -414,7 +447,6 @@ def supersede_objective(
         **merged,
     )
     session.add(new)
-    session.flush()
     record_event(
         session,
         actor=actor,
@@ -427,11 +459,12 @@ def supersede_objective(
         after={**objective_snapshot(new), "changes": sorted(changes)},
         reason=reason,
     )
+    session.flush()
     return new
 
 
 def set_setting(
-    session: Session, key: str, value: Any, *, actor: str, reason: str | None = None
+    session: Session, key: str, value: Any, *, actor: Actor, reason: str | None = None
 ) -> Setting:
     """Change a tunable. Bumps its ``version`` and writes an event."""
     row = session.get(Setting, key)
@@ -440,7 +473,6 @@ def set_setting(
     before = {"value": row.value, "version": row.version}
     row.value = value
     row.version += 1
-    session.flush()
     record_event(
         session,
         actor=actor,
@@ -452,4 +484,37 @@ def set_setting(
         after={"key": key, "value": value, "version": row.version},
         reason=reason,
     )
+    session.flush()
     return row
+
+
+def set_autonomy_mode(
+    session: Session,
+    stage: Stage | str,
+    mode: AutonomyMode | str,
+    *,
+    actor: Actor,
+    reason: str | None = None,
+) -> AutonomyScope:
+    """Change a stage's autonomy mode. Fixed scopes raise ``ImmutableRecordError``."""
+    if not actor.is_user:
+        raise PermissionError("only a user may change autonomy scopes")
+    scope = session.get(AutonomyScope, Stage(stage))
+    if scope is None:
+        raise NotFoundError(f"no autonomy scope for stage {stage!r}")
+    if scope.is_fixed:
+        raise ImmutableRecordError(f"the {scope.stage.value} scope is fixed at {scope.mode.value}")
+    before = {"mode": AutonomyMode(scope.mode).value}
+    scope.mode = AutonomyMode(mode)
+    record_event(
+        session,
+        actor=actor,
+        action="autonomy_scope.changed",
+        entity_type="autonomy_scope",
+        entity_id=scope.stage.value,
+        before=before,
+        after={"mode": scope.mode.value},
+        reason=reason,
+    )
+    session.flush()
+    return scope

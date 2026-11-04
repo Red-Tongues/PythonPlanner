@@ -1,8 +1,8 @@
 """Packet lifecycle: an explicit allowed-transition table, applied with an event per change.
 
-Kernel/agent actors may only follow ``ALLOWED_TRANSITIONS``. User actors (``user`` or
-``user:<channel>``) may additionally complete or archive any non-terminal packet by hand — the
-``manual`` autonomy mode means "the user does it", so a person must be able to close work the
+System and LLM actors may only follow ``ALLOWED_TRANSITIONS``. A *user* actor (typed, R1 fix 11 —
+see ``orchestrator.actors``) may additionally complete or archive any non-terminal packet by hand:
+the ``manual`` autonomy mode means "the user does it", so a person must be able to close work the
 kernel never touched. Completing or archiving locks the packet in the same UPDATE statement.
 """
 
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session, object_session
 
+from orchestrator.actors import Actor
 from orchestrator.contracts import LOCKING_STATUSES, PacketStatus
 from orchestrator.db.guards import assert_mutable
 from orchestrator.db.models import Event, Packet, utcnow
@@ -36,15 +37,11 @@ ALLOWED_TRANSITIONS: dict[PacketStatus, frozenset[PacketStatus]] = {
 USER_ONLY_TARGETS: frozenset[PacketStatus] = frozenset({S.COMPLETED, S.ARCHIVED})
 
 
-def is_user_actor(actor: str) -> bool:
-    return actor == "user" or actor.startswith("user:")
-
-
-def can_transition(from_status: PacketStatus, to_status: PacketStatus, actor: str) -> bool:
+def can_transition(from_status: PacketStatus, to_status: PacketStatus, actor: Actor) -> bool:
     if to_status in ALLOWED_TRANSITIONS[from_status]:
         return True
     return (
-        is_user_actor(actor)
+        actor.is_user
         and to_status in USER_ONLY_TARGETS
         and bool(ALLOWED_TRANSITIONS[from_status])  # not already terminal
     )
@@ -53,7 +50,7 @@ def can_transition(from_status: PacketStatus, to_status: PacketStatus, actor: st
 def transition(
     packet: Packet,
     to_status: PacketStatus | str,
-    actor: str,
+    actor: Actor,
     reason: str | None = None,
     *,
     session: Session | None = None,
@@ -68,10 +65,12 @@ def transition(
     assert_mutable(packet)  # locked packets: ImmutableRecordError before anything else
     if not is_head(session, packet):
         raise ImmutableRecordError(f"{packet.ref} v{packet.version} is superseded (history)")
+    if not isinstance(actor, Actor):
+        raise TypeError("transition needs a typed Actor (see orchestrator.actors)")
     if not can_transition(current, target, actor):
         allowed = sorted(s.value for s in ALLOWED_TRANSITIONS[current])
         raise InvalidTransitionError(
-            f"{packet.ref}: {current.value} → {target.value} is not allowed for {actor!r} "
+            f"{packet.ref}: {current.value} → {target.value} is not allowed for {actor} "
             f"(allowed: {allowed or 'none — terminal'})"
         )
 
@@ -81,8 +80,7 @@ def transition(
         # Same flush → same UPDATE statement; the DB trigger verifies both are set.
         packet.locked = True
         packet.completed_at = utcnow()
-    session.flush()
-    return record_event(
+    event = record_event(
         session,
         actor=actor,
         action="packet.transition",
@@ -94,3 +92,5 @@ def transition(
         after=packet_snapshot(packet),
         reason=reason,
     )
+    session.flush()
+    return event
