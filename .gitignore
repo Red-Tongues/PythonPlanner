@@ -17,6 +17,8 @@ htmlcov/
 *.db
 *.sqlite
 *.sqlite3
+*.db-wal
+*.db-shm
 production_repo/
 workbench/
 .env
