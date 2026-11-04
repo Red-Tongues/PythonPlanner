@@ -52,6 +52,7 @@ from orchestrator.db.models import (
 from orchestrator.db.refs import next_packet_ref
 from orchestrator.errors import OrchestratorError
 from orchestrator.events import record_event
+from orchestrator.gates import note_confirmation
 from orchestrator.llm import LLMProvider
 from orchestrator.settings_store import get_int
 
@@ -332,6 +333,7 @@ def _request_confirmation(session: Session, packet: Packet, rule: Threshold, act
         reason="branching autonomy scope is 'confirm'",
     )
     session.flush()
+    note_confirmation(session, confirmation, actor=actor)
     return f"awaiting confirmation {confirmation.id}"
 
 
@@ -419,6 +421,7 @@ def promote_consensus(
                 reason="approval rule fired" if approval else "promotion scope is 'confirm'",
             )
             session.flush()
+            note_confirmation(session, confirmation, actor=actor)
         return {**proposal, "applied": False}
     apply_channel(session, packet, channel, actor=actor, reason="consensus promotion (auto)")
     return {**proposal, "applied": True}

@@ -7,6 +7,8 @@ Approving carries out what was proposed, as the approving user:
 * ``packet_review`` (``candidate_promotion``) — waive the listed *soft* fields for this packet
   version and, if the evaluation set is then acceptable, move it from ``needs_review`` to
   ``ready``. Hard gates are never waived (they stay listed as blockers);
+* ``failure_budget`` — retry with a fresh lifetime budget (``awaiting_confirmation → ready``);
+  rejecting marks the packet ``failed`` (B4, M2.1 fix 12);
 * anything else (e.g. ``ingestion``) — recorded as approved.
 
 Rejecting records the decision; a rejected branching proposal is not proposed again for the
@@ -23,6 +25,7 @@ from orchestrator.contracts import Channel, ConfirmationStatus, EvaPhase, Packet
 from orchestrator.db.models import Confirmation, Packet, Threshold, utcnow
 from orchestrator.errors import NotFoundError, OrchestratorError
 from orchestrator.events import record_event
+from orchestrator.gates import PACKET_CONFIRMATION_TYPES, note_confirmation
 from orchestrator.llm import LLMProvider
 
 
@@ -74,6 +77,7 @@ def _decide(
         reason=reason,
     )
     session.flush()
+    note_confirmation(session, confirmation, actor=actor)
 
 
 def approve(
@@ -90,7 +94,7 @@ def approve(
     stage = Stage(confirmation.stage)
     packet = (
         session.get(Packet, confirmation.entity_id)
-        if confirmation.entity_type in ("packet", "packet_review")
+        if confirmation.entity_type in PACKET_CONFIRMATION_TYPES
         else None
     )
     outcome: dict = {}
@@ -119,6 +123,18 @@ def approve(
         outcome["channel"] = channel.value
     elif confirmation.entity_type == "packet_review" and packet is not None:
         outcome.update(_approve_review(session, confirmation, packet, actor, reason))
+    elif confirmation.entity_type == "failure_budget" and packet is not None:
+        from orchestrator.lifecycle import transition
+
+        # approval grants a fresh budget: v_queue stops counting failures before this decision
+        transition(
+            packet,
+            PacketStatus.READY,
+            actor,
+            "retry approved after the failure budget",
+            session=session,
+        )
+        outcome["status"] = "ready"
     record_event(
         session,
         actor=actor,
@@ -158,4 +174,13 @@ def _approve_review(
 def reject(session: Session, confirmation_id: str, *, actor: Actor, reason: str) -> None:
     if not actor.is_user:
         raise PermissionError("only a user may reject a confirmation")
-    _decide(session, _find(session, confirmation_id), ConfirmationStatus.REJECTED, actor, reason)
+    confirmation = _find(session, confirmation_id)
+    _decide(session, confirmation, ConfirmationStatus.REJECTED, actor, reason)
+    if confirmation.entity_type == "failure_budget":
+        from orchestrator.lifecycle import transition
+
+        packet = session.get(Packet, confirmation.entity_id)
+        if packet is not None and PacketStatus(packet.status) is PacketStatus.AWAITING_CONFIRMATION:
+            transition(
+                packet, PacketStatus.FAILED, actor, f"retry rejected: {reason}", session=session
+            )

@@ -23,6 +23,7 @@ from sqlalchemy import event, inspect, select
 from sqlalchemy.orm import ORMExecuteState, Session
 
 from orchestrator.contracts import EVA_TERMINAL_STATES
+from orchestrator.db.ddl import CYCLE_BINDINGS, EVA_IDENTITY
 from orchestrator.db.models import (
     Artifact,
     AutonomyScope,
@@ -65,6 +66,7 @@ APPEND_ONLY_MODELS: tuple[type, ...] = (
     Revocation,
     QueueAdmission,
     BranchApplication,
+    PacketDependency,  # M2.1 fix 6: changes go through revocations
 )
 LOCKABLE_MODELS: tuple[type, ...] = (Project, Objective, Packet)
 VERSIONED_MODELS: tuple[type, ...] = (Setting, CandidateFieldDefinitionRow, Threshold)
@@ -139,6 +141,11 @@ def assert_mutable(obj: Any, session: Session | None = None) -> None:
         raise ImmutableRecordError(f"{describe(obj)} is accepted and immutable")
     if isinstance(obj, EvaPacket) and _committed_value(obj, "state") in EVA_TERMINAL_STATES:
         raise ImmutableRecordError(f"{describe(obj)} is finished and immutable")
+    frozen = {EvaPacket: EVA_IDENTITY, EvaluationCycle: CYCLE_BINDINGS}.get(type(obj))
+    if frozen is not None:  # M2.1 fix 6: identity / binding columns never change after insert
+        changed = [a for a in frozen if inspect(obj).attrs[a].history.has_changes()]
+        if changed and inspect(obj).persistent:
+            raise ImmutableRecordError(f"{describe(obj)}: {changed} are frozen from insert")
     if isinstance(obj, GenerationRun):
         for attr in ("evaluation_snapshot", "packet_id", "packet_version", "input_hash"):
             if inspect(obj).attrs[attr].history.has_changes():

@@ -14,13 +14,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import bindparam, select, text, update
+from sqlalchemy import bindparam, select, text
 from sqlalchemy.orm import Session
-from sqlalchemy.orm.attributes import set_committed_value
 
 from orchestrator.actors import Actor
 from orchestrator.contracts import EvaPhase, GenerationRunState, OverrideKind, PacketStatus
@@ -100,12 +100,102 @@ def _transition(session: Session, packet: Packet, status: PacketStatus, actor: A
     return transition(packet, status, actor, why, session=session)
 
 
+class ContextChanged(ClaimError):
+    """The packet's context changed since evaluation; it was sent back to ``evaluating_pre``.
+
+    The revert (refreshed input hash, transition and events) is pending in the session:
+    commit it, so the packet is re-evaluated (M2.1 fix 1)."""
+
+
+def _admission_event(
+    session: Session, packet: Packet, actor: Actor, before: str, after: str, reason: str
+) -> None:
+    record_event(
+        session,
+        actor=actor,
+        action="packet.transition",
+        entity_type="packet",
+        entity_id=packet.id,
+        entity_ref=packet.ref,
+        entity_version=packet.version,
+        before={"status": before, "gate_revision": packet.gate_revision},
+        after={"status": after, "gate_revision": packet.gate_revision},
+        reason=reason,
+    )
+
+
+def enforce_failure_budgets(
+    session: Session, *, now: datetime | None = None, actor: Actor = KERNEL
+) -> list[str]:
+    """B4 / M2.1 fix 12: a packet that exhausted its lifetime failure budget moves to
+    ``awaiting_confirmation`` (audited) with a confirmation a user approves (another budget:
+    failures before the approval stop counting) or rejects (the packet fails)."""
+    from orchestrator.contracts import Channel, Stage
+    from orchestrator.db.models import Confirmation
+    from orchestrator.gates import note_confirmation
+
+    moved: list[str] = []
+    for row in queue_rows(session, now):
+        if row.ineligible_reason != "failure_budget":
+            continue
+        packet = session.get(Packet, row.packet_id)
+        assert packet is not None
+        _transition(
+            session,
+            packet,
+            PacketStatus.AWAITING_CONFIRMATION,
+            actor,
+            f"lifetime failure budget exhausted ({row.failed_runs} failed runs)",
+        )
+        stage = (
+            Stage.WORKBENCH_PRODUCTION
+            if packet.channel == Channel.WORKBENCH_PRODUCTION
+            else Stage.LOCAL_GENERATION
+        )
+        confirmation = Confirmation(
+            id=new_id(),
+            stage=stage,
+            entity_type="failure_budget",
+            entity_id=packet.id,
+            entity_ref=packet.ref,
+            entity_version=packet.version,
+            summary=(
+                f"{packet.ref} v{packet.version} failed {row.failed_runs} times: approve to "
+                "retry with a fresh budget, reject to mark it failed"
+            ),
+            payload={"failed_runs": row.failed_runs},
+        )
+        session.add(confirmation)
+        record_event(
+            session,
+            actor=actor,
+            action="confirmation.created",
+            entity_type="confirmation",
+            entity_id=confirmation.id,
+            entity_ref=packet.ref,
+            entity_version=packet.version,
+            after={"stage": stage.value, "kind": "failure_budget", "failed_runs": row.failed_runs},
+            reason="lifetime failure budget exhausted (B4)",
+        )
+        session.flush()
+        note_confirmation(session, confirmation, actor=actor)
+        moved.append(packet.ref)
+    return moved
+
+
 def admit_next(
     session: Session, *, now: datetime | None = None, actor: Actor = KERNEL
 ) -> Packet | None:
-    """Admit the best eligible ``ready`` packet that passes readiness (ready → queued)."""
-    from orchestrator.evaluation.readiness import readiness
+    """Admit the best eligible ``ready`` packet that passes readiness (ready → queued).
 
+    Atomic (M2.1 fix 11): the transition is one guarded UPDATE that also compares the gate
+    revision and context read before the readiness check (fixes 1 and 2), so two concurrent
+    ticks can never both admit a packet, and a governance change in between loses the race.
+    """
+    from orchestrator.evaluation.readiness import readiness
+    from orchestrator.gates import guarded_status_update, require_current_context
+
+    enforce_failure_budgets(session, now=now, actor=actor)
     rows = [r for r in queue_rows(session, now) if r.eligible and r.status == "ready"]
     if not rows:
         return None
@@ -121,10 +211,22 @@ def admit_next(
     for row in rows:
         packet = session.get(Packet, row.packet_id)
         assert packet is not None
+        session.refresh(packet)
+        observed = packet.gate_revision
+        if not require_current_context(session, packet, actor=actor):
+            continue  # sent back to evaluating_pre (fix 1)
         report = readiness(session, packet)
         if not report.ready:
             continue
-        _transition(session, packet, PacketStatus.QUEUED, actor, f"admitted ({row.queue_class})")
+        if not guarded_status_update(
+            session,
+            packet,
+            expected=PacketStatus.READY,
+            observed_gate=observed,
+            values={"status": PacketStatus.QUEUED, "updated_at": utcnow()},
+        ):
+            continue  # lost a race; the next tick sees the new state
+        _admission_event(session, packet, actor, "ready", "queued", f"admitted ({row.queue_class})")
         admission = QueueAdmission(
             id=new_id(),
             packet_id=packet.id,
@@ -145,6 +247,7 @@ def admit_next(
                 "priority": row.priority,
                 "fair_reserved": starving,
                 "waived": report.waived,
+                "gate_revision": observed,
             },
         )
         session.flush()
@@ -153,23 +256,22 @@ def admit_next(
 
 
 def evaluation_snapshot(session: Session, packet: Packet) -> dict[str, Any]:
-    """Everything the run is based on, frozen into ``generation_runs`` (D1)."""
+    """Everything the run is based on, frozen into ``generation_runs`` (D1). Built in the claim
+    transaction from the same gate state the claim compares (M2.1 fix 2)."""
+    from orchestrator.evaluation.evaluator import head_context
     from orchestrator.governance import active_overrides
 
     consensus = [
         dict(r)
         for r in session.execute(
             text(
-                "SELECT field_name, item_key, status, final_value, confidence, eva_packet_id "
+                "SELECT field_name, item_key, status, final_value, confidence_e4, eva_packet_id "
                 "FROM v_field_consensus WHERE packet_id = :id AND phase = 'pre' "
                 "ORDER BY field_name, item_key"
             ),
             {"id": packet.id},
         ).mappings()
     ]
-    for row in consensus:
-        if row["confidence"] is not None:
-            row["confidence"] = str(row["confidence"])
     revoked = select(Revocation.target_id).where(Revocation.target_type == "waiver")
     waivers = session.scalars(
         select(Waiver.id).where(
@@ -179,8 +281,18 @@ def evaluation_snapshot(session: Session, packet: Packet) -> dict[str, Any]:
             Waiver.id.not_in(revoked),
         )
     ).all()
+    project, objective = head_context(session, packet)
     return {
-        "packet": {"ref": packet.ref, "version": packet.version, "input_hash": packet.input_hash},
+        "packet": {
+            "ref": packet.ref,
+            "version": packet.version,
+            "input_hash": packet.input_hash,
+            "gate_revision": packet.gate_revision,
+        },
+        "context": {
+            "project": [project.ref, project.version],
+            "objective": [objective.ref, objective.version] if objective else None,
+        },
         "tags": packet.tags,
         "scores": packet.scores,
         "consensus": consensus,
@@ -196,16 +308,29 @@ def claim(
     *,
     now: datetime | None = None,
     actor: Actor = KERNEL,
+    before_cas: Callable[[], None] | None = None,
 ) -> GenerationRun:
-    """Atomically claim a queued packet for generation (queued → running)."""
+    """Atomically claim a queued packet for generation (queued → running).
+
+    The gate revision is read first; context, overrides and readiness are checked and the
+    snapshot is built; then one guarded UPDATE compares the revision, the input hash, the
+    context heads, the status and the lease (M2.1 fixes 1 and 2). Any governance write
+    committed meanwhile changes the revision, so the claim loses instead of running on stale
+    gates. ``before_cas`` is a test seam called just before the UPDATE.
+    """
     from orchestrator.evaluation.readiness import readiness
+    from orchestrator.gates import guarded_status_update, require_current_context
     from orchestrator.governance import active_overrides
     from orchestrator.repository import get_packet
 
     now = now or utcnow()
     packet = get_packet(session, packet_ref)
+    session.refresh(packet)
+    observed = packet.gate_revision
     if PacketStatus(packet.status) is not PacketStatus.QUEUED:
         raise ClaimError(f"{packet.ref} is {PacketStatus(packet.status).value}, not queued")
+    if not require_current_context(session, packet, actor=actor):
+        raise ContextChanged(f"{packet.ref}: its context changed; sent back to evaluating_pre")
     blocking = [
         o
         for o in active_overrides(session, packet)
@@ -218,35 +343,25 @@ def claim(
         raise ClaimError(f"{packet.ref} is no longer ready: " + "; ".join(report.blockers))
     lease = now + timedelta(minutes=get_int(session, "queue.lease_minutes", 30))
     snapshot = evaluation_snapshot(session, packet)
-    session.flush()
-    table = Packet.__table__
-    result = session.connection().execute(
-        update(table)
-        .where(
-            table.c.id == packet.id,
-            table.c.version == packet.version,
-            table.c.input_hash == packet.input_hash,
-            table.c.status == PacketStatus.QUEUED.value,
-            (table.c.claimed_by.is_(None)) | (table.c.lease_expires_at < now),
-            ~select(Packet.id).where(Packet.supersedes_id == packet.id).exists(),
-        )
-        .values(
-            status=PacketStatus.RUNNING.value,
-            claimed_by=worker,
-            lease_expires_at=lease,
-            heartbeat_at=now,
-            updated_at=now,
-        )
+    if before_cas is not None:
+        before_cas()
+    won = guarded_status_update(
+        session,
+        packet,
+        expected=PacketStatus.QUEUED,
+        observed_gate=observed,
+        values={
+            "status": PacketStatus.RUNNING,
+            "claimed_by": worker,
+            "lease_expires_at": lease,
+            "heartbeat_at": now,
+            "updated_at": now,
+        },
     )
-    if result.rowcount != 1:
-        raise ClaimError(f"{packet.ref}: claim lost (edited, re-queued or claimed by another)")
-    for attr, value in (
-        ("status", PacketStatus.RUNNING),
-        ("claimed_by", worker),
-        ("lease_expires_at", lease),
-        ("heartbeat_at", now),
-    ):
-        set_committed_value(packet, attr, value)
+    if not won:
+        raise ClaimError(
+            f"{packet.ref}: claim lost (gates, context or version changed, or claimed by another)"
+        )
     run = GenerationRun(
         id=new_id(),
         packet_id=packet.id,
@@ -266,20 +381,14 @@ def claim(
         entity_ref=packet.ref,
         entity_version=packet.version,
         before={"status": "queued"},
-        after={"status": "running", "worker": worker, "lease_expires_at": lease.isoformat()},
+        after={
+            "status": "running",
+            "worker": worker,
+            "lease_expires_at": lease.isoformat(),
+            "gate_revision": observed,
+        },
         reason="atomic claim after readiness re-check",
     )
-    record_event(
-        session,
-        actor=actor,
-        action="packet.transition",
-        entity_type="packet",
-        entity_id=packet.id,
-        entity_ref=packet.ref,
-        entity_version=packet.version,
-        before={"status": "queued"},
-        after={"status": "running", "generation_run": run.id},
-        reason=f"claimed by {worker}",
-    )
+    _admission_event(session, packet, actor, "queued", "running", f"claimed by {worker}")
     session.flush()
     return run

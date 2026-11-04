@@ -7,8 +7,12 @@
   change dispatch *priority only*: they never bypass readiness (TC-46, TC-47). They are always
   bound to one version. BLOCK and HOLD declare their scope (``version`` or ``lineage``) so a
   protective restriction never disappears by accident.
-* **Revocation** — its own append-only record; the original row is never edited.
+* **Revocation** — its own append-only record; the original row is never edited. Waivers,
+  overrides and dependencies are all revoked this way (dependencies are append-only, M2.1 fix 6).
 * **Dependency** — a typed edge (``finish_to_start``); hierarchy is not a dependency.
+
+Every one of these writes bumps the packet's gate revision in the same transaction, so a
+concurrent admission or claim that checked the old gate state loses (M2.1 fix 2).
 
 Only user actors make these decisions; every one is evented.
 """
@@ -30,6 +34,7 @@ from orchestrator.db.models import (
 )
 from orchestrator.errors import NotFoundError, OrchestratorError
 from orchestrator.events import record_event
+from orchestrator.gates import bump_gate
 from orchestrator.repository import get_packet
 
 
@@ -88,6 +93,7 @@ def grant_waiver(
         reason=reason,
     )
     session.flush()
+    bump_gate(session, packet, actor=actor, cause="waiver granted")
     return waiver
 
 
@@ -132,6 +138,7 @@ def add_override(
         reason=reason,
     )
     session.flush()
+    bump_gate(session, packet, actor=actor, cause=f"{kind.value} override added")
     return override
 
 
@@ -139,9 +146,11 @@ def revoke(
     session: Session, target_type: str, target_id: str, *, actor: Actor, reason: str
 ) -> Revocation:
     _require_user(actor)
-    model = {"waiver": Waiver, "override": QueueOverride}.get(target_type)
+    model = {"waiver": Waiver, "override": QueueOverride, "dependency": PacketDependency}.get(
+        target_type
+    )
     if model is None:
-        raise GovernanceError("target_type must be 'waiver' or 'override'")
+        raise GovernanceError("target_type must be 'waiver', 'override' or 'dependency'")
     target = session.get(model, target_id)
     if target is None:
         raise NotFoundError(f"no {target_type} {target_id}")
@@ -152,6 +161,8 @@ def revoke(
     )
     if existing is not None:
         return existing
+    packet = session.get(Packet, target.packet_id)
+    assert packet is not None
     revocation = Revocation(
         id=new_id(), target_type=target_type, target_id=target_id, actor=str(actor), reason=reason
     )
@@ -162,11 +173,12 @@ def revoke(
         action=f"{target_type}.revoked",
         entity_type="revocation",
         entity_id=revocation.id,
-        entity_ref=target.packet_ref,
+        entity_ref=packet.ref,
         after={"target_type": target_type, "target_id": target_id},
         reason=reason,
     )
     session.flush()
+    bump_gate(session, packet, actor=actor, cause=f"{target_type} revoked")
     return revocation
 
 
@@ -203,6 +215,7 @@ def add_dependency(
         reason=reason,
     )
     session.flush()
+    bump_gate(session, packet, actor=actor, cause="dependency added")
     return dependency
 
 
