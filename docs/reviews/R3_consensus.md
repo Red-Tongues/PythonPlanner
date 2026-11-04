@@ -28,3 +28,17 @@ PM verified the cited contradictions in the spec text before adopting: C9 names 
 
 ## Outcome
 All accepted findings are written into the M3 spec as **R3 amendments C22–C38**. They take precedence over all earlier M3 text, and stale lines are marked in place. Expected effect: far fewer engineer judgement calls in M3 (M2 had 14) and a smaller, safer v1.0.0.0 scope.
+
+## Verification of C22–C38
+The PM wrote C22–C38, so a fresh GPT-6.1 Sol chat checked them for contradictions, undefined terms, unsafe gaps and overreach, before any engineer saw them. It found 11 issues; all 11 were verified against the text and adopted in place:
+- **V1** dependency writes bump the gate revision.
+- **V2** a stale run never overwrites a newer or restrictive packet state.
+- **V3** what may still be dispatched during a pause is precisely defined.
+- **V4** missing-scanner outcomes are consistent per policy.
+- **V5** owner disposition cannot bypass a hard execution gate.
+- **V6** the run state `awaiting_confirmation` exists for exit 3.
+- **V7** `throttled` removed as a status (display only).
+- **V8** token exhaustion is a hard admission refusal.
+- **V9** ambiguous interrupt matches need an explicit owner choice.
+- **V10** max-wait precedes the fairness reservation.
+- **V11** C38 tests assert the *expected* effect count (0 or 1), never duplicates.

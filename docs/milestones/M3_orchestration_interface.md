@@ -153,7 +153,7 @@ These take precedence over the text above where they conflict.
 - **Not in v1:** automated refactoring of drifting branches; predictive cost-to-completion models; dynamic budget markets between objectives.
 
 ## R3 amendments C22–C38 (three-model pre-implementation review, 2026-11-04 — see `docs/reviews/R3_consensus.md`)
-*Binding. They take precedence over everything above. Finding IDs are given in brackets.*
+*Binding. They take precedence over everything above. Finding IDs are given in brackets. Verified by an independent GPT-6.1 pass (V1–V11, all adopted in the text below).*
 
 - **C22 Migrations** [GA1, MA1, GC1]. M3 builds on the merged M2.1 schema (frozen migrations 0001–0006, never edited). All M3 schema goes in new frozen migration **0007** (more only if unavoidable), with dialect DDL in the dialect module. Do not recreate `eva_packets`, `evaluation_cycles` or the `content_eval` ban. Test: upgrade a *populated* 0006 database to head on SQLite and PostgreSQL; IDs, hashes, lineage and immutable rows are unchanged, and new `content_eval` rows are still rejected.
 - **C23 Packet states** [GA2, MA3, GC3]. The genPacket state set is C11's plus `waiting_for_children`, `awaiting_confirmation` and `closed_unverified`.
@@ -166,17 +166,17 @@ These take precedence over the text above where they conflict.
   - Each attempt appends one row to `channel_runs` (append-only, linked by `generation_run_id`); Quickfire Evaluation attempts link `eva_packet_id`.
   - Console IDs are `#<QE|LG|WP><channel_runs id>`.
 - **C25 Governance atomicity** [GA4, MA2, GC2].
-  - **Writers.** Every governance write increments the `gate_revision` of every non-terminal packet in its scope, in the same transaction. Governance writes are: overrides, waivers, holds, branch kill, confirmation decisions, autonomy-scope or threshold changes, budget top-ups and interrupt supersession, whether made from the GUI, the CLI or the digest. Scope means the packet itself or all packets under the branch, objective or project.
+  - **Writers.** Every governance write increments the `gate_revision` of every non-terminal packet in its scope, in the same transaction. Governance writes are: dependency additions and revocations, override and waiver additions and revocations, holds, branch kill, confirmation decisions, autonomy-scope or threshold changes, budget top-ups and interrupt supersession, whether made from the GUI, the CLI or the digest. Scope means the packet itself or all packets under the branch, objective or project.
   - **Admission and claim.** Both recompute the context fingerprint from the current packet, project and objective heads (M2.1 #1). The claim's guarded UPDATE checks status, version, input hash, `gate_revision` and lease. The snapshot is written in the same transaction.
-  - **Run completion.** It re-checks fingerprint and gate revision. On mismatch the run becomes `stale` and the packet returns to `evaluating_pre`, with an event.
+  - **Run completion.** It re-checks fingerprint and gate revision. On mismatch only the completing run becomes `stale`, with an event. The packet returns to `evaluating_pre` only if that run still owns the current packet version, the packet is non-terminal, and no hold, block, pause or `awaiting_confirmation` applies; otherwise the packet's current state and restrictions are kept. A stale run never changes a terminal packet or a superseding version.
 - **C26 Fencing and exclusivity** [MA8, GA16 partial].
   - **Fencing.** Every claim carries a monotonically increasing fencing token. Result acceptance and repository publication reject obsolete tokens.
-  - **Pause.** Dispatch authorisation is serialised with pause: work authorised before the pause commits is in flight and drains; anything after it is not dispatched.
+  - **Pause.** Dispatch authorisation is serialised atomically with pause: work authorised before the pause commits is in flight and drains. While a scope is paused, no generation, generation retry or pre-phase evaluation is dispatched in it. Reconciliation and collection of already-dispatched results continue. Post-phase evaluation may still be dispatched for outputs whose authorised write committed before the pause, subject to evaluation budgets and evaluator verification (C29). Pausing the evaluation channel itself stops these too.
   - **Publication and recovery.** Publication checks the expected branch HEAD. Every external effect has a durable operation ID, so recovery recognises an effect that already happened.
   - **Kernel lock.** The single-kernel lock must be portable to both dialects (e.g. a lease row taken by conditional UPDATE). Its mechanism is the engineer's choice, but tests must show exclusion, lease expiry and takeover, and that a fenced-out old owner cannot publish.
 - **C27 Attempts, exit codes and failure budget** [GA5, MA3, GC3, MA15].
   - **Attempt failures.** A validation failure, exit `1` or exit `4` is a failed attempt and counts toward the channel's max attempts. Exhausting them marks the `generation_runs` row `failed` and adds 1 to the packet's `failed_runs`.
-  - **Exit 3.** The run parks with a stable conversation/resume identity and counts against nothing. Approval revalidates current bindings (C25) and resumes exactly once; it never silently starts a new conversation.
+  - **Exit 3.** The run moves to the run state `awaiting_confirmation` (added to the `generation_runs` state set), keeping a stable conversation/resume identity and counting against nothing. Approval revalidates current bindings (C25) and the dispatch gates, then resumes the same run and conversation through `dispatched` exactly once; it never silently starts a new conversation. Rejection leaves the run parked until it is explicitly cancelled. Cancellation → `failed`, without using the packet's failure budget. A binding mismatch → `stale`. These transitions go in the run transition table (C23).
   - **Exit 2.** The run fails and the channel pauses with `configuration_error`. This does not count toward the packet's failure budget. The channel retries only after the configuration revision changes.
   - **Lifetime failure budget exhausted** (M2.1 #12). The packet makes an audited transition to `awaiting_confirmation`, with exactly one confirmation. Approval grants a bounded allowance (`failure_budget_topup`, default 1) and history is never erased. Rejection moves the packet to `held` with the reason.
 - **C28 Numbers** [GA6, MA4, GC5, GC10; closes GE7].
@@ -193,14 +193,14 @@ These take precedence over the text above where they conflict.
   3. **Post-evaluation and scan.** Post-phase evaPackets bind to the manifest hash, and the scan binds to the commit SHA.
   4. **Completion.** It requires a complete, accepted evaluation for every required post field for *that* manifest hash, plus the quality policy below. Evidence for a different manifest or commit (branch advanced, merge changed bytes, late scan of an old SHA) is stale and is rescheduled. A failed post-evaluation → `needs_review`.
   - **Quality policy:** the per-project setting `quality_scan` = `off` | `optional` (default) | `required`.
-    - `off`, or no scanner: the scan is recorded as `skipped` with an event and the packet shows as "unscanned". This does not block completion.
-    - `optional`: a scanner error counts as skipped; gate `ERROR` raises a confirmation and the packet waits for the decision.
+    - `off`: no scan is requested; it is recorded as `skipped` with an event and the packet shows as "unscanned". Scanning never blocks completion.
+    - `optional`: a missing scanner or a scanner error is recorded as `skipped` and shown as "unscanned", and does not block completion. A returned gate `ERROR` raises a confirmation and blocks completion until it is decided.
     - `required`: a missing scanner or a scanner error blocks completion; gate `ERROR` → `needs_review` plus a confirmation.
     - Hard constraints are never waivable.
 - **C31 Executing generated code** [MA7, GA12 amended; defer 5].
   - **Static checks in M3.** M3 validation is static: `ast.parse`/`py_compile`, contract checks and path confinement.
   - **Execution checks.** Checks that need execution (import, pytest) run only through an injectable `IsolatedRunner` with no secrets, no DB, no network, no write access to the production repository, and bounded time and output.
-  - **Default runner.** M3 ships the interface plus a `NoRunner` default, under which those checks report `blocked: no isolated runner` — **never passed**. A contract that requires execution cannot complete without an explicit, evented owner disposition.
+  - **Default runner.** M3 ships the interface plus a `NoRunner` default, under which those checks report `blocked: no isolated runner` — **never passed**. A required execution check is a hard completion gate, unless its contract explicitly names it as a soft requirement. The owner may waive only such a soft requirement, through a waiver bound to version, phase and manifest. Otherwise the packet stays blocked or is closed `closed_unverified` with a reason; owner confirmation alone can never mark it `completed`.
   - **Test.** A sentinel test covers the runner contract using a fake runner.
 - **C32 Editing files owned by completed packets** [GA14 partial]. Besides supersession, a packet may modify a file last written by a completed packet only when:
   - its manifest declares `modifies: <path>` with the expected base sha256, and
@@ -214,8 +214,8 @@ These take precedence over the text above where they conflict.
     - Three distinct failed validation attempts on a channel within the preceding 2 h pause that channel and raise a confirmation.
     - Pre-generation ambiguity > 4,000 sends the packet to `needs_review`.
     - 48 h with no human touch makes new dispatches in that objective require confirmation. A human touch is an owner decision or edit only, never automated events or polling.
-  - **Scope states.** Each scope is `normal`, `throttled` or `paused`. A pause clears only on explicit owner resume. Manual holds and failure-budget parking never clear automatically.
-  - **What continues while paused:** reconciliation, result collection and post-evaluation of already-written outputs, within the evaluation budget.
+  - **Scope states.** A scope's persisted status is `normal` or `paused`; a pause clears only on explicit owner resume. "Off-hours throttling" is a derived display condition (the off-hours multiplier is active). It is not a status and never clears a pause. Manual holds and failure-budget parking never clear automatically.
+  - **What continues while paused:** exactly what C26 allows.
   - **Time.**
     - The clock is injected. `governor_timezone` is an IANA name (default `UTC`) and windows are half-open.
     - Nights are 22:00–07:00 and weekends are Saturday–Sunday, both in `governor_timezone`. During them, run limits are × 0.25, floored, and Workbench Production is 0 unless pinned.
@@ -237,26 +237,29 @@ These take precedence over the text above where they conflict.
     - A durable per-channel counter tracks successful FORCE/PIN admissions since the last normal admission. After `fair_admission_n` (default 3), the next admission is reserved for an eligible non-forced packet: longest wait, then `created_at`, then `ref`.
     - If there is no such packet, forced work may proceed and the reservation stays due.
     - Counters move only on a successful guarded claim, atomically with it.
+    - **Max-wait first (B4).** Each channel first selects among eligible packets waiting longer than `max_wait_hours` (longest wait, then `created_at`, then `ref`). This takes precedence over priority classes and the normal-admission reservation. An overdue forced/pinned claim does not clear a due reservation; a normal claim does.
 - **C36 Budgets and bounded ticks** [MA11, GC9, MA14].
   - **Atomic reservation.** Before every external attempt (evaluation, generation, retry), reserve channel run capacity and objective token capacity atomically: prompt plus max output, or `workbench_token_estimate` for workbench runs.
   - **Reconciliation.** Reconcile actual usage exactly once per operation ID. Unknown usage keeps its reservation.
   - **Splits.** Reserve packet capacity before committing a split. Top-ups are owner-authorised and evented.
+  - **Token exhaustion.** Objective token capacity is a hard admission limit. If an attempt's reservation exceeds what remains, it is refused before any external effect: the packet/run state is unchanged and the readiness reason is `blocked: objective_token_budget`. It is reconsidered after the budget window resets or an authorised top-up commits. Exhaustion alone never creates a scope pause.
   - **Bounded ticks.** Each tick evaluates a finite batch (`eval_batch_size`, default 8): model A, then model B, for that batch only. Post-phase and recovery evaPackets are scheduled ahead of pre-phase ones. B12's `needs_review` outcome is kept.
 - **C37 Interrupts and GUI scope** [GA11; defer 4].
   - **Interrupt matching.** Extracted projects and objectives match by case-normalised name within their parent; packets match by `ref`, then by exact title within the same objective.
+    - A supplied `ref` must resolve uniquely within the target objective, or that item is rejected. A name or title match counts only when it is unique; multiple matches need explicit owner selection by stable ID/ref before any change. Never pick the first match, and never create a new draft to resolve the ambiguity.
     - Matched unlocked items whose core fields changed get a superseding version (with C25's gate bump).
     - Unmatched items are new drafts; unmentioned items are untouched.
     - A locked match is changed only through an explicit supersede confirmation.
     - Late runs for superseded versions are recorded as stale.
   - **GUI scope.** The GUI is read-only for thresholds, weights, scopes and settings; those are edited through the CLI (validated per C28, evented, versioned). The GUI keeps the Miller tree, packet detail, approvals, pause/resume/interrupt, digest and console.
-- **C38 Required PostgreSQL two-session tests** [GC12; extends C6/C20]. Each test asserts row counts, final states, unchanged provenance and **exactly one** external effect:
+- **C38 Required PostgreSQL two-session tests** [GC12; extends C6/C20]. Each test asserts row counts, final states, unchanged provenance and the scenario's expected number of external effects. A successfully authorised operation produces exactly one effect, including after replay or recovery. One rejected by governance, pause, fencing or budget produces zero. No scenario may ever produce a duplicate effect. Scenarios:
   - concurrent claims of one packet;
   - a governance write between readiness and claim (waiver revoke, BLOCK, approval change, context-head edit);
   - two claimers racing for the last budget unit;
   - approval/rejection racing a parked run;
   - a late or duplicate inbox result after lease takeover;
   - a crash after git commit but before the DB acknowledgement;
-  - pause racing dispatch authorisation.
+  - pause racing dispatch authorisation (one effect if the authorisation commits first, zero if the pause does).
 
 **Deferred beyond M3:**
 - real Juggler integration (M4);
