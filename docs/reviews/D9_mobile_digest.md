@@ -77,4 +77,4 @@ Each view returns `metric_name, value_fp, threshold_fp`, using integer division 
 - **D9-R4 Same domain services.** GUI and CLI share one service layer per action; guards are never duplicated in route handlers.
 - **D9-R5 Metrics.** Ship only those computable from the Stage A schema, plus "busy but useless". Hollow output and quote starvation wait for their inputs. `digest_ack` is the only new event type the page introduces.
 - **D9-R6 No packet-scope default.** Hold, waive and kill take their scope from the button pressed (a packet card → packet; a branch action → branch). The GUI offers no objective/project-wide action in v1. *This answers GPT-6.1's concern without a hidden default.*
-- **D9-R7 Stub rejection** is not in Stage B until the CFO decides (Q-P6). Stage B may *display* a "stub-only" flag computed by the static validator.
+- **D9-R7 Placeholder flags (CFO decision, M3 C39).** Every digest card and repo-write diff for flagged output shows a prominent placeholder badge with a count. Flagged output is never shown as clean. Automatic rejection is off.
