@@ -4,6 +4,49 @@ Newest entries first. Every agent session appends an entry: what changed, decisi
 
 ---
 
+## 2026-11-04 (evening) — Build-process tidy (CFO decision Q4) (Claude Code)
+
+On PR [redtongues/PythonPlanner#3](https://github.com/redtongues/PythonPlanner/pull/3), as five focused commits, after merging `main` at e4234bb (the CFO–Argon clarification). The PM asked for no R4 fixes and no M3a work until the data model is settled, so this is a **build process** change only. The **product** rule is unchanged: immutability, append-only and transition triggers stay, are never disabled, and keep their tests on both dialects.
+
+**Tests:** 564 items before (560 passed, 4 skipped) → **571 after (567 passed, 4 skipped)** on SQLite plus PostgreSQL 16. No test was dropped. The frozen-migration tests were replaced by baseline drift and schema checks (+7 items), and the test move kept all 571 items, with the same names and parameters apart from the dropped `fixN_` prefixes. Ruff is clean.
+
+### What changed
+| # | Change | Where |
+|---|---|---|
+| 1 | **One contracts location**: `evaluation/contracts.py` → `contracts/evaluation.py` | `contracts/` |
+| 2 | **One master schema**: tables in `db/models.py` (now also holding the 4 CHECK constraints and 7 server defaults that existed only in migrations); **every** trigger in `db/ddl.py` (including the lineage and evaPacket/run triggers that existed only inside 0004 and 0005); every view in `sql/views.py`; `db/schema.py` assembles them per dialect | `db/`, `sql/views.py` |
+| 3 | **Squashed migrations**: 0001–0007 → one generated `0001_baseline` (literal DDL, written by `scripts/generate_baseline.py`). The frozen manifest, its test and `scripts/freeze_views.py` are gone. `tests/test_schema.py` is the drift check: baseline = master schema (both dialects); installed triggers/views/functions = master; models vs DB (`compare_metadata`); downgrade round trip | `migrations/versions/`, `scripts/`, `tests/test_schema.py` |
+| 4 | **Tests by capability**: `test_r1_fixes`, `test_m21_fixes`, `test_m3_races`, `test_m3_schema` → `test_immutability`, `test_versioning`, `test_schema`, `test_refs`, `test_audit`, `test_ingest`, `test_actors`, `test_fields`, `test_gates`, `test_concurrency`, `test_evaluator`, `test_providers`, `test_queue`, `test_db_guards`. Shared helpers → `tests/dbhelpers.py`, `tests/govfixtures.py`; the `superseded` fixture → `conftest.py` | `tests/` |
+| 5 | CLAUDE.md golden rule 7 now states the master-schema rule and the regenerate command; README and ARCHITECTURE §6 updated | docs |
+
+### Equivalence check (done before deleting 0001–0007)
+I snapshotted the old head schema on both dialects: every table, column, type, nullability, default, PK, FK, unique, index, CHECK, trigger, function and view. I then compared it with the database the baseline builds.
+- **SQLite:** identical.
+- **PostgreSQL:** identical except:
+  1. `control_state.id` no longer has a sequence (it is a single-row table and the id is always written explicitly);
+  2. a status CHECK lists its values in a different order;
+  3. `v_ready_candidates` now includes `fencing_token` and `active_run_id`. Its `p.*` had been expanded when 0006 created the view, before those columns existed, so the old view silently lacked them.
+
+### Decisions (please check)
+1. **The baseline is literal, generated text, not a migration that imports the models at runtime.** A new column is still written once (in `models.py`), and you regenerate. I chose this so the baseline can simply be frozen as it stands the day a database must be kept.
+2. **Seeds are no longer in a migration.** `init-db` (`ensure_defaults`) is the only seeding path, as it already was for re-seeding (GE6). `migrate.upgrade()` on its own now builds an empty schema; the CLI always goes through `init-db`. The fresh-database seed events are now one batch per table (five, not six).
+3. **A database with history refuses to downgrade.** Downgrading to empty would drop the append-only `events` table in one statement, bypassing its row triggers.
+4. **New revision id `0001_baseline`.** Any local database at the old `0007` must be recreated (`orchestrator init-db` on a fresh file). There is no live data, so I treated this as acceptable.
+5. **Replaced revision-specific tests.**
+   - The populated "0004 → 0005" and "0006 → 0007" upgrade tests have no upgrade path left. They became "a populated database survives `init-db`" and "legacy M1 statuses stay valid and only re-enter evaluation" (deviation P3).
+   - The manifest round trip became a baseline downgrade round trip plus "re-init keeps the schema and ref numbering".
+6. **Two SQLAlchemy pitfalls are handled in `db/schema.py`.**
+   - The one FK cycle (`generation_runs.channel_run_id`, marked `use_alter`) is kept inline on SQLite. `create_all` would silently drop it there.
+   - `AddConstraint` permanently marks that FK as not inline, so its effect is undone after the PostgreSQL `ALTER` is compiled.
+   - The output is checked to be identical across hash seeds and dialect order.
+7. **This supersedes my Stage A note that "0007 stays amendable until merge".** The 0007 schema now lives in the master schema and the baseline.
+
+### Not done (as instructed)
+- `docs/reviews`, `docs/notes`, `docs/milestones` untouched. Older PROGRESS entries still name the old migrations and test files; they are history and were not rewritten.
+- No R4 fixes, no M3a/Stage B features.
+
+---
+
 ## 2026-11-04 — M3 Stage A: transition tables, migration 0007, governance atomicity, fencing (Claude Code)
 
 Branch `claude/elegant-davinci-hcny5t`, draft PR [redtongues/PythonPlanner#3](https://github.com/redtongues/PythonPlanner/pull/3). `main` was merged in three times during the session (D8 errata E1–E11; D9 with ruling D9-R1; D10 with rulings Q1–Q16), all docs only. PM-owned docs were not edited (see the ruff note below). Stage A stops here for the PM checkpoint; no channels, kernel loop, GUI or integrations yet.

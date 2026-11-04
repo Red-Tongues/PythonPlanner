@@ -21,7 +21,7 @@ K1 advances work unattended · K2 governed (recorded, scored, evidenced, gated b
 4. **Tests need no network, GPU or real LLM.** Use `FakeProvider`. PostgreSQL tests are opt-in via `ORCH_TEST_POSTGRES_URL` (CI provides it).
 5. **Every state change writes an event** (actor, action, entity, before/after summary, reason).
 6. **Readable by default.** Anything the kernel does must be visible in the DB, the CLI and (from M3) the GUI.
-7. **Portable SQL.** Views and triggers must exist for both SQLite and PostgreSQL; keep dialect-specific DDL in one module.
+7. **Portable SQL, one master schema.** Views and triggers must exist for both SQLite and PostgreSQL. The schema is defined once: tables in `db/models.py`, triggers in `db/ddl.py` (all dialect-specific DDL), views in `sql/views.py`, assembled by `db/schema.py`. The single baseline migration is generated from it (`python scripts/generate_baseline.py`); `tests/test_schema.py` fails if they differ. While there is no live data, a schema change edits the master and regenerates the baseline (never hand-edit it, never add patch-on-patch revisions); once a database must be kept, freeze the baseline and add new revisions.
 
 ## Commands
 
@@ -30,6 +30,7 @@ pip install -e ".[dev]"          # add ,postgres for psycopg
 pytest -q                        # full test suite (SQLite)
 ORCH_TEST_POSTGRES_URL=postgresql+psycopg://... pytest -q -m postgres
 ruff check . && ruff format --check .
+python scripts/generate_baseline.py   # after any change to models.py, ddl.py or sql/views.py
 orchestrator --help
 ```
 

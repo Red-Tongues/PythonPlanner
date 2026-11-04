@@ -106,7 +106,7 @@ Booleans are INTEGER 0/1; confidences NUMERIC(·,4) on PostgreSQL and REAL on SQ
 with `ROUND(…, 4)`); timestamps are UTC. Views carry no ORDER BY unless stated; callers order.
 Every view exists with the same columns on both dialects; dialect differences are tokens in
 `orchestrator/sql/views.py` (JSON array explode, hour difference, timestamp comparison,
-newline literal). Migration 0005 holds frozen copies; `tests/test_sql_views.py` keeps them equal.
+newline literal). They are part of the master schema (§6); the baseline migration carries the generated text.
 
 | View | One row per | Columns (NULL semantics) |
 |---|---|---|
@@ -133,21 +133,36 @@ be pre-routed to `split` by adding a preset revision. A combined call gets one t
 once (`evaluation.max_escalations`) with the split plan and `attempts.quickfire_evaluation`
 attempts per call; still unresolved → `needs_review` plus an approval-queue entry.
 
-## 6. Schema change technique on SQLite (migration 0005)
+## 6. One master schema, one generated baseline (CFO decision Q4)
 
-SQLite cannot alter constraints. Rebuilding `packets` (copy, drop, rename) breaks under
-`foreign_keys = ON`: dropping a referenced table leaves deferred violations, and renames rewrite
-child foreign keys. 0005 therefore uses SQLite's documented procedure for format-neutral changes:
-rewrite `sqlite_master.sql` under `writable_schema` and bump `schema_version`. This is used only
-to widen the status CHECK (existing rows stay valid), append defaulted columns at the end of the
-column list (what `ADD COLUMN` does) and add FOREIGN KEY clauses (checked by
-`foreign_key_check` immediately). No row moves and no trigger or index is touched.
+The schema is defined in one place, per kind of object:
+
+| Object | Source | Notes |
+|---|---|---|
+| Tables, columns, constraints, indexes, server defaults | `db/models.py` | SQLAlchemy 2.0; `compare_metadata` checks the built database against it |
+| Triggers (and PostgreSQL trigger functions) | `db/ddl.py` | All dialect-specific DDL (golden rule 7): immutability, lineage, append-only, frozen bindings, transition tables |
+| Views | `sql/views.py` | Portable text; dialect differences are tokens |
+| Assembly | `db/schema.py` | `schema_statements(dialect)`: tables (dependency order, indexes by name), then triggers, then views |
+| Seed rows | `db/seed.py` | Not schema; inserted by `ensure_defaults` on every `init-db` |
+
+`migrations/versions/0001_baseline.py` is **generated** (`python scripts/generate_baseline.py`)
+as literal DDL and imports nothing from the application. `tests/test_schema.py` fails when the
+baseline and the master schema differ, checks the installed triggers, views and functions, and
+round-trips a downgrade. A database with history (any `events` row) refuses to downgrade,
+because dropping tables would erase the append-only audit log in one statement.
+
+The baseline replaced migrations 0001–0007 while there was no live data. It was compared object by
+object with the old head: identical on SQLite; on PostgreSQL the only differences are
+`control_state.id` without a sequence (single row, id always explicit), the status CHECK listing
+values in another order, and `v_ready_candidates` now including `fencing_token` and
+`active_run_id` (its `p.*` was expanded in 0006, before those columns existed). Once a database
+must be kept, the baseline is frozen and changes become new revisions.
 
 ## 7. Packet and run state machines (M3 C23)
 
 The tables below are **generated** from `orchestrator/transitions.py`, the single guard every
 status change passes (`lifecycle.transition` for packets, `orchestrator.runs` for runs).
-Migration 0007 freezes the union of allowed (from, to) pairs into triggers on both dialects, so a
+The union of allowed (from, to) pairs is carried into triggers on both dialects (`db/ddl.py`), so a
 pair not listed is rejected by the database too; `tests/test_transitions.py` checks every
 unlisted pair for every actor kind. Starting point: `docs/reviews/D8_state_machines.md` with its
 errata E1–E11 (binding). Actor *kernel* = a `system` actor (D8's kernel and governor); *user* =

@@ -1,5 +1,6 @@
-"""C38: two-session races for the Stage A pieces (C25 governance atomicity, C26 fencing, pause
-and the kernel lock, C36 reservation). Each runs on SQLite and, with ORCH_TEST_POSTGRES_URL, on
+"""Two-session races: admission and claim (M2.1 fixes 2, 11) and the C38 scenarios for
+governance atomicity (C25), fencing, pause and the kernel lock (C26) and reservation (C36).
+Each runs on SQLite and, with ORCH_TEST_POSTGRES_URL, on
 PostgreSQL (CI's postgres job), with two real sessions on two connections.
 
 Every test asserts row counts, final states and the expected number of *effects*: an effect is
