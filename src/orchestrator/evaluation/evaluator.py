@@ -335,6 +335,7 @@ class Evaluator:
         self.verify_models()
         cycle = self._open_cycle(packet, phase, target)
         report.cycle_id = cycle.id
+        self._extra_cycles: list[EvaluationCycle] = []
 
         tiers: dict[int, list[tuple[EvaPreset, CandidateFieldDefinitionRow]]] = {}
         for preset, definition in current_presets(session, phase, fields):
@@ -374,8 +375,20 @@ class Evaluator:
             report.calls = self.calls - calls_before
             return report
 
-        cycle.state = CycleState.COMPLETE
-        cycle.completed_at = utcnow()
+        for done in (cycle, *self._extra_cycles):
+            done.state = CycleState.COMPLETE
+            done.completed_at = utcnow()
+        for extra in self._extra_cycles:
+            record_event(
+                session,
+                actor=self.actor,
+                action="evaluation.cycle_complete",
+                entity_type="evaluation_cycle",
+                entity_id=extra.id,
+                entity_ref=packet.ref,
+                entity_version=packet.version,
+                after={"escalation_of": cycle.id, "plan": extra.pass_plan},
+            )
         record_event(
             session,
             actor=self.actor,
@@ -400,7 +413,13 @@ class Evaluator:
 
     # ------------------------------------------------------------------ cycle and evaPackets
 
-    def _open_cycle(self, packet: Packet, phase: EvaPhase, target: str) -> EvaluationCycle:
+    def _open_cycle(
+        self,
+        packet: Packet,
+        phase: EvaPhase,
+        target: str,
+        plan: PassPlanName = PassPlanName.COMBINED,
+    ) -> EvaluationCycle:
         project, objective = head_context(self.session, packet)
         registry = current_registry_revision(self.session)
         cycle = EvaluationCycle(
@@ -414,7 +433,7 @@ class Evaluator:
             objective_id=objective.id if objective else None,
             objective_version=objective.version if objective else None,
             registry_revision_id=registry.id if registry else None,
-            pass_plan=load_plan(PassPlanName.COMBINED).label,
+            pass_plan=load_plan(plan).label,
             models={"a": self.specs["a"].config(), "b": self.specs["b"].config()},
         )
         self.session.add(cycle)
@@ -574,9 +593,14 @@ class Evaluator:
         packet = self.session.get(Packet, work.eva.packet_id)
         assert packet is not None
         report.escalated.append(work.preset.field_name)
+        # its own cycle row (same version bindings): pass rows are unique per cycle (R1 fix 5)
+        escalation_cycle = self._open_cycle(
+            packet, EvaPhase(work.eva.phase), work.eva.target_hash, plan=PassPlanName.SPLIT
+        )
+        self._extra_cycles.append(escalation_cycle)
         return self._eva_packet(
             packet,
-            cycle,
+            escalation_cycle,
             work.preset,
             work.definition,
             work.eva.target_hash,

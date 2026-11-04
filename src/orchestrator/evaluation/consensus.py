@@ -145,6 +145,8 @@ def decide(item: ItemInput, s: ConsensusSettings | None = None) -> ItemDecision:
             threshold_ok = meets(high, s.winner_min) and margin_ok(high, low, s.dispute_margin)
 
     scope = {"a": (4, 5), "b": (3, 6), "both": (3, 4, 5, 6), None: ()}[winner]
+    if item.kind is FieldKind.TEXT:  # B3: text fields have no self-check passes
+        scope = tuple(n for n in scope if n in (3, 4))
     evidence = [item.evidence.get(n, PassEvidence()) for n in scope]
     supports = sum(e.supports for e in evidence)
     contradictions = sum(e.contradictions for e in evidence)
