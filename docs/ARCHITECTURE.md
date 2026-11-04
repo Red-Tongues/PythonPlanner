@@ -27,14 +27,19 @@ Stale-write guard: before every write the packet must still be the head with the
 ## 2. Consensus decision table (B2, B10 rulings 1–8, D5)
 
 All thresholds come from `settings` (`aggregation.*`, `consensus.*`). Scores are integers 0–10.
-Every confidence is `ROUND(CAST(x AS NUMERIC), 4)` and compared rounded on both sides (ruling 6).
+**Arithmetic is integer fixed point scaled by 10⁴ (M2.1 fix 7):**
+- weights and thresholds are quantised once, half up (`0.6 → 6000`);
+- `conf = (cw·cross + sw·self + 5) / 10` with integer division (half up); text fields use `cross · 1000`;
+- the agreement mean is `(a + b + 1) / 2`.
+
+All comparisons are between integers, identically in SQLite, PostgreSQL and the oracle (review finding MC5: REAL rounding had diverged at a boundary). The `confidence` columns are the `*_e4` integers divided by 10000, for display only.
 
 | Input (per item: a scalar field, or one tag) | Status | Reported confidence | Final value |
 |---|---|---|---|
 | an applicable pass is missing | `pending` | NULL | – |
 | both candidates NULL (tag absent from both) | `null` | 0 | – |
 | agreement, mean(conf_a, conf_b) ≥ `consensus.agreement_min` (0.60), evidence ok | `accepted` | mean | the value |
-| agreement below 0.60 or evidence not ok | `disputed` | mean (*) | – |
+| agreement below 0.60 or evidence not ok | `disputed` | max(conf_a, conf_b) | – |
 | one NULL, other's conf ≥ `consensus.one_sided_min` (0.70), evidence ok | `accepted` | that conf | that value |
 | one NULL otherwise | `disputed` | that conf | – |
 | disagreement, winner ≥ `consensus.winner_min` (0.70) and margin ≥ `aggregation.dispute_margin` (0.15), evidence ok | `accepted` | winner's | winner's value |
@@ -48,8 +53,8 @@ Every confidence is `ROUND(CAST(x AS NUMERIC), 4)` and compared rounded on both 
   (P4+P5 for A, P3+P6 for B, P3–P6 on agreement, none on a tie; text: P4 / P3). OK means
   supports ≥ `consensus.min_supports` (1) and contradictions ≤ supports.
 * Tag sets: one row per vocabulary tag (ruling 4, D5 point 2).
-* (*) Judgement call: ruling 5 says disputed rows report max(conf_a, conf_b); for a *disputed
-  agreement* we report the mean, the confidence the decision was taken on (ruling 1).
+* Ruling 5 (M2.1 fix 10): every disputed row, including a disputed agreement, reports
+  max(conf_a, conf_b); only an *accepted* agreement reports the mean.
 
 The same table is implemented twice: `orchestrator.evaluation.consensus.decide` (pure Python,
 the reference oracle) and the view `v_eva_item_consensus`. `tests/test_truth_table.py` (D2
@@ -70,6 +75,31 @@ Completion by the kernel (`evaluating_post → completed`) requires the post-pha
 to pass the same rules (and to target the newest artifact's hash when one exists);
 `waiting_for_children → completed` requires every child to be completed (roll-up).
 
+**M2.1:**
+- **Completion gate for everyone (fix 5).** The gate applies to every actor, users included.
+  Completing needs the newest artifact and a passing post-phase evaluation of exactly that
+  artifact (fix 3). Hard gates are never bypassed; soft fields pass only through a waiver bound to
+  this version and the post phase. A person who closes work without that evidence records
+  `closed_unverified` (terminal, locked, never a success).
+- **Gate revision (fix 2).** Every governance write that can change readiness bumps the packet's
+  `gate_revision` in the same transaction: waivers, overrides, revocations, dependencies, and
+  confirmations created or decided.
+- **Atomic admission and claim (fixes 1, 2, 11).** Admission and claim read the revision first,
+  then re-check context, overrides and readiness, and build the snapshot. One guarded UPDATE then
+  compares status, version, gate revision, input hash and the project/objective heads (claim: also
+  the lease). A concurrent writer therefore makes the admission or claim lose; it never runs on
+  stale gates.
+- **Context binding (fix 1).** The input fingerprint is recomputed from the current packet,
+  project and objective heads at every evaluation write, at admission and at claim. A mismatch
+  sends the packet back to `evaluating_pre`, with events.
+- **Failure budget (fix 12).** Exhausting the lifetime failure budget moves the packet to
+  `awaiting_confirmation` (audited) with a `failure_budget` confirmation. Approving grants a fresh
+  budget: `v_queue` stops counting failures before the approval. Rejecting marks the packet
+  `failed`.
+- **Pinning fails closed (fix 8).** Every non-fake evaluator must be pinned by digest and verified
+  by a provider that can report digests; otherwise evaluation is refused and evented. The
+  FakeProvider is recorded as `evaluation.fake_provider`, never as verified.
+
 ## 4. View contracts (B6)
 
 Booleans are INTEGER 0/1; confidences NUMERIC(·,4) on PostgreSQL and REAL on SQLite (compare
@@ -82,7 +112,7 @@ newline literal). Migration 0005 holds frozen copies; `tests/test_sql_views.py` 
 |---|---|---|
 | `v_eva_progress` | evaPacket | `done1..done6`, `a_present`/`b_present` (P1/P2 produced a value), `is_text`, `complete` (every applicable pass done) |
 | `v_eva_item_consensus` | evaPacket × item key | `value_a`/`value_b` (NULL = no value), `conf_a`/`conf_b` (NULL when that value is NULL), `agreement`, `status`, `confidence` (NULL only when pending), `supports`/`contradictions`/`unverified` (winning scope; 0 when pending), `winning_value` |
-| `v_field_consensus` | head packet × field × phase × item | as above for the *current* evaPacket: same packet row, same version, pre-phase target hash = `packets.input_hash`, not superseded; complete preferred, then highest escalation, then newest. `final_value` is NULL unless accepted |
+| `v_field_consensus` | head packet × field × phase × item | as above for the most relevant evaPacket of the same packet row (not superseded). It is *current* only when all of these hold (M2.1 fixes 3, 4): its target is `packets.input_hash` (pre phase) or the sha256 of the packet's newest artifact (post phase); its preset is the active revision; its `definition_version` is the field definition's current version. Selection order: current, then complete, then highest escalation, then newest. A non-current choice reports `pending` with NULL confidence and value; `final_value` is NULL unless accepted and current |
 | `v_field_status` | head packet × field × phase | `status`: pending > disputed > null (nothing accepted) > accepted; item counts; `min_confidence` |
 | `v_packet_stats` | packet row | prompt word count (space-separated, approximate), evaPackets, QE attempts, evaluation ms, lifecycle hours (to completion or now), accepted scores ≥ `stats.score_threshold`, evidence items, generation ms (0 until M3) |
 | `v_branch_stats` | trunk lineage with descendants | first creation time, descendant count, score variance (population), revision count, failed runs, contradictions, distinct models |
