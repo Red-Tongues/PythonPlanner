@@ -91,3 +91,61 @@ These take precedence over the text above where they conflict.
   - a daily new-packet cap per objective; a confirmation for packets not traceable to an approved objective;
   - low requirement-alignment on content evaluation pauses that branch;
   - `orchestrator digest` and a GUI digest page (what advanced, what waits for the user, what is blocked and why).
+
+## D6 reconciliation amendments C9–C20 (GPT-6.1, 2026-11-04) — align M3 with D1 (genPacket/evaPacket) and M4
+*These supersede earlier M3 text where they conflict.*
+- **C9** Migration (**0005**; 0004 is M1.1) keeps IDs, lineage and legacy `content_eval` rows but forbids new ones. evaPackets are keyed by version × phase × preset revision × target hash and grouped by `evaluation_cycles`.
+- **C10 Tick order:**
+  1. controls and reconciliation;
+  2. schedule evaPackets;
+  3. batched evaluation (model A, then model B);
+  4. projections and triggers;
+  5. readiness admission and claim;
+  6. advance channels;
+  7. authorised writes, scans and post-evaluation scheduling;
+  8. completion and digest.
+  
+  Pause drains in-flight work; no new dispatches.
+- **C11** Run states are separate from genPacket states (`draft → evaluating_pre → ready → queued → running → evaluating_post → completed`, plus `needs_review`, `held`, `blocked`, `failed`). Run acceptance never locks a packet on its own.
+- **C12** One pure readiness predicate governs admission and atomic claim; SQL views only explain and filter. Tier 1 is evaluated before routing fields, then optional fields; a tier-1 failure or dispute → `needs_review`, no further tiers. Typed dependencies, not hierarchy.
+- **C13** FORCE, PIN and REORDER change priority only. WAIVE covers named soft fields, with actor, reason and version; hard constraints are never waived. These lapse on revision. HOLD and BLOCK declare their scope; revocations are append-only. One normal admission is reserved per N forced/pinned admissions; ageing is capped.
+- **C14** Freeze tags, scores, consensus, waivers and override IDs in `generation_runs`. Reuse an evaluation only on a full content-address match. Hash-guard projections. Superseded evaPackets never block current work.
+- **C15** The Juggler stub is replaced by a non-blocking `juggler run --json --project <worktree> --strategy orchestrator-packet --timeout <deadline> -`: prompt on stdin, a unique worktree, conversation metadata persisted. Never `yolo`. Keep FileDrop as a fallback. Spike the model/JSON/resume contracts.
+- **C16 Exit codes:** `0` → validating; `1` → failed attempt; `3` → `awaiting_confirmation` (parking is not failure; approvals are revalidated before continuing); `4` → timeout failure; `2` → configuration failure, never retried unchanged.
+- **C17** Validation, authorised merge/write and post-evaluation acceptance are separate steps. Keep quarantine, path safety, idempotency and provenance. Evaluations bind to the artifact hash and scans to the commit SHA; changed output needs re-evaluation before locking.
+- **C18** Quality and drift evidence attaches to output evaPackets and to the originating versions. Keep confirmations and branch pauses. Define the scan skip/failure acceptance policy without bypassing hard constraints.
+- **C19** GUI and digest show packet and run states, pre/post cycles, readiness reasons, waivers and overrides, snapshots, parked approvals and conversation links.
+- **C20** The demo ends with exact-hash post-evaluation acceptance and locking. Tests cover expiry, claim races, stale results, snapshots, CLI exit codes, parking and crash recovery.
+- **Integration risks:** M2–M3 evaluation schema/migration compatibility · M2–M4 atomic readiness-to-launch binding · M2–M4 artifact/worktree/merge hash identity · M3–M4 parked approval/resume/restart idempotency · M2–M4 deadlocks between completion, quality and branch pauses.
+
+## C21 — Pace and drift governor, detailed (Gemini Argon design D7, 2026-11-04; PM-reconciled). Implements C8.
+- **Signals and default thresholds:**
+  - fan-out ≤ 3 per packet (`v_lineage_metrics`);
+  - ≤ 24 new genPackets per objective per day;
+  - post-generation requirement alignment ≥ 0.75;
+  - ≤ 3 consecutive validation failures in 2 h (`channel_runs`);
+  - pre-generation ambiguity ≤ 0.40;
+  - ≤ 150k tokens per objective per day (from `generation_runs` snapshots);
+  - ≤ 48 h since the last human touch on an active objective (events);
+  - lineage divergence (cosine distance from the root brief, via a small local embedding model) ≤ 0.35 — *optional in v1*.
+  - **PM reconciliation:** Gemini proposed a depth signal of ≤ 6. The **hard cap stays `max_branch_depth = 2` (B5)**, so depth is not a governor signal in v1.
+- **Response ladder:** log → slow down → require confirmation → pause branch → pause objective → global pause. Escalate after 2 consecutive breaching cycles; step down after 3 clean cycles (hysteresis). Every action goes in append-only `governor_events`.
+- **Pace budgets (defaults):** Quickfire Evaluation ≤ 120 runs/h; Local Generation ≤ 20/h (≤ 200/day); Workbench Production ≤ 4/h (≤ 24/day). Per objective: ≤ 24 packets/day and ≤ 150k tokens/day. FORCE/PIN change queue position only and never bypass budgets. Nights and weekends throttle to 25%; Workbench Production pauses unless pinned.
+- **Daily digest**, ranked:
+  1. actions and holds needing the owner;
+  2. advanced work and commits;
+  3. blocked or paused items, with reasons;
+  4. resource and token summary.
+  
+  One-click actions: waive, kill branch, top up an objective's budget, hold — each evented.
+- **Data model:** `governor_states` (scope_type, scope_id, status, tokens_today, packets_today, last_human_touch_at); `governor_events` (append-only: trigger_signal, current_value, threshold, action, scope); `channel_budget_trackers` (channel, runs_this_hour, runs_today, limits).
+- **Must-have tests:**
+  - a split loop hits the packet cap and pauses the objective;
+  - a slow-burn objective trips the 48 h touch limit;
+  - an override storm still respects budgets;
+  - a flapping metric is held by hysteresis;
+  - budget exhaustion halts new dispatches;
+  - runaway fan-out slows pacing;
+  - a waiver lapses on revision;
+  - a Workbench timeout never blocks other channels.
+- **Not in v1:** automated refactoring of drifting branches; predictive cost-to-completion models; dynamic budget markets between objectives.
