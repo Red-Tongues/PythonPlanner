@@ -23,6 +23,7 @@ from orchestrator.db.refs import next_objective_ref, next_packet_ref, next_proje
 from orchestrator.events import record_event
 from orchestrator.ingest.parser import name_from_path, parse_text
 from orchestrator.ingest.readers import read_document
+from orchestrator.llm.base import LLMProvider
 
 log = logging.getLogger(__name__)
 
@@ -199,17 +200,38 @@ def persist_tree(
 
 
 def ingest_file(
-    session: Session, path: str | Path, *, actor: Actor, project_name: str | None = None
+    session: Session,
+    path: str | Path,
+    *,
+    actor: Actor,
+    project_name: str | None = None,
+    provider: LLMProvider | None = None,
 ) -> IngestResult:
-    """Read, parse, validate and persist a planning document."""
+    """Read, parse, validate and persist a planning document.
+
+    With ``provider`` the tree is extracted by an LLM (M2 §6) instead of the deterministic
+    parser; both produce the same ``ProjectTree`` contract and the same confirmation flow.
+    """
     path = Path(path)
     data = path.read_bytes() if path.is_file() else b""
     text = read_document(path)
-    tree = parse_text(text, fallback_name=name_from_path(path), project_name=project_name)
+    if provider is not None:
+        from orchestrator.ingest.llm_extract import LLM_SOURCE, extract_tree_with_llm
+
+        tree = extract_tree_with_llm(text, provider, name=project_name or name_from_path(path))
+        if project_name:
+            tree = tree.model_copy(
+                update={"project": tree.project.model_copy(update={"name": project_name})}
+            )
+        source = LLM_SOURCE
+    else:
+        tree = parse_text(text, fallback_name=name_from_path(path), project_name=project_name)
+        source = DETERMINISTIC_SOURCE
     return persist_tree(
         session,
         tree,
         actor=actor,
+        source=source,
         source_path=str(path),
         source_sha256=hashlib.sha256(data).hexdigest(),
     )
