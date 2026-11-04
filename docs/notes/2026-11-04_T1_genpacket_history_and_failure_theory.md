@@ -83,6 +83,37 @@ Recorded thinking is supporting evidence, not proof. An evaluator malfunction is
 1. **Decay:** time-based fading, if it appears in the queue maths at all, must be **very discreet**. The time effect that matters is **production time used vs failure scoring**: how much generation time a failed attempt consumed. *(This corrects GPT-6.1's starting point, which gave duration no failure weight.)*
 2. **Stages + based-on rule:** yes, for eva_packet fields.
 3. **Stale values: right principle, needs a better definition.** LLMs inevitably contribute through their evaluations, but **statuses themselves must be mathematically derived**.
-4. **Federation doesn't pause the loop:** agreed.
+4. **Federation and pausing:** *corrected by the CFO directly to Argon.* The PM had overstated her answer. Her intuition: newly federated children aren't eligible for processing yet (they start un-evaluated), so a pause is **usually unnecessary**, **but it depends on the impact or extent of the federation**. Argon's proposal (below) gates the pause on impact.
 
 **Next:** develop the failure *mechanics* and how they integrate with the queue maths, watching for new ideas along the way. "Failures are really useful for project development."
+
+## Round 2 (21:30–21:40)
+
+### Federation pause gated by impact (Argon, after the CFO's correction)
+- Children enter un-evaluated, so there is a natural buffer before any production work.
+- **Below threshold** (a routine breakdown into a few expected subtasks) → no pause.
+- **Medium impact** (child count or scope beyond the branch threshold) → **branch hold**; unrelated objectives keep running.
+- **High impact** (genesis-scale federation, or restructuring across objectives) → **full loop pause**, like a prompt-window re-baseline.
+- The thresholds are mathematical: child count, scope caps, cross-objective dependencies, post-evaluation alignment and ambiguity of the child list.
+
+### Failure mechanics (GPT-6.1, after the CFO's answers)
+**Production time, normalised.**
+- Compare time consumed with an **expected time fixed before the attempt** (from task-size tags, generation route and comparable work).
+- A failure that used 2× its expected time weighs more than one that used ¼, and big jobs get a bigger allowance.
+- Every task-attributable failure keeps a **base contribution**, so repeated quick failures still count. The time component is **bounded**, so one extreme attempt can't dominate.
+- Any exponential amplification applies to *accumulated normalised evidence*.
+- Calendar-time fading is negligible or absent.
+
+**Two separate measures.** *Production cost* (time and tokens consumed, recorded for every attempt, including external and unknown failures) is kept apart from *evidence the job needs intervention* (task-attributable failures only).
+
+**Failures as signal**, not just penalty. Each one feeds a different queue-maths input:
+- **missing context** → raise the value of gathering context or finishing prerequisites;
+- **excessive scope** → raise the value of decomposition by a federating parent;
+- **promising but incomplete output** → raise the value of drafts or refinement (e.g. local-model `locally_drafted_examples`);
+- **repeated capability mismatch** → favour a different model or tool route;
+- **shared cause across linked packets** → raise objective-level clarification or dependency resolution;
+- **external blockage** → make that route less attractive, without blaming the task.
+
+Evaluators supply the evidence and classifications; defined equations derive priorities and statuses.
+
+**Open question from GPT-6.1:** when an attempt fails overall but produces useful partial work, may that material be kept separately (as a draft or evidence) while `generation_output` stays NULL? *PM's provisional view: yes, as a revision of a separate field (e.g. a partial-output or evidence revision), never as `generation_output`.*
