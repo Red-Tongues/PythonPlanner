@@ -21,9 +21,9 @@
 | Plan | v0.7 (this document) |
 | M0 — plan and repo | Done |
 | M1 + M1.1 — kernel foundation | **Merged** (PR #1, 3068e35) after reviews R0 and R1 |
-| M2 — evaluation engine | **PR #2**: M2 plus the 12 M2.1 fixes from review R2 (migration 0006). 410 tests; CI green on all three jobs @ 2fcfda1; mergeable. **Waiting for the CFO's squash-merge** |
+| M2 — evaluation engine | **Merged** (PR #2, 1031665): M2 + the 12 M2.1 fixes from R2; 410 tests |
 | R2 — panel review of M2 code | Done: 25 findings → 21 accepted, 1 deferred (GE7 → M3), 2 declined. Engineer's 7 open notes ruled (all accepted) |
-| M3 — orchestration and interface | Spec reviewed *before* coding (R3: 46 findings, 43 adopted, 3 partial) and independently verified (V1–V11). Six scope cuts. State-machine reference D8. **Ready for a fresh Claude Code session after PR #2 merges** |
+| M3 — orchestration and interface | Spec reviewed *before* coding (R3: 46 findings, 43 adopted, 3 partial) and independently verified (V1–V11). Six scope cuts. State-machine reference D8. **Stage A in progress** (C22–C26), then a checkpoint review before Stage B |
 | M4 — Juggler bridge | Spec ready; now also owns the real `juggler run` CLI and worktrees (moved from M3) |
 ---|---|
 | Plan | v0.5 (this document) — CFO decisions D13–D16 recorded; D3 and §20 questions still open |
@@ -465,6 +465,7 @@ No prices are quoted here; obtain current quotes before purchase.
 | 2026-11-04 | Review R1 on M1 code: 24 findings; 18 accepted, 2 partial, 2 deferred to M2, 2 declined as verified false positives. CI green (SQLite on Python 3.11 and 3.12; PostgreSQL 16). M1.1 fix list (12 fixes) sent to the engineer on PR #1. Juggler source checked out: `juggler run` headless CLI and MCP client support make M4 simpler (spec updated). |
 | 2026-11-04 | PR #2 (M2) opened; CI green (350 tests). Review R2 on the M2 code: 25 findings. 21 accepted, 1 deferred (GE7 → M3), 2 declined (GE8 documented and tested; GE10 superseded by MC8 fail-closed). The M2.1 fix list (12 fixes, migration 0006) was sent to the engineer on PR #2. |
 | 2026-11-04 | Review R3: pre-implementation review of the M3 spec. 46 findings: 40 accepted, 3 accepted with amendments, 3 partial, 1 deferred, none declined. Six scope cuts agreed: real Juggler → M4; embedding divergence later; governor ladder → M5 (v1 is deterministic caps + holds); GUI read-only for settings; generated-code execution only through an isolated runner (default: blocked); live SonarQube optional. Written into M3 as amendments C22–C38. |
+| 2026-11-04 12:20 | PR #2 (M2 + M2.1) squash-merged by the CFO (1031665). M3 Stage A started in a fresh Claude Code session ("M3 orchestration foundations", branch `claude/elegant-davinci-hcny5t`). Stage A covers C22–C26: transition tables from D8, migration 0007, the transition guard, governance atomicity, fencing and the kernel lock. It ends with a stop-and-report checkpoint before channels, loop, GUI and integrations (Stage B). |
 | 2026-11-03 | CFO check-in: v1 bar confirmed (working prototype of the kernel); slow, deliberate pace preferred → pace and drift governor (§11.1); Juggler extension committed as M4; personal-use licensing. Plan → v0.4. |
 
 ---
