@@ -4,6 +4,54 @@ Newest entries first. Every agent session appends an entry: what changed, decisi
 
 ---
 
+## 2026-11-04 — M1.1: review R1 fix list complete (Claude Code)
+
+All 12 fixes from `docs/reviews/R1_consensus.md` are on the PR #1 branch. Following the consensus, **MC2 and MC8 were not acted on** (verified false positives), and **GH6 (UTC-aware datetimes) and GE6 (re-seeding all defaults on init-db) remain deferred to M2**. origin/main was merged in twice this session (c8dc3d3 R1 records; 9fc63bd plan v0.5 and the D1 brief). `docs/PROJECT_PLAN.md` was not touched.
+
+### The 12 fixes
+| # | Fix | Where | Tests |
+|---|---|---|---|
+| 1 | Superseded history is immutable in the DB; the ORM guard checks head status | 0004 triggers on projects, objectives and packets, both dialects; `guards.assert_mutable(…, session)` | `test_fix1_*` (raw SQL ×3 tables, ORM) |
+| 2 | Lineage invariants: v1 start; a successor keeps the ref, has version+1 and the same ancestry; ref/version/`supersedes_id`/ancestry never change; one successor per row; no deleting successors or rows with dependents | 0004 triggers; `guards.assert_deletable`; `repository.delete_packet` + `dependents_of` | `test_fix2_*` |
+| 3 | SQLite `recursive_triggers = ON` | `db/session.py` | `test_fix3_*`: INSERT OR REPLACE on a locked packet, an event and an evaluation pass. A mutation check confirmed the test fails without the pragma. |
+| 4 | Frozen migrations, with per-revision assertions and exact seeds | 0002/0003 frozen (checkpoint); 0004 written frozen | `test_migrations_frozen.py`; manifest now covers 0001–0004 |
+| 5 | Downgrade and constraint hygiene | 0002 downgrade drops its objects; 0004 makes `eval_cycle_id` NOT NULL with unique `(packet_id, eval_cycle_id, field_name, pass_no, attempt)`; every downgrade is clean | `test_fix5_*`: head → 0003 → 0002 → head → base → head, with the fingerprint checked against the manifest at each step |
+| 6 | Atomic ref allocation | `ref_counters` + `db/refs.allocate` (`INSERT … ON CONFLICT DO NOTHING`, then `UPDATE … RETURNING`); 0004 initialises counters from existing refs | `test_fix6_*`: two concurrent writers; refs never reused |
+| 7 | Evented writes only | `GuardedSession` `before_flush`: every insert, update or delete of a domain row needs an `Event` in the same flush (one naming its primary key, or a batch event for the type); settings and field definitions must bump `version`; ORM bulk update/delete of domain models is rejected | `test_fix7_*` |
+| 8 | `supersede_packet` keyword collision | `response_contract` now comes only from the merged field dict | `test_fix8_*` |
+| 9 | Ingestion degrades gracefully | "Untitled task" fallback; descriptions over 20,000 characters split into "Title (part i/n)" packets with a note; leftover `ValidationError` → `IngestionError` | `test_fix9_*` |
+| 10 | Missing tests | Artifact INSERT with `accepted` and no `accepted_at`, plus the tests listed for fixes 1, 5 and 8 | `test_fix10_*` |
+| 11 | Typed actor (partial, per the panel) | `orchestrator/actors.py`: frozen `Actor(kind: user/system/llm, id)`. Repository, lifecycle, ingestion, field sync and `record_event` require it; only `user` actors complete or archive by hand. | `test_fix11_*` |
+| 12 | Registry revision (partial, per the panel) | Append-only `field_registry_revisions` (revision, sha256, full JSON snapshot). `init-db` keeps the YAML sync and records a new revision plus a `fields.registry_revision` event whenever the content hash changes. | `test_fix12_*` |
+
+Suite: SQLite 106 passed / 63 skipped (the PostgreSQL params). With PostgreSQL 16: 167 passed / 2 skipped (one SQLite-only test, one PostgreSQL-only test). Python 3.11 and 3.12. Ruff is clean. The CLI chain works at schema revision 0004 with registry revision 1.
+
+### Judgement calls
+1. **0002 and 0003 were frozen in place** (checkpoint) rather than superseded, because the PR is unmerged and the frozen SQL is identical to what the generator produced, so databases already at 0003 stay valid. Everything new went into **0004**. From now on, applied revisions are never edited.
+2. **`ddl.py` is the authoring reference**, not the applied DDL. Revisions carry frozen literal SQL and never import it (`test_migrations_frozen.py` enforces this). This is how I reconcile golden rule 7 with fix 4.
+3. **Fix 7 rejects rather than auto-emits.** The flush layer cannot know the actor or the reason, so an auto-generated event would be a poor audit record. Instead the governed APIs record their event *before* flushing, and any ad-hoc ORM write fails with `UnauditedWriteError`. Batch events (`entity_id` NULL) cover multi-row operations such as the field sync.
+   - `Event` and `EvaluationPass` are exempt: they are append-only records themselves.
+   - Raw `text()` SQL is outside the ORM guard, but immutability is still enforced by the triggers.
+4. **"Ancestry"** for fix 2 means `parent_id`, `root_id`, `project_id` and `objective_id` for packets, and `project_id` for objectives. A packet cannot silently move to another objective.
+5. **"Dependents"** that block a delete are: child packets (through `parent_id`/`root_id`, ignoring the trunk's self-reference), evaluation passes, artifacts, channel runs and quality reports for packets; packets for objectives; objectives or packets for projects. The error says "archive instead".
+6. **`events.entity_id` widened to 128 characters**, so fix 7 can match setting keys.
+7. **Fix 9 splits instead of raising**, so unattended ingestion keeps going and no text is lost.
+8. **Fix 12 keeps a full JSON snapshot** of the registry with each revision, not just the hash, so an M2 evaluation cycle can cite exactly what it used. The hash is deliberately *not* unique: reverting A → B → A records a third revision, and history stays linear.
+9. **`set_autonomy_mode`** (new, evented) accepts only user actors and refuses fixed scopes.
+10. The old `test_default_seeds` was removed; the exact-seed test in `test_migrations_frozen.py` supersedes it.
+11. Following the D1 note, `packet_kind` / `content_eval` was **not** extended. It will be reshaped into genPackets and evaPackets in M2.
+
+### Known issues
+- On SQLite, a transaction that *reads* before allocating a ref can get "database is locked" (WAL snapshot conflict) instead of waiting. It fails loudly with no corruption. Every current write path allocates first.
+- The ORM guard runs one successor query per modified lineage row per flush. That is fine at M1 volumes; batch it if M2 bulk updates make it measurable.
+- Seeds written by 0003 are not re-applied by `init-db` if someone deletes them (GE6, deferred to M2).
+
+### Next steps
+- PM verification of PR #1 and merge.
+- M2: genPacket/evaPacket model (D1), evaluation cycles referencing `field_registry_revisions.id`, GH6 and GE6.
+
+---
+
 ## 2026-11-04 — M1.1 checkpoint (paused for the usage limit) (Claude Code)
 
 Working from the fix list in `docs/reviews/R1_consensus.md`, on the PR #1 branch (`claude/optimistic-allen-ts03d8`). origin/main was merged in at c8dc3d3, which added `docs/reviews/R1_*`. MC2 and MC8 are verified false positives and will **not** be acted on; GH6 and GE6 are deferred to M2.
