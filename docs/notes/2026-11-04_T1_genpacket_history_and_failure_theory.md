@@ -117,3 +117,55 @@ Recorded thinking is supporting evidence, not proof. An evaluator malfunction is
 Evaluators supply the evidence and classifications; defined equations derive priorities and statuses.
 
 **Open question from GPT-6.1:** when an attempt fails overall but produces useful partial work, may that material be kept separately (as a draft or evidence) while `generation_output` stays NULL? *PM's provisional view: yes, as a revision of a separate field (e.g. a partial-output or evidence revision), never as `generation_output`.*
+
+## Round 3 (21:40–21:50)
+
+### Staleness, defined (Argon)
+**What makes a value stale**
+| Change | Effect |
+|---|---|
+| The packet's direct upstream stage hash changes (new prompt revision, new output revision), or the **field definition / preset version** changes | **Hard invalidation**: staleness = maximum, status = stale |
+| The project or objective brief advances; dependency or sibling packets complete; the production repo moves on by N commits | **Soft drift**: a gradual score |
+| Swapping or upgrading the local evaluator models | **Never stale by itself.** Model digests are kept for provenance and cache reuse, not to wipe valid evaluations |
+
+**Score and status.** Staleness is a **score** (to be expressed in fixed point, 0–10,000) with a hard threshold that flips the **status**. The soft-drift score combines three things:
+- **Context change:** project/objective version bumps since the value was evaluated.
+- **Repo change:** commits or completed dependencies since then, × the packet's *context sensitivity* (= 1 − context_independence/10). An isolated utility barely notices the repo moving; an integration task goes stale fast.
+- **Confidence margin:** a borderline consensus (just above the acceptance threshold) decays faster than a solid one.
+
+**How the queue uses it**
+- Rising staleness (e.g. 2,000–7,000) → the queue raises the priority of refreshing those fields in the background, using spare budget.
+- At or above the ceiling (e.g. 7,500) → SQL flips the status to stale and blocks readiness until the field is refreshed.
+
+**Where the LLM stops.** The LLM only *grades sensitivity* during normal 6-pass evaluation (context_independence, repo_consistency, dependency_validity, requirement_alignment, plus consensus confidence). **SQL counts how much the surroundings have moved and computes the staleness number and status.** The LLM never decides "stale".
+
+### Failure indicator, worked (GPT-6.1; constants illustrative)
+All values are integers, with 10,000 = 1.0. For each **task-attributable** failure:
+1. `time_ratio = min(20,000, consumed_s × 10,000 // expected_s)`. The expected time is fixed before the attempt; a missing estimate needs an explicit fallback.
+2. `contribution = 1,000 + 2,000 × time_ratio // 10,000`. At least 1,000, at most 5,000.
+3. `amplification = indicator × contribution // 10,000`.
+4. `indicator = min(10,000, indicator + contribution + amplification)`. This is multiplicative, exponential-style growth, with no calendar decay.
+
+*Worked example* (expected time 60 s; PM verified the arithmetic):
+- fail after 15 s → ratio 2,500 → contribution 1,500 → indicator **1,500**;
+- fail after 120 s → ratio 20,000 → contribution 5,000; amplification 750 → indicator **7,250**.
+
+Unknown or external failures don't move the indicator, but they still count in `failed_generations`. The evidence is kept after saturation so that later attribution can be recomputed.
+
+**Signals → queue inputs** (each signal 0–10,000; `boost = weight × signal // 10,000`):
+| Signal | Moves | Direction |
+|---|---|---|
+| job-review indicator | review-work priority | up |
+| missing context | context/prerequisite-work priority; the original task's readiness | up; down |
+| excessive scope | federating-parent decomposition priority | up |
+| useful but incomplete work | draft/refinement value, incl. local-model routes | up |
+| capability mismatch | this route's suitability; alternative routes | down; up |
+| shared task-related cause | objective clarification/dependency resolution | up |
+| external blockage | route availability | down (no job-review evidence) |
+
+**Key idea:** a failure need not push the task down. It can **raise the priority of the work that would unblock it**.
+
+### Open questions for the CFO (round 3)
+1. **Model upgrades:** should swapping or upgrading the local evaluator models leave existing evaluations valid (Argon's proposal), or force re-evaluation?
+2. **Fresh start after a fix** (GPT-6.1): after an approved clarification or split, does the job keep its review indicator, or start a **new evidence window**, keeping the old history but not carrying the score forward?
+3. **Partial work:** keep useful partial output as a separate field revision while `generation_output` stays NULL (PM's provisional view)?
