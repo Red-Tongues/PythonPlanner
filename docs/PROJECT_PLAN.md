@@ -453,6 +453,14 @@ No prices are quoted here; obtain current quotes before purchase.
 
 ---
 
+### 20.1 New decisions for the CFO (from product brainstorm P1, 2026-11-04 — see `docs/reviews/P1_product_brainstorm.md`)
+- **Q-P1 v1.0.0.0 bar.** Option A (Argon): M3 = v0.9 and v1.0.0.0 = M4 + a light isolated runner. Option B (GPT-6.1): keep D13 (v1.0.0.0 = M3 kernel prototype) and add an *operational acceptance gate* after M4 before relying on it unattended. *PM recommends B:* same substance, no decision reopened.
+- **Q-P2 Acceptance scenario.** Is `csv-profiler` (a stdlib CSV profiling CLI with PII flags) a project you'd actually want built? If not, name one of similar size.
+- **Q-P3 Bundled approval.** May a single approval cover "dispatch + auto-commit if post-evaluation ≥ 8,000"? *PM recommends deferring:* it changes authority and needs its own tested contract.
+- **Q-P4 Remote access.** OK to document Tailscale (`tailscale serve`) as the way to reach the GUI from your phone? It needs no code changes.
+- **Q-P5 Roadmap.** Endorse the M5–M7 sketch (with GPT-6.1's reordering) and the "never build" list as current boundaries?
+- **Q-P6 Stub rejection.** Should modules that are only stubs (`pass`, TODO, NotImplementedError) be *rejected* by default, or just *flagged*? PM proposes flagging until you decide.
+
 ## 21. Progress log
 
 | Date | Event |
