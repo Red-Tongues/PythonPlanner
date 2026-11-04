@@ -98,3 +98,36 @@
 | Stub-rejection static check | **PM→M3 Stage B** as a contract option (default on for `python_module`). |
 | Exemplars at the extremes (2 and 9) | **PM→M5** with `calibrate` (needs real models). |
 | M5–M7 roadmap and the never-build list | **CFO** to endorse. The never-build list is low-risk to adopt now. |
+
+## Second opinion (Microsoft Copilot GPT-6.1 Sol, independent) and revised triage
+**GPT-6.1 on the five decisions:**
+- **Q-P1: reject the relabelling, adopt an operational acceptance gate.** D13 deliberately approved a *kernel* prototype. M3 already proves crash recovery, governance and immutable history; M4 already commits to real Juggler integration. Keep v1.0.0.0 = M3, then require a separate real-world acceptance gate after M4 before relying on the kernel unattended. *10-second version: "Finish M3 as approved; prove real unattended delivery after M4 before relying on it."*
+- **Q-P2: adopt with changes.** Judge working output, not a prescribed packet count, because counts reward artificial decomposition. Keep PII flags explicitly heuristic, with synthetic test data. Keep functional acceptance separate from the injected crash, parking and ambiguity tests.
+- **Q-P3: defer.** Approving a dispatch can't approve an unseen diff. "Post-eval ≥ 8,000" is not a defined predicate. This changes authority (K2/K5), not just click count, so it needs a precise, tested contract for bounded conditional permissions first.
+- **Q-P4: adopt with changes.** Owner-only access depends on the network access policy. Document an access policy, revocation for a lost phone, and a test that unauthorised access fails. The kernel stays on localhost.
+- **Q-P5: adopt with changes.**
+  - Order: pull a small real-model calibration spike forward; put isolation, secrets checks and multi-hour soaks before operational acceptance; put minimal repository mapping before brownfield generation; mobile polish after that; residency and embeddings last.
+  - Skipping self-check passes changes the six-pass method, so it needs the CFO's approval.
+  - Treat the never-build list as current boundaries, not permanent prohibitions.
+
+**On the metrics:** not all are cheap SQL views yet.
+- Confirmation wait times need request/resolution timestamps.
+- "Hollow output" needs deterministic analysis results, not hashes.
+- Quote starvation needs structured rejection reasons.
+- Stale waste needs elapsed time/tokens per run.
+- "Last visit" needs an owner-interaction event.
+
+**Missing failure mode that matters more: "busy but useless".** Lots of evaluation, retries and branching with no independently verified useful output. Track **accepted deliverables that pass external checks, per owner-minute and per elapsed day**.
+
+**Items the PM wrongly triaged as Stage B:** default-on stub rejection (changes accepted-output behaviour); the packet-scope default (equivalence with C25 coverage not shown); new one-tap authorities (budget top-up, waive, kill); metrics that need new instrumentation.
+
+### Revised PM triage (supersedes the table above where different)
+- **Q-P1:** PM now recommends **GPT-6.1's synthesis**: keep D13 (v1.0.0.0 = M3 kernel prototype), and add an **operational acceptance gate** after M4 (the csv-profiler scenario plus a light isolated runner) before unattended reliance. Same substance as Argon's proposal, but no decision is reopened. CFO to choose.
+- **Q-P3:** PM now recommends **defer** (an authority change that needs its own contract).
+- **Stage B now gets only:**
+  - the mobile-first `/digest` layout and "new since last visit";
+  - one-tap for **already-specified** actions only: approve/reject confirmation, HOLD/BLOCK and revoke (C35), pause/resume/drain, close-unverified with a reason (C23);
+  - budget top-up and soft-field waiver as one-tap, *because C35/C36 already define them as owner actions*, using the same guards as the CLI;
+  - metrics only where computable from the Stage A schema, plus an `owner_visit` event that is explicitly **not** a "human touch" under C33;
+  - the "busy but useless" metric (accepted deliverables per day and per owner decision).
+- **Moved to the CFO:** default-on stub rejection (proposed default: *warn*, not reject, until approved); a packet-scope default for governance actions (proposed: the CLI/GUI asks for scope explicitly, no default).
