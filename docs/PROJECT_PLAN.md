@@ -5,7 +5,7 @@
 | **Document** | Project Plan — replaces the draft `Python Planner.docx` (archived at `docs/archive/`) |
 | **Plan version** | 0.7 — R2 (M2 code) and R3 (M3 spec) consensus; M2.1 complete; M3 scope cuts |
 | **Product target** | v1.0.0.0 prototype of the Python Orchestrator (package version `1.0.0.0.devN` until acceptance) |
-| **Sponsor / CFO** | Sam (redtongues) |
+| **Sponsor / CFO** | the CFO (redtongues) |
 | **Project manager** | Claude (PM agent) |
 | **Main engineer** | Claude Code (cloud session, GitHub-connected) |
 | **Review panel** | Microsoft Copilot · Gemini (Argon) · GitHub Copilot — consensus-scored (see §17) |
@@ -385,7 +385,7 @@ Deliberate pace is a feature, not a performance gap. The kernel enforces:
 
 | Role | Who | Responsibilities |
 |---|---|---|
-| CFO / sponsor | Sam | Approves decisions marked *Needs CFO*, budget and scope changes |
+| CFO / sponsor | the CFO | Approves decisions marked *Needs CFO*, budget and scope changes |
 | Project manager | Claude (PM agent) | Owns this plan and the milestone specs; prompts the engineer; triages reviews; merges; verifies |
 | Main engineer | Claude Code | Implements milestone specs on `claude/*` branches; opens PRs; keeps `docs/PROGRESS.md` current |
 | Review panel | Microsoft Copilot (GPT-6.1, CFO's freelance sandbox) · Gemini (Argon) · GitHub Copilot (Free; reads the repo directly) | Independent reviews of each milestone, then scoring of each other's findings |
@@ -504,5 +504,6 @@ No prices are quoted here; obtain current quotes before purchase.
   - GitHub Copilot reads the repo and PRs directly. Copilot Free has a monthly chat cap, so use about two prompts per review round.
 - **CI:** GitHub won't run `pull_request` CI while a PR has merge conflicts. The PM edits only PM-owned files on `main`; the engineer owns `docs/PROGRESS.md`.
 - **The PM container could not reach PyPI.** Independent verification relies on GitHub Actions (three jobs), plus PM spot-checks of panel claims in the source.
+- **Owner naming:** with the team, refer to the owner only as **"the CFO"**.
 - **Calibrate reviewers.** In R3 Gemini supported every finding it scored, so the contradictions (mostly from GPT-6.1) carried the signal. Check each contradiction in the spec or code.
 - **Review consensus works.** In R1 the cross-check removed two plausible but false findings (MC2, MC8) before they reached the engineer. Always verify concrete claims in the code before relaying them.

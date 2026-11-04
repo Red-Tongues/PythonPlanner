@@ -1,7 +1,7 @@
 # P1 — Product brainstorm (Gemini Argon, 2026-11-04) with PM triage
 
-**Prompt:** step back from the specs and design for Sam's real usage: a few minutes between meetings. Four questions: the owner's day, the v1.0.0.0 acceptance scenario, product-level failure modes, and the roadmap after M4.
-**Status:** proposals. Items marked **CFO** need Sam's decision; items marked **PM→M3** fit the approved scope and go into M3 Stage B.
+**Prompt:** step back from the specs and design for the CFO's real usage: a few minutes between meetings. Four questions: the owner's day, the v1.0.0.0 acceptance scenario, product-level failure modes, and the roadmap after M4.
+**Status:** proposals. Items marked **CFO** need the CFO's decision; items marked **PM→M3** fit the approved scope and go into M3 Stage B.
 
 ## 1. The owner's day
 - **Rhythm.**
@@ -28,7 +28,7 @@
 ## 2. The v1.0.0.0 acceptance scenario
 - **Challenge to the plan:** with M3 alone the kernel has only FileDrop and `NoRunner` (every execution check blocked). Argon argues this is "a state-machine demo, not a working prototype".
   - Proposal: **M3 = v0.9 (kernel complete); v1.0.0.0 = M4 (Juggler bridge) + a lightweight isolated test runner.**
-- **Scenario: `csv-profiler`.** A pure-stdlib Python CLI that profiles messy CSVs: types, nulls, min/max/mean, and flags likely PII (emails, UK phone numbers, NHS numbers). It suits Sam's data-analyst training and IT work.
+- **Scenario: `csv-profiler`.** A pure-stdlib Python CLI that profiles messy CSVs: types, nulls, min/max/mean, and flags likely PII (emails, UK phone numbers, NHS numbers). It suits the CFO's data-analyst training and IT work.
   - The messy brief deliberately includes an ambiguous "maybe a GUI dashboard later?".
 - **Over 3 days (accelerated in acceptance):**
   - ingest → 3 objectives;
@@ -59,7 +59,7 @@
 ## 4. Roadmap after M4
 - **M5, trust and reality:**
   - a real isolated runner (bubblewrap/rootless Podman, no network, read-only repo, timeout);
-  - `orchestrator calibrate`, which benchmarks candidate local models against gold exemplars before Sam picks models A and B;
+  - `orchestrator calibrate`, which benchmarks candidate local models against gold exemplars before the CFO picks models A and B;
   - a lightweight secrets scanner before any repo write;
   - governor hysteresis only if the deterministic holds prove too twitchy.
 - **M6, "5-minute owner" UX:**

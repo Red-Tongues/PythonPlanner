@@ -15,7 +15,7 @@
 - **"Completed" = a locked bundle:** prompt revision + pre-evaluation cycle + output revision + post-evaluation cycle, sealed together.
 - The packet can later **re-open** (for example after a course change). The sealed bundle stays in its history as a frozen milestone. *(This replaces cloning whole packets via `supersedes_id`.)*
 
-**Storage that stays readable for Sam**
+**Storage that stays readable for the CFO**
 - **`packets`** shows the **current** values right on the row (current prompt, tags/scores, drafts, output), so most inspection needs no joins.
 - **`eva_packets` / `evaluation_passes`** already hold the history of every tag and score.
 - **One `packet_field_revisions` ledger** holds the heavier text fields (prompt, drafts, output, recorded thinking): packet, field, revision number, content, *based-on hash*, run, time.
@@ -78,3 +78,11 @@ Recorded thinking is supporting evidence, not proof. An evaluator malfunction is
 2. Do the **four stages and the based-on-hash rule** match your mental model of how fields unlock?
 3. Is "**completed = sealed bundle; the packet may re-open later**" acceptable as the meaning of your immutability rule?
 4. Federation **doesn't pause** the loop; only your prompt window does. Agree?
+
+## CFO answers (21:26)
+1. **Decay:** time-based fading, if it appears in the queue maths at all, must be **very discreet**. The time effect that matters is **production time used vs failure scoring**: how much generation time a failed attempt consumed. *(This corrects GPT-6.1's starting point, which gave duration no failure weight.)*
+2. **Stages + based-on rule:** yes, for eva_packet fields.
+3. **Stale values: right principle, needs a better definition.** LLMs inevitably contribute through their evaluations, but **statuses themselves must be mathematically derived**.
+4. **Federation doesn't pause the loop:** agreed.
+
+**Next:** develop the failure *mechanics* and how they integrate with the queue maths, watching for new ideas along the way. "Failures are really useful for project development."
