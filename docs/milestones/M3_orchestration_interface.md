@@ -157,7 +157,7 @@ These take precedence over the text above where they conflict.
 
 - **C22 Migrations** [GA1, MA1, GC1]. M3 builds on the merged M2.1 schema (frozen migrations 0001–0006, never edited). All M3 schema goes in new frozen migration **0007** (more only if unavoidable), with dialect DDL in the dialect module. Do not recreate `eva_packets`, `evaluation_cycles` or the `content_eval` ban. Test: upgrade a *populated* 0006 database to head on SQLite and PostgreSQL; IDs, hashes, lineage and immutable rows are unchanged, and new `content_eval` rows are still rejected.
 - **C23 Packet states** [GA2, MA3, GC3]. The genPacket state set is C11's plus `waiting_for_children`, `awaiting_confirmation` and `closed_unverified`.
-  - `closed_unverified` is terminal and non-success. It is excluded from the queue, never counts as `completed`, and never satisfies a dependency.
+  - `closed_unverified` is terminal, **locked** and non-success, and only a user can set it (as implemented in M2.1). It is excluded from the queue, never counts as `completed`, and never satisfies a dependency.
   - The CLI and the GUI's "Close unverified" action require a reason.
   - Publish separate **packet** and **run** transition tables in `docs/ARCHITECTURE.md`; tests assert that every transition not in the tables is rejected.
   - GUI and digest give `closed_unverified`, `awaiting_confirmation` and `blocked:<reason>` distinct badges.
@@ -168,6 +168,7 @@ These take precedence over the text above where they conflict.
 - **C25 Governance atomicity** [GA4, MA2, GC2].
   - **Writers.** Every governance write increments the `gate_revision` of every non-terminal packet in its scope, in the same transaction. Governance writes are: dependency additions and revocations, override and waiver additions and revocations, holds, branch kill, confirmation decisions, autonomy-scope or threshold changes, budget top-ups and interrupt supersession, whether made from the GUI, the CLI or the digest. Scope means the packet itself or all packets under the branch, objective or project.
   - **Admission and claim.** Both recompute the context fingerprint from the current packet, project and objective heads (M2.1 #1). The claim's guarded UPDATE checks status, version, input hash, `gate_revision` and lease. The snapshot is written in the same transaction.
+  - **Kernel error handling (M2.1 rulings 4–5).** On a context-mismatch error at claim, the kernel *commits* (so the packet's return to `evaluating_pre` persists); it never rolls back. On SQLite a database-lock error during admission or claim is treated as a lost claim and retried on the next tick.
   - **Run completion.** It re-checks fingerprint and gate revision. On mismatch only the completing run becomes `stale`, with an event. The packet returns to `evaluating_pre` only if that run still owns the current packet version, the packet is non-terminal, and no hold, block, pause or `awaiting_confirmation` applies; otherwise the packet's current state and restrictions are kept. A stale run never changes a terminal packet or a superseding version.
 - **C26 Fencing and exclusivity** [MA8, GA16 partial].
   - **Fencing.** Every claim carries a monotonically increasing fencing token. Result acceptance and repository publication reject obsolete tokens.
@@ -251,6 +252,7 @@ These take precedence over the text above where they conflict.
     - Unmatched items are new drafts; unmentioned items are untouched.
     - A locked match is changed only through an explicit supersede confirmation.
     - Late runs for superseded versions are recorded as stale.
+  - **Exemplar edits** bump that field's definition version, so consensus becomes pending (M2.1 ruling 2).
   - **GUI scope.** The GUI is read-only for thresholds, weights, scopes and settings; those are edited through the CLI (validated per C28, evented, versioned). The GUI keeps the Miller tree, packet detail, approvals, pause/resume/interrupt, digest and console.
 - **C38 Required PostgreSQL two-session tests** [GC12; extends C6/C20]. Each test asserts row counts, final states, unchanged provenance and the scenario's expected number of external effects. A successfully authorised operation produces exactly one effect, including after replay or recovery. One rejected by governance, pause, fencing or budget produces zero. No scenario may ever produce a duplicate effect. Scenarios:
   - concurrent claims of one packet;

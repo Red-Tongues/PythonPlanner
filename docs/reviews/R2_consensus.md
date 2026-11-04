@@ -34,3 +34,15 @@ PM verified in the code before relaying: GE1, GE2, GE3, GE9. The contested pair 
 12. **Failure budget** (GH6, B4). Exhausting the lifetime failure budget makes an audited transition to `awaiting_confirmation` and creates a confirmation. Tests cover retry exhaustion and approve/reject on both dialects.
 
 **Deferred to M3:** GE7 (validate numeric settings on write).
+
+## M2.1 outcome and PM rulings (2026-11-04)
+All 12 fixes are implemented on PR #2 @ 2fcfda1. CI is green on all three jobs (PM-verified through the GitHub API). Tests: 410 passed, 4 dialect-specific skips (up from 350). Migrations 0001–0005 are unchanged since the reviewed commit; all new schema is in 0006. PM spot-checked guarded `admit_next` and ruling 5 in the oracle.
+
+Rulings on the engineer's open notes (PROGRESS.md):
+1. **Registry binding is per field**, not on the global registry revision. *Accepted:* binding globally would invalidate every packet whenever any one field is edited, which works against slow, steady progress.
+2. **Exemplar changes stop reuse but don't make existing consensus pending.** *Accepted for M2.* From M3, editing a field's exemplars must bump that field's definition version (CLI edits, C37), so consensus becomes pending through rule 1.
+3. **`closed_unverified` is terminal and locked, and only a user can set it**, with a reason. *Accepted:* locking keeps history safe (K5); M3 C23 is updated to match.
+4. **A context mismatch at claim leaves the return to `evaluating_pre` pending until the caller commits.** *Accepted;* the M3 kernel must commit on that error, never roll back (added to C25).
+5. **On SQLite a lost race can surface as a database-lock error rather than `ClaimError`.** *Accepted;* the M3 kernel treats a lock error as a lost claim and retries next tick (added to C25).
+6. **The failure budget is checked only for packets waiting for admission or claim.** *Accepted;* the running-packet path arrives with M3 channels (C27).
+7. **New transition `queued → awaiting_confirmation`.** *Accepted;* it is included in the C23 tables.
