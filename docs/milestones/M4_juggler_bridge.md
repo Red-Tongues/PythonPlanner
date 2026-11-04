@@ -4,33 +4,49 @@
 
 Serves requirement **D** (complex tasks on a readable workbench) and **E** (agent-independence scopes) · Key Idea K1, K2, K4. Builds on M3's `WorkbenchAdapter`, durable runs (C1) and non-blocking channels (C2).
 
-## What the Juggler SDK offers (researched 2026-11-03, juggler.studio/extensions.html)
-- Extensions are JavaScript modules importing public `juggler/*` modules. Each class declares `static MANIFEST` (`id`, `name`, `version`, `description`) and is the default export. The SDK and built-in extensions are Apache-2.0; the core app is AGPL-3.0 (personal use — no licensing action needed; revisit if products are sold).
-- Seven capability types:
-  - **Context item**: a model-callable tool (`getToolDefinitions()` → `name`, `category`, `description`, `input_schema`; `execute(params)`; `getSummary(outcome)`), with an optional approval gate.
-  - **Strategy**: agent-loop policy covering available tools, auto-approval and model guidance.
-  - **Command**: a slash command.
-  - **Workspace provider**, **File viewer**, **Info card** (sidebar tile) and **Pinboard tab** (display-only).
-- Extensions are unsandboxed and declare the host access they use. Helpers cover filesystem, shell, search, web and UI.
-- CLI: `juggler ext init <name>`, `juggler ext validate <dir>`, `juggler ext link <dir>` (symlink into `~/.juggler/extensions`, hot reload on save).
-- **Not documented on the public page:** programmatic conversation creation/selection, model selection, prompt insertion and output events. The SDK source (`juggler-ai/juggler`, `examples/extensions`) is the canonical reference, so a spike must confirm these before the design is final.
+## What Juggler offers — verified against the source (github.com/juggler-ai/juggler @ 0074240, read 2026-11-04)
+
+**1. A documented headless CLI — `juggler run` (`docs/headless-linux.md`).** This is the primary integration path.
+- Usage: `juggler run [--project <dir>] [--timeout <dur>] [--strategy <id>] [--json] "<prompt>"`; a prompt of `-` is read from stdin.
+- The answer goes to stdout; `--json` returns the whole outcome (conversation id and folder, turns, answer).
+- Exit codes: `0` completed · `1` failed or interrupted · `2` bad command line · `3` **parked — a tool wanted a human** · `4` timeout.
+- Each run starts and stops its own session. The run's conversation stays in the project's `.juggler/` folder, so it can be opened and inspected in the Juggler GUI afterwards (a readable workbench, K4).
+- The default strategy is `yolo` (self-approving). The orchestrator must always pass its own strategy.
+- The model used is the configured default; there is no per-run model flag in the docs (to confirm in the spike).
+- A project already open in Juggler can't be used by a run (exit 1), so the orchestrator gives every run its own git worktree.
+
+**2. Juggler is an MCP client (`docs/mcp.md`).** Servers are declared in `~/.juggler/mcp.json` or `<project>/.juggler/mcp.json`, and their tools become ordinary Juggler tools with approvals. The orchestrator can expose packet context and result submission as an MCP server.
+
+**3. Extensions (`docs/extension_guide.md`; SDK source in `web/sdk/`)** — eight capability types: Context Item (tool), **Strategy** (`GUIDANCE`, `filterTools()`), **Sub-agent** (a tool that runs a delegated child thread from a self-contained `prompt` plus a `resultSpec` return contract — the same shape as a Prompt Packet), Command, Info Card, Pinboard Item, File Viewer, Workspace Provider, and **Hook** (`beforeTool` deny/ask/note, `afterTool` note/fail — around every tool call, whatever the strategy). Also system-prompt contributions. Conversation state goes only through `MessageThread` `@plugin-api` methods (e.g. `addEvent`, `addContextItem`, `enqueuePendingItem`, `mutate`). CLI: `juggler ext init | validate | link | add`.
+
+**4. No-code options.** Hook files in `~/.juggler/hooks/*.md` and custom slash commands as markdown files.
+
+**Licence:** core AGPL-3.0; SDK and built-in extensions Apache-2.0. Personal use — no action needed (D16).
+
+### Mapping to the draft's Tool Design list
+| Draft capability | How M4 delivers it |
+|---|---|
+| Conversation selection | Each `juggler run` creates its own conversation; `--json` returns its id and folder, stored on the `channel_runs` row and linked from the GUI |
+| Model selection | Default model per project via Juggler config in the run's worktree (**spike: confirm the mechanism**); a strategy can steer behaviour |
+| Prompt insertion | The packet's self-contained prompt is piped to `juggler run -` |
+| Model outputs | stdout / `--json` answer, validated against the packet's response contract |
+| Error messages | Exit code + `status` (`failed`, `parked`, `timeout`) + the conversation folder named on every non-zero exit |
 
 ## Deliverables
-1. **Spike (first, time-boxed):** read the SDK source and examples; record in `docs/integrations/juggler.md` exactly which of the draft's Tool Design capabilities are possible — conversation selection, model selection, prompt insertion, model outputs, error messages — and how. Decide between *pull* (extension fetches work) and *push* (orchestrator triggers Juggler).
-2. **Orchestrator side:** a small local bridge API on the kernel (`127.0.0.1` only, token from env), or the existing file-drop folders if the spike shows HTTP is unnecessary:
-   - `GET /workbench/next` returns the next eligible Workbench Production run: prompt packet, response contract schema, context refs, `run_id`, `deadline_at`.
-   - `POST /workbench/{run_id}/result` returns the output for Pydantic validation.
-   - `POST /workbench/{run_id}/error` reports a failure.
-   - All calls are idempotent (C1) and evented.
-3. **Juggler extension `orchestrator-bridge`** (in `integrations/juggler/orchestrator-bridge/`):
-   - **Command** `/orch-next`: claims the next run and inserts the packet as the working prompt in a new thread named `<run_id> <packet ref>`.
-   - **Context items**: `orchestrator_get_packet` (read-only context fetch) and `orchestrator_submit_result` (submits the structured result; approval gate on when the autonomy scope is `confirm`).
-   - **Strategy** `orchestrator-packet`: restricts tools to what the packet's contract needs, keeps destructive actions behind approval, and injects the response contract and Key Idea guardrails as model guidance.
-   - **Info card**: live console (current run IDs per channel, queue depth, paused or running).
-   - **Pinboard tab**: packet detail, evidence and acceptance criteria.
-   - If the spike confirms programmatic thread/model control: an *autopilot* mode that pulls the next run when the previous one finishes, within the pace budget (see the pace & drift governor).
-4. **Docs:** install steps (`juggler ext validate` / `link`), trust note (unsandboxed; host access declared), and how the autonomy scopes map onto Juggler approvals.
-5. **Tests:** orchestrator-side API tests (claims, idempotency, stale-result rejection, contract validation); extension unit tests with mocked SDK base classes where feasible; one manual end-to-end check script.
+1. **Spike (first, time-boxed).** Confirm per-project default-model configuration and the `--json` schema. Confirm that a custom strategy can be selected by id from an extension, and how `parked` runs can be resumed. Record findings in `docs/integrations/juggler.md`.
+2. **`JugglerWorkbench` adapter (Python, replaces the M3 stub).**
+   - For each Workbench Production run, create a git worktree of the production repo (`runs/<run_id>`) — the run's sandbox and quarantine (C3).
+   - Execute `juggler run --json --project <worktree> --strategy orchestrator-packet --timeout <deadline> -` with the packet prompt on stdin.
+   - Map exit codes to run states: `0` → validating; `3` parked → `awaiting_confirmation` (approval queue); `4` → failed attempt (timeout); `1` → failed attempt.
+   - Store conversation id/folder on the run. Validate the answer and the worktree diff against the packet's response contract. Merge accepted changes into the production repo with provenance.
+   - Respect the pace budget (D14). One run per worktree, never against a project open in the GUI.
+3. **Juggler extension `orchestrator-bridge`** (`integrations/juggler/orchestrator-bridge/`):
+   - **Strategy `orchestrator-packet`.** `GUIDANCE` injects the response contract and Key Idea guardrails; `filterTools()` limits tools to what the contract needs. Never `yolo`.
+   - **Hooks (governance, K2).** `beforeTool` denies writes outside the packet's `repo_target_path` and asks before destructive commands, so a headless run parks (exit 3) rather than acting. `afterTool` notes on sandbox refusals.
+   - **Info Card**: orchestrator console (current run IDs, queue depth, paused/running). **Command `/orch-status`**.
+   - Optional **Sub-agent** `work_packet` for interactive use from the Juggler GUI (same prompt + `resultSpec` contract).
+4. **Optional MCP server** (`orchestrator mcp serve`): read-only packet context (`orch_get_packet`, `orch_status`). Result submission stays on the CLI path.
+5. **Docs and tests.** Install steps (`juggler ext validate` / `link`); adapter tests with a fake `juggler` executable covering every exit code, timeouts, parked runs and stale results; one manual end-to-end script against a real Juggler install.
 
 ## Acceptance criteria
 1. Spike findings documented, with a clear yes/no for each Tool Design capability.

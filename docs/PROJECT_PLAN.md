@@ -3,14 +3,30 @@
 | | |
 |---|---|
 | **Document** | Project Plan — replaces the draft `Python Planner.docx` (archived at `docs/archive/`) |
-| **Plan version** | 0.4 — living document, updated after every delivery round (v0.4 records the CFO's decisions on pace, Juggler and the v1 bar) |
+| **Plan version** | 0.5 — living document; checkpoint at end of session 1 (2026-11-04) |
 | **Product target** | v1.0.0.0 prototype of the Python Orchestrator (package version `1.0.0.0.devN` until acceptance) |
 | **Sponsor / CFO** | Sam (redtongues) |
 | **Project manager** | Claude (PM agent) |
 | **Main engineer** | Claude Code (cloud session, GitHub-connected) |
 | **Review panel** | Microsoft Copilot · Gemini (Argon) · GitHub Copilot — consensus-scored (see §17) |
 | **Repository** | `github.com/redtongues/PythonPlanner` (private) |
-| **Last updated** | 2026-11-03 |
+| **Last updated** | 2026-11-04 (checkpoint) |
+
+---
+
+## 0. Status at a glance — checkpoint 2026-11-04 00:20
+
+| Item | State |
+|---|---|
+| Plan | v0.5 (this document) — CFO decisions D13–D16 recorded; D3 and §20 questions still open |
+| M0 — plan and repo | Done |
+| R0 — panel review of plan | Done: 24 findings → 20 adopted (A1–A7, B1–B8, C1–C7) |
+| M1 — kernel foundation | **PR #1** built by Claude Code (9 commits, ~5,800 lines); CI green on SQLite (Py 3.11/3.12) and PostgreSQL 16 |
+| R1 — panel review of M1 code | Done: 24 findings → 18 accepted, 2 partial, 2 deferred to M2, 2 declined (verified false positives) |
+| M1.1 — 12 review fixes | **In progress at pause.** The engineer checkpoints in `docs/PROGRESS.md` (done/remaining); PR #1 merges when CI is green |
+| M2, M3 | Specs ready, with R0 amendments (and C8 pace governor) |
+| M4 — Juggler bridge | Spec rewritten around the headless `juggler run` CLI (verified in Juggler's source) |
+| Work paused | Claude Pro usage at 88%; resume after the reset. Steps for the next agent are in §22 |
 
 ---
 
@@ -281,7 +297,7 @@ Deliberate pace is a feature, not a performance gap. The kernel enforces:
 
 **Local LLMs.** Any OpenAI-compatible endpoint (Ollama default `http://localhost:11434/v1`; llama.cpp server and LM Studio also work). Models A and B stay resident on a dedicated 16 GB or 24 GB inference GPU; a separate GPU drives the display and the rest of the stack (MSI X870 board). Tests use a deterministic `FakeProvider`.
 
-**juggler.studio.** An open-source visual workbench for AI coding agents (branchable conversation trees stored on disk; Claude Code, Copilot, OpenAI, Gemini, Ollama and other providers; headless server with browser clients; JavaScript extension SDK). It has no documented REST API. M3 therefore ships a **file-drop workbench adapter** (`workbench/outbox` → `workbench/inbox`, Markdown + JSON). **M4 builds a Juggler extension** (`orchestrator-bridge`; spec in `docs/milestones/M4_juggler_bridge.md`) using the JavaScript SDK's slash commands, model-callable tools, loop strategies, info cards and pinboard tabs to cover the draft's Tool Design list: conversation selection, model selection, prompt insertion, model outputs, error messages. **Licensing:** Juggler's core is AGPL-3.0 and its SDK Apache-2.0. The system is for personal project development, so no licensing action is needed now; revisit if the stack starts producing products for sale (CFO, 2026-11-03).
+**juggler.studio.** An open-source visual workbench for AI coding agents (branchable conversation trees stored on disk; Claude Code, Copilot, OpenAI, Gemini, Ollama and other providers; headless server with browser clients; JavaScript extension SDK). It has no documented REST API. M3 therefore ships a **file-drop workbench adapter** (`workbench/outbox` → `workbench/inbox`, Markdown + JSON). **M4 builds a Juggler extension** (`orchestrator-bridge`; spec in `docs/milestones/M4_juggler_bridge.md`) driving Juggler through its documented headless CLI (`juggler run --json --strategy … -`, with exit codes for completed / failed / parked-for-a-human / timeout) plus a governance extension (strategy, hooks, info card) to cover the draft's Tool Design list: conversation selection, model selection, prompt insertion, model outputs, error messages. **Licensing:** Juggler's core is AGPL-3.0 and its SDK Apache-2.0. The system is for personal project development, so no licensing action is needed now; revisit if the stack starts producing products for sale (CFO, 2026-11-03).
 
 **Production repository.** A separate local git folder. The app writes only accepted artifacts to each packet's `repo_target_path`; commit messages carry the packet ref and run ID; corrections are new commits (reversible, with provenance).
 
@@ -328,7 +344,8 @@ Deliberate pace is a feature, not a performance gap. The kernel enforces:
 |---|---|---|---|
 | **M0** | Plan, agent guide and repo seeded | this document, `CLAUDE.md` | ✅ Done 2026-11-03 |
 | **R0** | Panel review of plan + specs → 24 findings, 20 adopted as amendments A1–A7, B1–B8, C1–C7 | `docs/reviews/R0_consensus.md` | ✅ Done 2026-11-03 |
-| **M1** | Kernel foundation — packaging, contracts, field registry, schema with immutability triggers, lifecycle, deterministic ingestion, CLI, CI (+ R0 amendments A1–A7) | `docs/milestones/M1_foundation.md` | ⏳ In progress |
+| **M1** | Kernel foundation — packaging, contracts, field registry, schema with immutability triggers, lifecycle, deterministic ingestion, CLI, CI (+ R0 amendments A1–A7) | `docs/milestones/M1_foundation.md` | ⏳ PR #1: built, CI green, R1 review done; M1.1 fixes in progress |
+| **R1** | Panel review of M1 code → 12 fixes (M1.1); 2 false positives removed by cross-check | `docs/reviews/R1_consensus.md` | ✅ Done 2026-11-04 |
 | **M2** | Evaluation engine & SQL layer — providers, six-pass evaluator, consensus/statistics/threshold/priority views, branching, LLM extraction contract | `docs/milestones/M2_evaluation_engine.md` | Planned |
 | **M3** | Orchestration & interface — kernel loop, channels, workbench adapter, repo writer, SonarQube client, interruption, autonomy enforcement, GUI, demo | `docs/milestones/M3_orchestration_interface.md` | Planned |
 | **M4** | Juggler bridge extension — orchestrator queue API + `orchestrator-bridge` extension (commands, tools, strategy, info card) | `docs/milestones/M4_juggler_bridge.md` | Planned (CFO priority) |
@@ -416,6 +433,7 @@ No prices are quoted here; obtain current quotes before purchase.
 |---|---|
 | 2026-11-03 | Plan v0.2 drafted from the CFO's draft; repository seeded (plan, agent guide, milestone specs, archived draft); M1 started with Claude Code. |
 | 2026-11-03 | Review R0. The three-model panel (Microsoft Copilot, Gemini, GitHub Copilot) raised 24 findings on the plan and specs; cross/self scoring adopted 20 (18 accepted, 2 accepted with amendments), 2 partially and deferred 2 already covered elsewhere. Amendments A1–A7 were sent to the engineer during M1; B1–B8 and C1–C7 were folded into the M2/M3 specs. Plan → v0.3. |
+| 2026-11-04 | Review R1 on M1 code: 24 findings; 18 accepted, 2 partial, 2 deferred to M2, 2 declined as verified false positives. CI green (SQLite on Python 3.11 and 3.12; PostgreSQL 16). M1.1 fix list (12 fixes) sent to the engineer on PR #1. Juggler source checked out: `juggler run` headless CLI and MCP client support make M4 simpler (spec updated). |
 | 2026-11-03 | CFO check-in: v1 bar confirmed (working prototype of the kernel); slow, deliberate pace preferred → pace and drift governor (§11.1); Juggler extension committed as M4; personal-use licensing. Plan → v0.4. |
 
 ---
@@ -427,3 +445,24 @@ No prices are quoted here; obtain current quotes before purchase.
 - Respect the Key Idea filter (§2) and the immutability rule (Requirement F) above all else.
 - **Ownership:** the PM owns this plan, the milestone specs and `docs/reviews/`; the engineer owns code, `README.md`, `docs/PROGRESS.md` and technical docs (`docs/ARCHITECTURE.md`, `docs/RUNBOOK.md`). Engineers should propose plan changes in `docs/PROGRESS.md` rather than edit this file, so parallel branches don't conflict.
 - Update `docs/PROGRESS.md` at the end of every session; the PM folds it into §16 and §21.
+
+### 22.1 Resume plan (next session)
+1. **Finish M1.1.**
+   - Reopen the existing Claude Code session ("Milestone M1 kernel foundation", branch `claude/optimistic-allen-ts03d8`).
+   - Ask it to complete the remaining fixes from `docs/reviews/R1_consensus.md`, using its checkpoint in `docs/PROGRESS.md`.
+   - Get CI green on all three jobs, then squash-merge PR #1.
+2. **M2 in a fresh Claude Code session from `main`.** Implement `docs/milestones/M2_evaluation_engine.md` including amendments B1–B8, plus the R1 deferrals: UTC-aware datetimes (GH6) and idempotent re-seeding on init-db (GE6). Panel review R2 → consensus → fixes → merge.
+3. **M3**, then the **M4 spike**. The spike needs Juggler installed on the CFO's machine and a connected folder; the session is linked to that computer.
+4. Fold each engineer checkpoint into §0, §16 and §21. Regenerate the Word handover document from this file.
+
+### 22.2 Operating notes for the PM agent (learned this session)
+- **Tabs:** tab 1 Claude Code (engineer) · tab 2 GitHub Copilot · tab 3 Microsoft Copilot (CFO's freelance sandbox tenant — uploads to its OneDrive are fine) · tab 4 Gemini (Argon) · tab 5 the repo / PR.
+- **Typing into chat UIs drops characters.** Insert text with `document.execCommand('insertText', …)` and verify it matches before sending.
+- **File attachments:**
+  - Microsoft Copilot has a native `<input type=file>`.
+  - Gemini has none. Add a helper file input to the page, set the file on it, then dispatch a synthetic `paste` event carrying the file into Gemini's editor.
+  - Gemini's GitHub connector fails with "error 13"; don't depend on it.
+  - GitHub Copilot reads the repo and PRs directly. Copilot Free has a monthly chat cap, so use about two prompts per review round.
+- **CI:** GitHub won't run `pull_request` CI while a PR has merge conflicts. The PM edits only PM-owned files on `main`; the engineer owns `docs/PROGRESS.md`.
+- **The PM container could not reach PyPI.** Independent verification relies on GitHub Actions (three jobs), plus PM spot-checks of panel claims in the source.
+- **Review consensus works.** In R1 the cross-check removed two plausible but false findings (MC2, MC8) before they reached the engineer. Always verify concrete claims in the code before relaying them.
