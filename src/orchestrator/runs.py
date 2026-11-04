@@ -2,7 +2,7 @@
 
 Every run state change goes through ``move_run``: the M3 run table (``orchestrator.transitions``),
 then one compare-and-set UPDATE on (id, state, fencing token), then an event. The database
-triggers of migration 0007 enforce the same table and the frozen bindings.
+database triggers (``db/ddl.py``) enforce the same table and the frozen bindings.
 
 * **Bindings** (``binding_mismatch``): a run may act only while its packet row is still the head
   version, is owned by this run (``packets.active_run_id``, E7), carries this run's fencing token

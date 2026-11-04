@@ -1,4 +1,4 @@
-"""R1 deferral GE6: init-db idempotently re-seeds every default; edits survive."""
+"""Seeded defaults (GE6): exact on a fresh database; init-db re-seeds what is missing."""
 
 from __future__ import annotations
 
@@ -59,6 +59,7 @@ def test_init_db_restores_deleted_defaults_and_keeps_edits(
         c.execute(text("DELETE FROM thresholds WHERE name = 'split_high_parsability'"))
         c.execute(text("DELETE FROM autonomy_scopes WHERE stage = 'routing'"))
         c.execute(text("DELETE FROM control_state"))
+    seen = set(session.scalars(select(Event.id)))  # the fresh database's own seeding events
     summary = init_db(engine)
     assert summary["reseeded"] == {
         "autonomy_scope": ["routing"],
@@ -71,14 +72,141 @@ def test_init_db_restores_deleted_defaults_and_keeps_edits(
     with engine.connect() as c:
         budget = c.execute(text("SELECT value FROM settings WHERE key = 'queue.failure_budget'"))
         assert _value(budget.scalar_one()) == 5  # the user's edit survives
-    events = session.scalars(
-        select(Event).where(
-            Event.action == "seed.defaults", Event.reason.like("init-db re-seeded%")
+    events = [
+        e
+        for e in session.scalars(
+            select(Event).where(
+                Event.action == "seed.defaults", Event.reason.like("init-db re-seeded%")
+            )
         )
-    ).all()
+        if e.id not in seen
+    ]
     assert {e.entity_type for e in events} == {
         "autonomy_scope",
         "setting",
         "threshold",
         "control_state",
     }
+
+
+# --------------------------------------------------------------------------- exact seeds
+
+EXPECTED_SCOPES = {
+    ("ingestion", "confirm", False),
+    ("objective_llm_values", "confirm", True),
+    ("candidate_promotion", "auto", False),
+    ("branching", "confirm", False),
+    ("routing", "auto", False),
+    ("local_generation", "auto", False),
+    ("workbench_production", "confirm", False),
+    ("repo_write", "confirm", False),
+    ("quality_scan", "auto", False),
+}
+EXPECTED_SETTINGS = {
+    ("aggregation.cross_weight", 0.6),
+    ("aggregation.self_weight", 0.4),
+    ("aggregation.dispute_margin", 0.15),
+    ("attempts.quickfire_evaluation", 4),
+    ("attempts.local_generation", 3),
+    ("attempts.workbench_production", 2),
+    # 0005 (M2)
+    ("consensus.agreement_min", 0.6),
+    ("consensus.winner_min", 0.7),
+    ("consensus.one_sided_min", 0.7),
+    ("consensus.min_supports", 1),
+    ("evaluation.repair_attempts", 1),
+    ("evaluation.max_escalations", 1),
+    ("evaluation.num_ctx", 4096),
+    ("evaluation.max_tokens", 512),
+    ("evaluation.max_exemplars", 3),
+    ("priority.w_objective", 0.3),
+    ("priority.w_age", 0.25),
+    ("priority.w_ambiguity", 0.15),
+    ("priority.w_boost", 0.2),
+    ("priority.w_failures", 0.1),
+    ("priority.max_age_hours", 72),
+    ("queue.max_wait_hours", 48),
+    ("queue.failure_budget", 3),
+    ("queue.retry_backoff_minutes", 30),
+    ("queue.fair_admission_every", 3),
+    ("queue.lease_minutes", 30),
+    ("branching.max_depth", 2),
+    ("branching.max_descendants", 12),
+    ("stats.score_threshold", 7),
+}
+#: 0005 eva presets: (field, phase, tier, required, hard, gate operator, gate value)
+EXPECTED_GATING_PRESETS = {
+    ("safety_clear", "pre", 1, True, True, "=", "true"),
+    ("ambiguity_quotient", "pre", 1, True, False, None, None),
+    ("task_parsability", "pre", 1, True, False, None, None),
+    ("artifact_request_classes", "pre", 2, True, False, None, None),
+    ("tools_needed", "pre", 2, True, False, None, None),
+    ("coding_intensity", "pre", 2, True, False, None, None),
+    ("reasoning_intensity", "pre", 2, True, False, None, None),
+    ("context_volume", "pre", 2, True, False, None, None),
+    ("output_wordcount", "pre", 2, True, False, None, None),
+    ("requirement_alignment", "post", 1, True, False, ">=", "6"),
+    ("correctness", "post", 1, True, False, ">=", "6"),
+    ("security_risk", "post", 1, True, True, "<=", "6"),
+}
+EXPECTED_THRESHOLDS = {
+    ("approval_high_ambiguity", "ambiguity_quotient", ">=", "8", "require_approval", 10),
+    ("approval_key_field_disputed", "@key_fields", "status_is", "disputed", "require_approval", 10),
+    ("split_high_parsability", "task_parsability", ">=", "7", "split", 20),
+    ("workbench_coding_intensity", "coding_intensity", ">=", "7", "route_workbench_production", 30),
+    (
+        "workbench_reasoning_intensity",
+        "reasoning_intensity",
+        ">=",
+        "7",
+        "route_workbench_production",
+        30,
+    ),
+    ("workbench_context_volume", "context_volume", ">=", "7", "route_workbench_production", 30),
+    ("workbench_output_wordcount", "output_wordcount", ">=", "8", "route_workbench_production", 30),
+}
+
+
+def test_seeds_on_a_fresh_database_are_exact(engine) -> None:  # type: ignore[no-untyped-def]
+    with engine.connect() as c:
+        scopes = {
+            (r.stage, r.mode, bool(r.is_fixed))
+            for r in c.execute(text("SELECT stage, mode, is_fixed FROM autonomy_scopes"))
+        }
+        settings = {
+            (r.key, json.loads(r.value) if isinstance(r.value, str) else r.value)
+            for r in c.execute(text("SELECT key, value FROM settings"))
+        }
+        thresholds = set(
+            c.execute(
+                text("SELECT name, field_name, operator, value, action, precedence FROM thresholds")
+            ).all()
+        )
+        control = c.execute(text("SELECT id, paused FROM control_state")).all()
+        seed_events = (
+            c.execute(text("SELECT entity_type FROM events WHERE action = 'seed.defaults'"))
+            .scalars()
+            .all()
+        )
+    assert scopes == EXPECTED_SCOPES
+    assert settings == EXPECTED_SETTINGS
+    assert {tuple(t) for t in thresholds} == EXPECTED_THRESHOLDS
+    assert [(r.id, bool(r.paused)) for r in control] == [(1, False)]
+    # one seeding path (``ensure_defaults``): one batch event per seeded table
+    assert sorted(seed_events) == [
+        "autonomy_scope",
+        "control_state",
+        "eva_preset",
+        "setting",
+        "threshold",
+    ]
+    with engine.connect() as c:
+        presets = c.execute(
+            text(
+                "SELECT field_name, phase, tier, required, hard, gate_operator, gate_value, plan, "
+                "revision FROM eva_presets"
+            )
+        ).all()
+    assert len(presets) == 36 and {(p.plan, p.revision) for p in presets} == {("combined", 1)}
+    gating = {(p[0], p[1], p[2], bool(p[3]), bool(p[4]), p[5], p[6]) for p in presets if p[2] < 3}
+    assert gating == EXPECTED_GATING_PRESETS

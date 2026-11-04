@@ -6,7 +6,7 @@ Each (from, to) pair names the actor kinds that may make it (C23, D8): kernel mo
 Completing always passes the completion gate (post-evaluation of the exact artifact, or child
 roll-up), for users too (M2.1 fix 5); closing without that evidence is ``closed_unverified``, a
 terminal non-success disposition that needs a reason. Every terminal transition locks the
-packet in the same UPDATE statement, and migration 0007's trigger rejects any pair not in the
+packet in the same UPDATE statement, and the database trigger rejects any pair not in the
 table at the database too.
 """
 

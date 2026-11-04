@@ -1,4 +1,4 @@
-"""Migration 0007 (C22, C24): frozen DDL, populated upgrade, and the database-level guards.
+"""The M3 run, fencing and control schema (C22, C24) and its database-level guards.
 
 Every test runs on SQLite and, with ORCH_TEST_POSTGRES_URL, on PostgreSQL. The triggers are
 never disabled; rows in arbitrary starting states are created with raw INSERTs (the transition
@@ -7,7 +7,6 @@ triggers guard UPDATEs), then every UPDATE is tried inside a savepoint.
 
 from __future__ import annotations
 
-import importlib.util
 import itertools
 
 import pytest
@@ -15,38 +14,33 @@ from alembic import command
 from sqlalchemy import Connection, Engine, text
 
 from orchestrator.contracts import GenerationRunState, PacketStatus
-from orchestrator.db import make_engine
+from orchestrator.db import init_db, make_engine
 from orchestrator.db.ddl import (
     M3_APPEND_ONLY,
-    M3_VIEWS,
     is_immutability_violation,
     is_transition_violation,
     m3_statements,
 )
-from orchestrator.db.migrate import MIGRATIONS_DIR, alembic_config
+from orchestrator.db.migrate import alembic_config
+from orchestrator.sql.views import RUN_VIEWS
 from orchestrator.transitions import PACKET_TRANSITIONS, RUN_TRANSITIONS
 
 NOW = "2026-11-04 12:00:00"
 LOCKING = {"completed", "archived", "closed_unverified"}
-REVISION = "0007_m3_runs_and_control.py"
-
-
-def _revision():  # type: ignore[no-untyped-def]
-    path = MIGRATIONS_DIR / "versions" / REVISION
-    spec = importlib.util.spec_from_file_location("rev_0007", path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 @pytest.mark.parametrize("dialect", ["sqlite", "postgresql"])
-def test_frozen_0007_triggers_match_the_dialect_module(dialect: str) -> None:
-    assert _revision().TRIGGERS[dialect] == m3_statements(dialect)
+def test_the_baseline_carries_the_m3_triggers(dialect: str) -> None:
+    from tests.test_schema import baseline
+
+    statements = baseline().STATEMENTS[dialect]
+    assert all(s in statements for s in m3_statements(dialect))
 
 
-def test_frozen_0007_views_match_and_answer(engine: Engine) -> None:
-    assert _revision().VIEWS == M3_VIEWS
+def test_the_run_attempts_view_is_installed_and_answers(engine: Engine) -> None:
+    from tests.test_schema import baseline
+
+    assert set(RUN_VIEWS) <= set(baseline().VIEWS)
     with engine.connect() as c:
         assert c.execute(text("SELECT COUNT(*) FROM v_run_attempts")).scalar() == 0
 
@@ -297,18 +291,16 @@ def test_db_control_rows_only_move_forward(engine: Engine) -> None:
         assert _try(c, "UPDATE governor_states SET status = 'paused', revision = 3") is None
 
 
-# --------------------------------------------------------------------------- C22 populated upgrade
+# --------------------------------------------------------------------------- populated database
 
 
-def test_populated_0006_database_upgrades_to_head(db_url: str) -> None:
-    """C22: IDs, hashes, lineage and immutable rows are unchanged; new content_eval rows are
-    still rejected; M2 runs stay valid and can only go stale."""
+def test_a_populated_database_survives_init_db(db_url: str) -> None:
+    """Re-running ``init-db`` on a database with history (C22's intent, now that there is one
+    baseline): IDs, hashes, lineage, statuses and immutable rows are unchanged; new content_eval
+    rows are still rejected; legacy M2 runs stay valid and can only go stale."""
     engine = make_engine(db_url)
-    cfg = alembic_config()
     try:
-        with engine.begin() as c:
-            cfg.attributes["connection"] = c
-            command.upgrade(cfg, "0006")
+        init_db(engine)
         with engine.begin() as c:
             _project(c)
             _packet(c, "k1", "running", "PP-000001")
@@ -341,9 +333,7 @@ def test_populated_0006_database_upgrades_to_head(db_url: str) -> None:
                     "gate_revision FROM packets ORDER BY id"
                 )
             ).all()
-        with engine.begin() as c:
-            cfg.attributes["connection"] = c
-            command.upgrade(cfg, "head")
+        init_db(engine)
         with engine.connect() as c, c.begin():
             after = c.execute(
                 text(
@@ -380,18 +370,12 @@ def test_populated_0006_database_upgrades_to_head(db_url: str) -> None:
                 f=False,
             )
             assert error is not None and is_immutability_violation(error)
-        # and back: 0007 → 0006 → head on the same data (only legacy run states in use)
-        with engine.begin() as c:
-            cfg.attributes["connection"] = c
-            command.downgrade(cfg, "0006")
-        with engine.begin() as c:
-            cfg.attributes["connection"] = c
-            command.upgrade(cfg, "head")
     finally:
         engine.dispose()
 
 
-def test_downgrade_refuses_while_m3_run_states_are_in_use(db_url: str) -> None:
+def test_downgrade_refuses_while_runs_have_history(db_url: str) -> None:
+    """A database whose runs left an audit trail is never dropped by a downgrade."""
     engine = make_engine(db_url)
     cfg = alembic_config()
     try:
@@ -402,8 +386,17 @@ def test_downgrade_refuses_while_m3_run_states_are_in_use(db_url: str) -> None:
             _project(c)
             _packet(c, "k1", "running", "PP-000001")
             _run(c, "r1", "k1", "planned", fencing_token=1, gate_revision=0)
-        with pytest.raises(RuntimeError, match="M3 states"), engine.begin() as c:
+            c.execute(
+                text(
+                    "INSERT INTO events (id, actor, action, entity_type, entity_id, created_at)"
+                    " VALUES ('e1', 'system:kernel', 'run.transition', 'generation_run', 'r1', :t)"
+                ),
+                {"t": NOW},
+            )
+        with pytest.raises(RuntimeError, match="events exist"), engine.begin() as c:
             cfg.attributes["connection"] = c
-            command.downgrade(cfg, "0006")
+            command.downgrade(cfg, "base")
+        with engine.connect() as c:
+            assert c.execute(text("SELECT state FROM generation_runs")).scalar() == "planned"
     finally:
         engine.dispose()

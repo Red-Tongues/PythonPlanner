@@ -1,7 +1,8 @@
-"""Versioned migrations (A4): Alembic owns tables, triggers, views and seed defaults.
+"""Versioned migrations (A4): Alembic applies the schema (tables, triggers, views).
 
-The revision history lives in ``orchestrator/db/migrations/versions``; the applied revision is
-recorded in the ``schema_version`` table. ``orchestrator init-db`` calls ``upgrade(engine)``.
+The history is one generated baseline (``migrations/versions/0001_baseline.py``) built from the
+master schema in ``orchestrator.db.schema``; the applied revision is recorded in the
+``schema_version`` table. ``orchestrator init-db`` calls ``upgrade(engine)`` and then seeds.
 """
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""All dialect-specific DDL lives here (CLAUDE.md golden rule 7): triggers and views.
+"""Every trigger of the schema (part of the master schema; CLAUDE.md golden rule 7).
 
 The triggers are the **guarantee** behind Requirement F (completed work is immutable). They must
 never be disabled, including in tests. Every error message starts with ``IMMUTABLE_MARKER`` so
@@ -12,24 +12,23 @@ Rules enforced identically on SQLite and PostgreSQL (amendment A1):
   ``locked = true`` and ``completed_at`` set.
 * ``artifacts``: once ``OLD.accepted`` is true, UPDATE and DELETE are rejected; on INSERT and
   UPDATE ``accepted = true`` requires ``accepted_at`` set.
-* ``evaluation_passes``, ``events``: UPDATE and DELETE always rejected (PostgreSQL also TRUNCATE).
+* ``evaluation_passes``, ``events`` and every other append-only table: UPDATE and DELETE always
+  rejected (PostgreSQL also TRUNCATE).
 * ``autonomy_scopes``: fixed scopes (``is_fixed``) cannot be changed or deleted.
+* Lineage (R1 fixes 1–2): superseded history is immutable; lineage fields never change.
+* evaPackets, evaluation cycles, generation runs: identity and binding columns frozen from insert;
+  finished rows final (M2, M2.1, M3).
+* The packet and run transition tables (M3 C23), from ``orchestrator.transitions``.
 
-Views (portable SQL, same text on both dialects): ``v_project_heads``, ``v_objective_heads``,
-``v_packet_heads`` — for every row, the current head of its lineage, following ``supersedes_id``.
-
-Since R1 fix 4 the migration revisions hold **frozen copies** of this SQL and never import this
-module (``tests/test_migrations_frozen.py`` checks both the imports and the resulting triggers,
-views and functions per revision). This module is the *authoring* reference: to change a rule,
-edit it here, then write a NEW revision containing the literal statements and regenerate the
-manifest. ``is_immutability_violation`` is the runtime helper the CLI uses.
+``trigger_statements(dialect)`` returns them all in install order. ``orchestrator.db.schema``
+assembles them with the tables (``db/models.py``) and views (``sql/views.py``) into the master
+schema; the baseline migration holds the generated text (``scripts/generate_baseline.py``).
+``is_immutability_violation`` / ``is_transition_violation`` are the runtime helpers.
 """
 
 from __future__ import annotations
 
 import logging
-
-from sqlalchemy import Connection
 
 from orchestrator.contracts import LOCKING_STATUSES
 
@@ -38,43 +37,11 @@ log = logging.getLogger(__name__)
 IMMUTABLE_MARKER = "orchestrator-immutable"
 APPEND_ONLY_TABLES: tuple[str, ...] = ("evaluation_passes", "events")
 LOCKABLE_TABLES: tuple[str, ...] = ("projects", "objectives", "packets")
-HEAD_VIEWS: dict[str, str] = {
-    "v_project_heads": "projects",
-    "v_objective_heads": "objectives",
-    "v_packet_heads": "packets",
-}
 
-#: The locking statuses as frozen in 0002. ``closed_unverified`` (M2.1) is guarded by its own
-#: trigger in 0006 (``m21_statements``), so 0002's reference text never changes.
+#: Locking statuses checked by the M1 completion trigger. ``closed_unverified`` (M2.1) has its
+#: own trigger (``_m21_*``).
 _LOCKING_SQL = "'archived', 'completed'"
 assert {"archived", "completed"} <= {s.value for s in LOCKING_STATUSES}
-
-
-# --------------------------------------------------------------------------- views (portable)
-
-
-def _head_view(view: str, table: str) -> str:
-    """Each row → head of its lineage. ``is_head`` is 1/0 on SQLite, true/false on PostgreSQL."""
-    return (
-        f"CREATE VIEW {view} AS\n"
-        "WITH RECURSIVE chain(row_id, current_id) AS (\n"
-        f"  SELECT id, id FROM {table}\n"
-        "  UNION ALL\n"
-        f"  SELECT chain.row_id, nxt.id FROM chain JOIN {table} nxt "
-        "ON nxt.supersedes_id = chain.current_id\n"
-        ")\n"
-        "SELECT chain.row_id AS id, head.id AS head_id, head.ref AS head_ref,\n"
-        "       head.version AS head_version, (chain.row_id = head.id) AS is_head\n"
-        f"FROM chain JOIN {table} head ON head.id = chain.current_id\n"
-        f"WHERE NOT EXISTS (SELECT 1 FROM {table} s WHERE s.supersedes_id = head.id)"
-    )
-
-
-def _view_statements() -> list[str]:
-    stmts: list[str] = []
-    for view, table in HEAD_VIEWS.items():
-        stmts += [f"DROP VIEW IF EXISTS {view}", _head_view(view, table)]
-    return stmts
 
 
 # --------------------------------------------------------------------------- SQLite
@@ -279,30 +246,7 @@ def _postgresql_statements() -> list[str]:
     return stmts
 
 
-# --------------------------------------------------------------------------- entry points
-
-
-def statements_for(dialect: str) -> list[str]:
-    if dialect == "sqlite":
-        return _sqlite_statements() + _view_statements()
-    if dialect == "postgresql":
-        return _postgresql_statements() + _view_statements()
-    raise NotImplementedError(f"no immutability DDL for dialect {dialect!r}")
-
-
-def install(connection: Connection) -> int:
-    """Install (or reinstall) all triggers and views. Idempotent. Returns the statement count."""
-    stmts = statements_for(connection.dialect.name)
-    # A raw DBAPI cursor called *without* parameters: neither SQLAlchemy nor psycopg then parse
-    # the '%' (RAISE format) or ':' characters inside trigger bodies as placeholders.
-    cursor = connection.connection.cursor()
-    try:
-        for stmt in stmts:
-            cursor.execute(stmt)
-    finally:
-        cursor.close()
-    log.info("installed %d %s DDL statements", len(stmts), connection.dialect.name)
-    return len(stmts)
+# --------------------------------------------------------------------------- errors
 
 
 def is_immutability_violation(exc: BaseException) -> bool:
@@ -310,9 +254,300 @@ def is_immutability_violation(exc: BaseException) -> bool:
     return IMMUTABLE_MARKER in str(exc)
 
 
-# --------------------------------------------------------------------------- M2.1 (revision 0006)
-# Authoring reference for the triggers in migration 0006 (review R2, fixes 5 and 6). The
-# revision holds frozen literal copies; tests/test_sql_views.py asserts they are equal.
+# --------------------------------------------------------------------------- lineage (R1 fixes 1-2)
+
+#: table → (ancestry columns a successor must share and that never change,
+#:          SQL condition on OLD meaning "other rows depend on this one")
+LINEAGE: dict[str, tuple[tuple[str, ...], str]] = {
+    "projects": (
+        (),
+        "EXISTS (SELECT 1 FROM objectives d WHERE d.project_id = OLD.id) "
+        "OR EXISTS (SELECT 1 FROM packets d WHERE d.project_id = OLD.id)",
+    ),
+    "objectives": (
+        ("project_id",),
+        "EXISTS (SELECT 1 FROM packets d WHERE d.objective_id = OLD.id)",
+    ),
+    "packets": (
+        ("project_id", "objective_id", "parent_id", "root_id"),
+        "EXISTS (SELECT 1 FROM packets d WHERE d.id <> OLD.id "
+        "AND (d.parent_id = OLD.id OR d.root_id = OLD.id)) "
+        "OR EXISTS (SELECT 1 FROM evaluation_passes d WHERE d.packet_id = OLD.id) "
+        "OR EXISTS (SELECT 1 FROM artifacts d WHERE d.packet_id = OLD.id) "
+        "OR EXISTS (SELECT 1 FROM channel_runs d WHERE d.packet_id = OLD.id) "
+        "OR EXISTS (SELECT 1 FROM quality_reports d WHERE d.packet_id = OLD.id)",
+    ),
+}
+IMMUTABLE_LINEAGE_COLUMNS = ("ref", "version", "supersedes_id")
+
+
+def _create_sqlite_trigger(name: str, timing: str, table: str, when: str, message: str) -> str:
+    return (
+        f"CREATE TRIGGER {name} {timing} ON {table} FOR EACH ROW WHEN {when} "
+        f"BEGIN SELECT RAISE(ABORT, '{IMMUTABLE_MARKER}: {message}'); END"
+    )
+
+
+def _sqlite_append_only(table: str) -> list[str]:
+    return [
+        _create_sqlite_trigger(
+            f"trg_{table}_append_only_{op}",
+            f"BEFORE {op.upper()}",
+            table,
+            "1 = 1",
+            f"{table} is append-only ({op} rejected)",
+        )
+        for op in ("update", "delete")
+    ]
+
+
+def _sqlite_lineage(table: str) -> list[str]:
+    ancestry, dependents = LINEAGE[table]
+    successor = f"EXISTS (SELECT 1 FROM {table} s WHERE s.supersedes_id = OLD.id)"
+    same_ancestry = "".join(f" AND p.{c} IS NEW.{c}" for c in ancestry)
+    valid_predecessor = (
+        f"EXISTS (SELECT 1 FROM {table} p WHERE p.id = NEW.supersedes_id "
+        f"AND p.ref = NEW.ref AND p.version + 1 = NEW.version{same_ancestry})"
+    )
+    changed = " OR ".join(
+        f"NEW.{c} IS NOT OLD.{c}" for c in (*IMMUTABLE_LINEAGE_COLUMNS, *ancestry)
+    )
+    t = _create_sqlite_trigger
+    return [
+        t(
+            f"trg_{table}_superseded_no_update",
+            "BEFORE UPDATE",
+            table,
+            successor,
+            f"superseded row in {table} is history and cannot be updated",
+        ),
+        t(
+            f"trg_{table}_superseded_no_delete",
+            "BEFORE DELETE",
+            table,
+            successor,
+            f"superseded row in {table} is history and cannot be deleted",
+        ),
+        t(
+            f"trg_{table}_successor_no_delete",
+            "BEFORE DELETE",
+            table,
+            "OLD.supersedes_id IS NOT NULL",
+            f"a superseding version in {table} cannot be deleted; archive instead",
+        ),
+        t(
+            f"trg_{table}_dependents_no_delete",
+            "BEFORE DELETE",
+            table,
+            dependents,
+            f"row in {table} has dependents and cannot be deleted; archive instead",
+        ),
+        t(
+            f"trg_{table}_lineage_no_rewrite",
+            "BEFORE UPDATE",
+            table,
+            changed,
+            f"lineage fields of {table} (ref, version, supersedes_id, ancestry) are immutable",
+        ),
+        t(
+            f"trg_{table}_lineage_start",
+            "BEFORE INSERT",
+            table,
+            "NEW.supersedes_id IS NULL AND NEW.version <> 1",
+            f"a new lineage in {table} starts at version 1",
+        ),
+        t(
+            f"trg_{table}_lineage_successor",
+            "BEFORE INSERT",
+            table,
+            f"NEW.supersedes_id IS NOT NULL AND NOT {valid_predecessor}",
+            f"a successor in {table} must keep the ref, have version = predecessor + 1 "
+            "and the same ancestry",
+        ),
+    ]
+
+
+def _pg_lineage(table: str) -> list[str]:
+    ancestry, dependents = LINEAGE[table]
+    same_ancestry = "".join(f" AND p.{c} IS NOT DISTINCT FROM NEW.{c}" for c in ancestry)
+    changed = " OR ".join(
+        f"NEW.{c} IS DISTINCT FROM OLD.{c}" for c in (*IMMUTABLE_LINEAGE_COLUMNS, *ancestry)
+    )
+    fn = f"orch_{table}_lineage_guard"
+    r = _pg_raise
+    history = r("superseded row % in % is history (% rejected)", "OLD.ref", "TG_TABLE_NAME",
+                "lower(TG_OP)")  # fmt: skip
+    successor = r("superseding version % v% in % cannot be deleted; archive instead", "OLD.ref",
+                  "OLD.version", "TG_TABLE_NAME")  # fmt: skip
+    has_dependents = r("row % in % has dependents and cannot be deleted; archive instead",
+                       "OLD.ref", "TG_TABLE_NAME")  # fmt: skip
+    rewrite = r("lineage fields of % (ref, version, supersedes_id, ancestry) are immutable",
+                "TG_TABLE_NAME")  # fmt: skip
+    start = r("a new lineage in % starts at version 1", "TG_TABLE_NAME")
+    successor_rule = r("a successor in % must keep the ref, have version = predecessor + 1 and "
+                       "the same ancestry", "TG_TABLE_NAME")  # fmt: skip
+    body = f"""CREATE OR REPLACE FUNCTION {fn}() RETURNS trigger LANGUAGE plpgsql AS $fn$
+BEGIN
+  IF TG_OP IN ('UPDATE', 'DELETE') THEN
+    IF EXISTS (SELECT 1 FROM {table} s WHERE s.supersedes_id = OLD.id) THEN
+      {history}
+    END IF;
+  END IF;
+  IF TG_OP = 'DELETE' THEN
+    IF OLD.supersedes_id IS NOT NULL THEN
+      {successor}
+    END IF;
+    IF {dependents} THEN
+      {has_dependents}
+    END IF;
+    RETURN OLD;
+  END IF;
+  IF TG_OP = 'UPDATE' THEN
+    IF {changed} THEN
+      {rewrite}
+    END IF;
+  END IF;
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.supersedes_id IS NULL THEN
+      IF NEW.version <> 1 THEN
+        {start}
+      END IF;
+    ELSIF NOT EXISTS (SELECT 1 FROM {table} p WHERE p.id = NEW.supersedes_id
+                      AND p.ref = NEW.ref AND p.version + 1 = NEW.version{same_ancestry}) THEN
+      {successor_rule}
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$fn$"""
+    return [
+        body,
+        f"CREATE TRIGGER trg_{table}_lineage BEFORE INSERT OR UPDATE OR DELETE ON {table} "
+        f"FOR EACH ROW EXECUTE FUNCTION {fn}()",
+    ]
+
+
+# --------------------------------------------------------------------------- evaPackets, runs (M2)
+
+#: M1 append-only tables beyond the two above, and the M2 ones (UPDATE/DELETE rejected)
+REGISTRY_APPEND_ONLY: tuple[str, ...] = ("field_registry_revisions",)
+M2_APPEND_ONLY: tuple[str, ...] = (
+    "evaluation_pass_items",
+    "eva_presets",
+    "queue_overrides",
+    "waivers",
+    "revocations",
+    "queue_admissions",
+    "branch_applications",
+)
+_NO_CONTENT_EVAL = "new content_eval packets are not allowed; evaluate output with evaPackets (B9)"
+_EVA_TERMINAL_SQL = "OLD.state IN ('consensus', 'disputed', 'failed', 'superseded')"
+
+
+def _m2_sqlite() -> list[str]:
+    t = _create_sqlite_trigger
+    stmts = [s for table in M2_APPEND_ONLY for s in _sqlite_append_only(table)]
+    stmts += [
+        t(
+            "trg_eva_packets_terminal_no_update",
+            "BEFORE UPDATE",
+            "eva_packets",
+            _EVA_TERMINAL_SQL,
+            "a finished evaPacket cannot be changed",
+        ),
+        t(
+            "trg_eva_packets_terminal_no_delete",
+            "BEFORE DELETE",
+            "eva_packets",
+            _EVA_TERMINAL_SQL,
+            "a finished evaPacket cannot be deleted",
+        ),
+        t(
+            "trg_generation_runs_snapshot_frozen",
+            "BEFORE UPDATE",
+            "generation_runs",
+            "NEW.evaluation_snapshot IS NOT OLD.evaluation_snapshot OR NEW.packet_id IS NOT "
+            "OLD.packet_id OR NEW.packet_version IS NOT OLD.packet_version OR NEW.input_hash IS "
+            "NOT OLD.input_hash",
+            "a generation run evaluation snapshot is frozen",
+        ),
+        t(
+            "trg_generation_runs_no_delete",
+            "BEFORE DELETE",
+            "generation_runs",
+            "1 = 1",
+            "generation runs cannot be deleted",
+        ),
+        t(
+            "trg_packets_no_new_content_eval",
+            "BEFORE INSERT",
+            "packets",
+            "NEW.packet_kind = 'content_eval'",
+            "new content_eval packets are not allowed; evaluate output with evaPackets (B9)",
+        ),
+    ]
+    return stmts
+
+
+def _m2_pg_raise(message: str) -> str:
+    return f"RAISE EXCEPTION '{IMMUTABLE_MARKER}: {message}' USING ERRCODE = '23001';"
+
+
+def _m2_postgresql() -> list[str]:
+    r = _m2_pg_raise
+    stmts = [
+        "CREATE OR REPLACE FUNCTION orch_eva_packets_guard() RETURNS trigger LANGUAGE plpgsql "
+        "AS $fn$\n"
+        "BEGIN\n"
+        f"  IF {_EVA_TERMINAL_SQL} THEN\n"
+        f"    {r('a finished evaPacket cannot be changed or deleted')}\n"
+        "  END IF;\n"
+        "  IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;\n"
+        "  RETURN NEW;\n"
+        "END;\n$fn$",
+        "CREATE OR REPLACE FUNCTION orch_generation_runs_guard() RETURNS trigger LANGUAGE "
+        "plpgsql AS $fn$\n"
+        "BEGIN\n"
+        "  IF TG_OP = 'DELETE' THEN\n"
+        f"    {r('generation runs cannot be deleted')}\n"
+        "  END IF;\n"
+        "  IF NEW.evaluation_snapshot::text IS DISTINCT FROM OLD.evaluation_snapshot::text\n"
+        "     OR NEW.packet_id IS DISTINCT FROM OLD.packet_id\n"
+        "     OR NEW.packet_version IS DISTINCT FROM OLD.packet_version\n"
+        "     OR NEW.input_hash IS DISTINCT FROM OLD.input_hash THEN\n"
+        f"    {r('a generation run evaluation snapshot is frozen')}\n"
+        "  END IF;\n"
+        "  RETURN NEW;\n"
+        "END;\n$fn$",
+        "CREATE OR REPLACE FUNCTION orch_packets_kind_guard() RETURNS trigger LANGUAGE plpgsql "
+        "AS $fn$\n"
+        "BEGIN\n"
+        "  IF NEW.packet_kind = 'content_eval' THEN\n"
+        f"    {r(_NO_CONTENT_EVAL)}\n"
+        "  END IF;\n"
+        "  RETURN NEW;\n"
+        "END;\n$fn$",
+    ]
+    for table in M2_APPEND_ONLY:
+        stmts += [
+            f"CREATE TRIGGER trg_{table}_append_only BEFORE UPDATE OR DELETE ON {table} "
+            "FOR EACH ROW EXECUTE FUNCTION orch_append_only_guard()",
+            f"CREATE TRIGGER trg_{table}_no_truncate BEFORE TRUNCATE ON {table} "
+            "FOR EACH STATEMENT EXECUTE FUNCTION orch_append_only_guard()",
+        ]
+    stmts += [
+        "CREATE TRIGGER trg_eva_packets_terminal BEFORE UPDATE OR DELETE ON eva_packets "
+        "FOR EACH ROW EXECUTE FUNCTION orch_eva_packets_guard()",
+        "CREATE TRIGGER trg_generation_runs_guard BEFORE UPDATE OR DELETE ON generation_runs "
+        "FOR EACH ROW EXECUTE FUNCTION orch_generation_runs_guard()",
+        "CREATE TRIGGER trg_packets_no_new_content_eval BEFORE INSERT ON packets "
+        "FOR EACH ROW EXECUTE FUNCTION orch_packets_kind_guard()",
+    ]
+    return stmts
+
+
+# --------------------------------------------------------------------------- M2.1 (review R2)
+# Fixes 5 and 6: closed_unverified locks; cycle bindings and evaPacket identity frozen.
 
 #: binding columns of an evaluation cycle: frozen after insert (only state / completed_at move)
 CYCLE_BINDINGS: tuple[str, ...] = (
@@ -351,7 +586,7 @@ EVA_IDENTITY: tuple[str, ...] = (
     "created_at",
 )
 JSON_COLUMNS: frozenset[str] = frozenset({"models", "item_keys", "model_config"})
-#: PostgreSQL tables that get a statement-level BEFORE TRUNCATE guard in 0006
+#: PostgreSQL tables that get a statement-level BEFORE TRUNCATE guard (M2.1)
 M21_TRUNCATE_GUARDED: tuple[str, ...] = (
     "generation_runs",
     "packet_dependencies",
@@ -471,7 +706,7 @@ def _m21_postgresql() -> list[str]:
 
 
 def m21_statements(dialect: str) -> list[str]:
-    """Trigger DDL installed by migration 0006, per dialect."""
+    """The M2.1 trigger DDL, per dialect."""
     if dialect == "sqlite":
         return _m21_sqlite()
     if dialect == "postgresql":
@@ -479,9 +714,8 @@ def m21_statements(dialect: str) -> list[str]:
     raise NotImplementedError(f"no M2.1 DDL for dialect {dialect!r}")
 
 
-# --------------------------------------------------------------------------- M3 (revision 0007)
-# Authoring reference for the triggers in migration 0007 (C22–C26). The revision holds frozen
-# literal copies; tests/test_m3_schema.py asserts they are equal.
+# --------------------------------------------------------------------------- M3 (C22-C26)
+# Runs, fencing, the kernel lock, governor and budgets, and the transition tables.
 
 TRANSITION_MARKER = "orchestrator-transition"
 
@@ -701,7 +935,7 @@ M3_PG_FUNCTIONS: tuple[str, ...] = (
 
 
 def m3_statements(dialect: str) -> list[str]:
-    """Trigger DDL installed by migration 0007, per dialect, from the M3 transition tables."""
+    """The M3 trigger DDL, per dialect, from the M3 transition tables."""
     from orchestrator.transitions import packet_pairs, run_pairs
 
     if dialect == "sqlite":
@@ -712,23 +946,37 @@ def m3_statements(dialect: str) -> list[str]:
 
 
 def is_transition_violation(exc: BaseException) -> bool:
-    """True if a database error was raised by the 0007 transition-table triggers."""
+    """True if a database error was raised by the transition-table triggers."""
     return TRANSITION_MARKER in str(exc)
 
 
-#: D10 Q3: the console's view of each generation run's latest attempt and its outcome
-#: (portable SQL, identical on both dialects; frozen in 0007).
-M3_VIEWS: dict[str, str] = {
-    "v_run_attempts": (
-        "CREATE VIEW v_run_attempts AS\n"
-        "SELECT r.id AS generation_run_id, r.packet_id, r.packet_version, r.state, r.channel,\n"
-        "       r.fencing_token, r.attempts, r.max_attempts, c.id AS channel_run_id, c.run_id,\n"
-        "       c.attempt, c.operation_id, c.created_at AS authorised_at, o.outcome,\n"
-        "       o.exit_code, o.error, o.created_at AS outcome_at\n"
-        "FROM generation_runs r\n"
-        "LEFT JOIN channel_runs c ON c.generation_run_id = r.id\n"
-        "  AND NOT EXISTS (SELECT 1 FROM channel_runs c2\n"
-        "                  WHERE c2.generation_run_id = r.id AND c2.attempt > c.attempt)\n"
-        "LEFT JOIN channel_run_outcomes o ON o.channel_run_id = c.id"
-    ),
-}
+# --------------------------------------------------------------------------- assembly
+
+
+def _lineage(dialect: str) -> list[str]:
+    if dialect == "sqlite":
+        stmts = [s for t in REGISTRY_APPEND_ONLY for s in _sqlite_append_only(t)]
+        return stmts + [s for t in LINEAGE for s in _sqlite_lineage(t)]
+    stmts = []
+    for table in REGISTRY_APPEND_ONLY:
+        stmts += [
+            f"CREATE TRIGGER trg_{table}_append_only BEFORE UPDATE OR DELETE ON "
+            f"{table} FOR EACH ROW EXECUTE FUNCTION orch_append_only_guard()",
+            f"CREATE TRIGGER trg_{table}_no_truncate BEFORE TRUNCATE ON "
+            f"{table} FOR EACH STATEMENT EXECUTE FUNCTION orch_append_only_guard()",
+        ]
+    return stmts + [s for t in LINEAGE for s in _pg_lineage(t)]
+
+
+def trigger_statements(dialect: str) -> list[str]:
+    """Every trigger (and, on PostgreSQL, every trigger function) of the schema, in install
+    order: functions before the triggers that use them. Each trigger appears once."""
+    if dialect == "sqlite":
+        groups = [_sqlite_statements(), _lineage("sqlite"), _m2_sqlite(), _m21_sqlite()]
+        groups.append(m3_statements("sqlite"))
+    elif dialect == "postgresql":
+        groups = [_postgresql_statements(), _lineage("postgresql"), _m2_postgresql()]
+        groups += [_m21_postgresql(), m3_statements("postgresql")]
+    else:
+        raise NotImplementedError(f"no DDL for dialect {dialect!r}")
+    return [s for group in groups for s in group if not s.startswith("DROP ")]

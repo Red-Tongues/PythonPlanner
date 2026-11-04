@@ -19,6 +19,7 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     Float,
     ForeignKey,
     Index,
@@ -27,6 +28,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    false,
     text,
 )
 from sqlalchemy import Enum as SAEnum
@@ -214,17 +216,25 @@ class Packet(Base):
     heartbeat_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     source: Mapped[str] = mapped_column(String(64), default="manual", nullable=False)
     # B9 projections of the current consensus (written from the SQL views, stale-write guarded)
-    tags: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
-    scores: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    tags: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict, server_default="{}", nullable=False
+    )
+    scores: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict, server_default="{}", nullable=False
+    )
     #: SHA-256 of what evaPackets read (packet core + head project/objective core). Results are
     #: current only while their target hash equals this value.
     input_hash: Mapped[str | None] = mapped_column(String(64))
     #: M2.1 fix 2: bumped by every governance write that can change readiness (waivers,
     #: overrides, revocations, dependencies, approvals); admission and claim compare-and-set it.
-    gate_revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    gate_revision: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
     #: M3 C26: incremented by every claim; result acceptance and publication reject a run whose
     #: token is not the packet's current one
-    fencing_token: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    fencing_token: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
     #: M3 E7: the generation run that currently owns this packet version (NULL when none)
     active_run_id: Mapped[str | None] = mapped_column(String(36))
     created_at: Mapped[datetime] = _created()
@@ -307,7 +317,8 @@ class Threshold(Base):
     precedence: Mapped[int] = mapped_column(Integer, default=100, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     description: Mapped[str] = mapped_column(Text, default="", nullable=False)
-    version: Mapped[int] = _version()  # bumped on every change; part of the branching key (B5)
+    #: bumped on every change; part of the branching key (B5)
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1", nullable=False)
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = _updated()
 
@@ -587,7 +598,10 @@ class EvaPreset(Base):
     revision; the highest revision per (field, phase) is current."""
 
     __tablename__ = "eva_presets"
-    __table_args__ = (UniqueConstraint("field_name", "phase", "revision"),)
+    __table_args__ = (
+        UniqueConstraint("field_name", "phase", "revision"),
+        CheckConstraint("tier IN (1, 2, 3)", name="tier"),
+    )
 
     id: Mapped[str] = _id()
     field_name: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -650,7 +664,10 @@ class EvaluationPassItem(Base):
     """
 
     __tablename__ = "evaluation_pass_items"
-    __table_args__ = (UniqueConstraint("pass_id", "item_key"),)
+    __table_args__ = (
+        UniqueConstraint("pass_id", "item_key"),
+        CheckConstraint("score IS NULL OR (score >= 0 AND score <= 10)", name="score_range"),
+    )
 
     id: Mapped[str] = _id()
     pass_id: Mapped[str] = mapped_column(ForeignKey("evaluation_passes.id"), nullable=False)
@@ -671,6 +688,10 @@ class QueueOverride(Base):
     """A human queue decision (B9). **Append-only**; revoked through ``revocations``."""
 
     __tablename__ = "queue_overrides"
+    __table_args__ = (
+        # only BLOCK and HOLD may cover the whole lineage
+        CheckConstraint("scope = 'version' OR kind IN ('block', 'hold')", name="lineage_scope"),
+    )
 
     id: Mapped[str] = _id()
     packet_id: Mapped[str] = mapped_column(ForeignKey("packets.id"), nullable=False, index=True)
@@ -704,7 +725,10 @@ class Revocation(Base):
     """Revokes one waiver or queue override (its own append-only record, B9)."""
 
     __tablename__ = "revocations"
-    __table_args__ = (UniqueConstraint("target_type", "target_id"),)
+    __table_args__ = (
+        UniqueConstraint("target_type", "target_id"),
+        CheckConstraint("target_type IN ('waiver', 'override', 'dependency')", name="target_type"),
+    )
 
     id: Mapped[str] = _id()
     target_type: Mapped[str] = mapped_column(String(16), nullable=False)  # waiver | override
@@ -732,7 +756,7 @@ class GenerationRun(Base):
     """One generation dispatch of a genPacket version (C24): owns the run state machine
     (``orchestrator.transitions``), the lease, the fencing token and the frozen snapshot.
 
-    DB-enforced (0005, 0007): the snapshot, binding columns and fencing token never change; the
+    DB-enforced (``db/ddl.py``): the snapshot, binding columns and fencing token never change; the
     gate revision only moves by +1 (R1); manifest hash and commit SHA are write-once; a terminal
     run, or an accepted run whose commit is recorded, never changes; state changes follow the
     run table."""
@@ -761,19 +785,25 @@ class GenerationRun(Base):
     gate_revision: Mapped[int | None] = mapped_column(Integer)
     lease_expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     heartbeat_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
-    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    attempts: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
     max_attempts: Mapped[int | None] = mapped_column(Integer)
     deadline_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     #: stable conversation / resume identity (exit 3 resumes the same conversation, C27)
     resume_key: Mapped[str | None] = mapped_column(String(128))
     model_identity: Mapped[dict[str, Any] | None] = mapped_column(JSON)
-    model_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    model_verified: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false(), nullable=False
+    )
     manifest_hash: Mapped[str | None] = mapped_column(String(64))
     commit_sha: Mapped[str | None] = mapped_column(String(64))
     expected_head: Mapped[str | None] = mapped_column(String(64))
     failure_kind: Mapped[str | None] = mapped_column(String(32))
     #: True once this run's failure was added to the packet's lifetime failure budget
-    charged: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    charged: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false(), nullable=False
+    )
     stale_reason: Mapped[str | None] = mapped_column(Text)
     finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
 

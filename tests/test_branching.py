@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from alembic import command
+import pytest
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 from typer.testing import CliRunner
@@ -12,15 +12,13 @@ from typer.testing import CliRunner
 from orchestrator.branching import apply_branch_triggers, children_of, rollup_trunks
 from orchestrator.cli import app
 from orchestrator.confirmations import approve, list_confirmations, reject
-from orchestrator.contracts import AutonomyMode, PacketStatus, ProjectTree, Stage
+from orchestrator.contracts import AutonomyMode, PacketStatus, Stage
 from orchestrator.db import init_db, make_engine, make_session_factory
-from orchestrator.db.migrate import alembic_config
 from orchestrator.db.models import BranchApplication, Packet
-from orchestrator.ingest import persist_tree
 from orchestrator.lifecycle import transition
 from orchestrator.llm import FakeProvider
 from orchestrator.repository import get_packet, set_autonomy_mode, set_setting
-from tests.conftest import KERNEL, SMALL_TREE, USER
+from tests.conftest import KERNEL, USER
 from tests.evafixtures import Item, accept_all, complete_with_evidence, seed_eva
 
 EIGHTS = {3: 8, 4: 8, 5: 8, 6: 8}
@@ -89,17 +87,16 @@ def test_depth_limit(session: Session, tree) -> None:
     assert outcome.action == "skipped" and "max_branch_depth" in outcome.reason
 
 
-def test_populated_m1_database_upgrades_to_0005(db_url: str) -> None:
-    """D4 risks 1 and 2: legacy pass rows get cycles; guards survive; data is kept."""
+def test_legacy_rows_stay_valid_and_only_reenter_evaluation(db_url: str) -> None:
+    """Deviation P3 (and D4's intent): M1-era statuses and legacy evaluation cycles remain valid
+    rows; a legacy packet can only re-enter the pipeline at evaluating_pre, never resume."""
+    from orchestrator.db.ddl import is_transition_violation
+
     engine = make_engine(db_url)
-    cfg = alembic_config()
     try:
+        init_db(engine)
+        now = "2026-11-03 12:00:00"
         with engine.begin() as c:
-            cfg.attributes["connection"] = c
-            command.upgrade(cfg, "0004")
-        # an M1-era database: a project, a legacy content_eval packet and a pass row
-        with engine.begin() as c:
-            now = "2026-11-03 12:00:00"
             c.execute(
                 text(
                     "INSERT INTO projects (id, ref, name, brief, sectors, core_values, goals,"
@@ -109,41 +106,43 @@ def test_populated_m1_database_upgrades_to_0005(db_url: str) -> None:
                 ),
                 {"t": now, "f": False},
             )
+            for pid, status in (("k1", "in_progress"), ("k2", "processed")):
+                c.execute(
+                    text(
+                        "INSERT INTO packets (id, ref, project_id, position, packet_kind, title,"
+                        " prompt_description, response_structure, response_contract, "
+                        "manual_boost, status, evaluations_count, locked, version, depth, "
+                        "source, created_at, updated_at) VALUES (:id, :ref, 'p1', 0, 'task', "
+                        "'Legacy', 'x', 'markdown_document', 'markdown_document@1.0', 0, :s, 0, "
+                        ":f, 1, 0, 'm', :t, :t)"
+                    ),
+                    {"id": pid, "ref": f"PP-00000{pid[1]}", "s": status, "t": now, "f": False},
+                )
             c.execute(
                 text(
-                    "INSERT INTO packets (id, ref, project_id, position, packet_kind, title,"
-                    " prompt_description, response_structure, response_contract, "
-                    "manual_boost, status, evaluations_count, locked, version, depth, "
-                    "source, created_at, updated_at) VALUES ('k1', 'PP-000001', 'p1', 0, "
-                    "'content_eval', 'Legacy eval', 'x', 'markdown_document', "
-                    "'markdown_document@1.0', 0, 'queued', 0, :f, 1, 0, 'm', :t, :t)"
-                ),
-                {"t": now, "f": False},
-            )
-            c.execute(
-                text(
-                    "INSERT INTO evaluation_passes (id, packet_id, field_name, "
-                    "eval_cycle_id, model, pass_no, role, evidence, attempt, created_at) "
-                    "VALUES ('e1', 'k1', 'correctness', 'legacy-cycle', 'm', 1, 'extract', "
-                    "'[]', 1, :t)"
+                    "INSERT INTO evaluation_cycles (id, packet_id, packet_version, phase,"
+                    " target_hash, pass_plan, models, state, created_at, updated_at) VALUES"
+                    " ('legacy-cycle', 'k1', 1, 'pre', 'legacy', 'legacy', '{}', 'legacy', :t, :t)"
                 ),
                 {"t": now},
             )
-            c.execute(
-                text("INSERT INTO ref_counters (name, value) VALUES ('project', 1), ('packet', 1)")
-            )
-        init_db(engine)
+        for target in ("running", "evaluating_post", "completed"):
+            with pytest.raises(Exception) as info, engine.begin() as c:
+                c.execute(text("UPDATE packets SET status = :s WHERE id = 'k1'"), {"s": target})
+            assert is_transition_violation(info.value) or "locked" in str(info.value)
+        with engine.begin() as c:
+            for pid in ("k1", "k2"):
+                c.execute(
+                    text("UPDATE packets SET status = 'evaluating_pre' WHERE id = :id"),
+                    {"id": pid},
+                )
         with engine.connect() as c:
             cycle = c.execute(
                 text("SELECT state, packet_id FROM evaluation_cycles WHERE id = 'legacy-cycle'")
             ).one()
             assert tuple(cycle) == ("legacy", "k1")
             kind = c.execute(text("SELECT packet_kind, tags FROM packets WHERE id = 'k1'")).one()
-            assert kind.packet_kind == "content_eval"  # legacy rows stay as history
             assert (json.loads(kind.tags) if isinstance(kind.tags, str) else kind.tags) == {}
-        with make_session_factory(engine)() as s:
-            persist_tree(s, ProjectTree.model_validate(SMALL_TREE), actor=USER)
-            s.commit()
     finally:
         engine.dispose()
 

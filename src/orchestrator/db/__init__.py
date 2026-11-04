@@ -17,8 +17,8 @@ log = logging.getLogger(__name__)
 def init_db(engine: Engine) -> dict[str, Any]:
     """Bring the database to the head revision and sync the candidate-field registry.
 
-    Migrations (A4) create the tables, install the dialect-specific triggers and views from
-    ``orchestrator.db.ddl`` and seed defaults; then missing defaults are re-seeded (GE6).
+    The baseline migration (A4) builds the master schema (``orchestrator.db.schema``: tables,
+    triggers, views); then every missing default is seeded (GE6).
     Idempotent: safe to run on every start.
     """
     from orchestrator.fields import load_candidate_fields

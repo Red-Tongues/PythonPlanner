@@ -12,7 +12,6 @@ import time
 from typing import Any
 
 import pytest
-from alembic import command
 from sqlalchemy import Engine, select, text, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session
@@ -21,7 +20,7 @@ from orchestrator.actors import Actor, ActorKind
 from orchestrator.contracts import CandidateFieldDefinition, PacketStatus, ProjectTree
 from orchestrator.db import init_db, make_engine, make_session_factory
 from orchestrator.db.ddl import is_immutability_violation
-from orchestrator.db.migrate import alembic_config, current_revision, head_revision
+from orchestrator.db.migrate import current_revision, head_revision
 from orchestrator.db.models import (
     EvaluationPass,
     Event,
@@ -49,7 +48,6 @@ from orchestrator.repository import (
 )
 from tests.conftest import KERNEL, SMALL_TREE, USER, make_cycle
 from tests.evafixtures import complete_with_evidence
-from tests.test_migrations_frozen import MANIFEST, fingerprint
 
 LLM = Actor.llm("model-a")
 
@@ -288,42 +286,29 @@ def test_fix5_evaluation_pass_uniqueness_includes_packet(session: Session, tree)
         session.commit()
 
 
-def test_fix5_downgrade_and_reupgrade_restore_the_recorded_schema(db_url: str) -> None:
+def test_fix5_reinit_keeps_the_schema_and_ref_numbering(db_url: str) -> None:
+    """Re-running ``init-db`` on a populated database changes no schema object, and refs keep
+    counting from where they were (the downgrade round trip is ``test_schema``'s)."""
+    from tests.test_schema import _expected, _installed
+
     engine = make_engine(db_url)
-    cfg = alembic_config()
-    dialect = "sqlite" if db_url.startswith("sqlite") else "postgresql"
-    manifest = json.loads(MANIFEST.read_text())[dialect]
-
-    def step(fn, rev: str) -> dict:  # type: ignore[no-untyped-def]
-        with engine.begin() as connection:
-            cfg.attributes["connection"] = connection
-            fn(cfg, rev)
-        with engine.connect() as connection:
-            return fingerprint(connection)
-
     try:
         init_db(engine)
         factory = make_session_factory(engine)
         with factory() as s:
             persist_tree(s, ProjectTree.model_validate(SMALL_TREE), actor=USER)
             s.commit()
-        assert step(command.downgrade, "0003") == manifest["0003"]
-        assert step(command.downgrade, "0002") == manifest["0002"]
-        assert step(command.upgrade, "head") == manifest[head_revision()]
-        # counters are rebuilt from existing refs, so numbering continues after the round trip
+        assert init_db(engine)["revision_before"] == head_revision()
+        with engine.connect() as connection:
+            assert _installed(connection) == _expected(engine.dialect.name)
         with factory() as s:
             again = persist_tree(s, ProjectTree.model_validate(SMALL_TREE), actor=USER)
             assert again.project.ref == "P-0002"
             assert again.packets[0].ref == "PP-000004"
             s.commit()
-        assert step(command.downgrade, "base") == manifest["0001"]
-        assert current_revision(engine) is None
-        assert step(command.upgrade, "head") == manifest[head_revision()]
+        assert current_revision(engine) == head_revision()
     finally:
         engine.dispose()
-
-
-# --------------------------------------------------------------------------- fix 6
 
 
 def test_fix6_refs_are_never_reused(session: Session, tree) -> None:

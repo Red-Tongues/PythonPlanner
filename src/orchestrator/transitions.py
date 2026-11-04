@@ -1,9 +1,9 @@
 """The packet and run transition tables (M3 C23) — the single guard every status change passes.
 
 This module is the **authority**. ``docs/ARCHITECTURE.md`` §7 publishes the same tables, and
-migration 0007 freezes the union of allowed (from, to) pairs into database triggers on both
-dialects (``orchestrator.db.ddl.m3_statements``), so a status change that is not listed here is
-rejected by the application *and* by the database. Tests assert that every pair not in the
+the union of allowed (from, to) pairs is carried into database triggers on both dialects
+(``orchestrator.db.ddl.m3_statements``), so a status change that is not listed here is rejected
+by the application *and* by the database. Tests assert that every pair not in the
 tables is rejected (``tests/test_transitions.py``).
 
 Starting point: the reviewed reference ``docs/reviews/D8_state_machines.md``. Every deviation
