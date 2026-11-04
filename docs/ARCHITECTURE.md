@@ -307,3 +307,22 @@ per operation ID.
 **D9-R1 (PM ruling, 2026-11-04).** Branch kill is a BLOCK override at branch scope: the
 packets move to `blocked` and the kill can be undone by revoking it. Closing
 (`→ closed_unverified`) is only ever a separate, explicit owner action with a reason.
+
+## 8. Governance atomicity, fencing and exclusivity (M3 C25, C26)
+
+| Mechanism | Where | How it holds under concurrency |
+|---|---|---|
+| **Scope gate bump** (C25) | `gates.bump_scope` | One UPDATE increments `gate_revision` of every non-terminal head packet in the scope (global, project, objective, branch = trunk ref and its descendants, packet), in the writer's transaction, with one batch event. Writers: dependencies, waivers, overrides, revocations (packet scope); confirmation decisions (packet, or project for ingestion); autonomy scopes and settings (global); project/objective supersession (that scope). Pause/resume are *not* gate writes (D10 Q4) |
+| **Claim fencing** (C26) | `queue.claim` | The guarded UPDATE also compares `packets.fencing_token` and sets it + 1 and `active_run_id`; the run row is inserted `planned` with that F, the observed G, the lease and the frozen snapshot, in the same transaction |
+| **Bindings** (C25, E7, E8) | `runs.binding_mismatch` | Head version, owned by this run, same F, same G, same and still-current H, lease (not for a parked run). Checked before every dispatch, acceptance, publication and approval |
+| **Dispatch guard** (E3) | `runs.authorise_dispatch` | Kernel lock fenced → bindings → every governing scope touched with `UPDATE … WHERE status = 'normal'` in a fixed order → capacity reserved → immutable attempt row with a unique `operation_id` → run state moved by compare-and-set. Commits before any adapter effect |
+| **Pause** (C26, C33) | `control.pause` / `resume` | Flips the scope row's status (revision + 1, evented). A dispatch that touched the row first holds its lock until commit, so the pause waits and the dispatch drains; a pause that committed first makes the dispatch match no row (`DispatchRefused`). Only an owner resumes |
+| **Kernel lock** (C26) | `control.KernelLock` | A `kernel_leases` row taken by conditional UPDATE (free or expired → holder, epoch + 1). `fence` re-checks holder, epoch and expiry with another conditional UPDATE inside each guarded transaction, so a taken-over owner is fenced out before it writes |
+| **Parked runs** (R1, E2, Q5) | `runs.park_run` / `approve_run` / `reject_run` / `cancel_run` | Creating, approving or rejecting the run's own confirmation moves packet G and run G together (CAS on both from equal values); any other governance write leaves them unequal and the run goes stale. Approval resumes the same run once through the dispatch guard; rejection holds the packet and leaves the run parked; only an explicit cancel fails it (no budget charge) |
+| **Decisions** | `confirmations.decide_once` | Every confirmation is decided by `UPDATE … WHERE status = 'pending'`: of two concurrent decisions exactly one wins |
+| **Outcomes** | `runs.record_outcome` | Append-only, unique per attempt; a report for an obsolete F is recorded as `stale` evidence and revives nothing |
+| **Kernel claim errors** (rulings 4–5) | `runs.try_claim` | A context mismatch at claim is committed; a lost claim (including SQLite's lock error) rolls back and is retried next tick |
+
+The C38 two-session scenarios for these pieces are in `tests/test_m3_races.py`; they assert the
+expected number of effects (committed, authorised attempt rows): one for an authorised
+operation, zero for one refused by governance, pause, fencing or budget, never two.

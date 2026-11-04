@@ -55,6 +55,41 @@ def _find(session: Session, confirmation_id: str) -> Confirmation:
     return confirmation
 
 
+def decide_once(
+    session: Session,
+    confirmation: Confirmation,
+    status: ConfirmationStatus,
+    actor: Actor,
+    reason: str | None,
+) -> None:
+    """Decide a pending confirmation with one compare-and-set UPDATE (``WHERE status =
+    'pending'``): of two concurrent decisions exactly one wins; the loser raises and its
+    transaction rolls back (M3 C38: approval racing rejection). The caller writes the event."""
+    from sqlalchemy import update
+    from sqlalchemy.orm.attributes import set_committed_value
+
+    session.flush()
+    table = Confirmation.__table__
+    values = {
+        "status": status.value,
+        "decided_by": str(actor),
+        "decided_at": utcnow(),
+        "reason": reason,
+        "updated_at": utcnow(),
+    }
+    result = session.connection().execute(
+        update(table)
+        .where(table.c.id == confirmation.id, table.c.status == ConfirmationStatus.PENDING.value)
+        .values(**values)
+    )
+    if result.rowcount != 1:
+        raise ConfirmationError(f"confirmation {confirmation.id} was already decided")
+    for attr, value in values.items():
+        set_committed_value(
+            confirmation, attr, ConfirmationStatus(value) if attr == "status" else value
+        )
+
+
 def _decide(
     session: Session,
     confirmation: Confirmation,
@@ -63,10 +98,7 @@ def _decide(
     reason: str | None,
     outcome: dict | None = None,
 ) -> None:
-    confirmation.status = status
-    confirmation.decided_by = str(actor)
-    confirmation.decided_at = utcnow()
-    confirmation.reason = reason
+    decide_once(session, confirmation, status, actor, reason)
     record_event(
         session,
         actor=actor,
