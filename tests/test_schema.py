@@ -18,9 +18,11 @@ from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.runtime.migration import MigrationContext
 from sqlalchemy import Engine, inspect, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from orchestrator.db import init_db, make_engine
+from orchestrator.contracts import ProjectTree
+from orchestrator.db import init_db, make_engine, make_session_factory
 from orchestrator.db.ddl import trigger_statements
 from orchestrator.db.migrate import (
     MIGRATIONS_DIR,
@@ -30,11 +32,21 @@ from orchestrator.db.migrate import (
     head_revision,
     upgrade,
 )
-from orchestrator.db.models import TABLE_NAMES, Base, Setting
+from orchestrator.db.models import (
+    TABLE_NAMES,
+    Base,
+    Setting,
+)
 from orchestrator.db.schema import DIALECTS, schema_statements
-from orchestrator.repository import set_setting
+from orchestrator.ingest import persist_tree
+from orchestrator.repository import (
+    set_setting,
+)
 from orchestrator.sql.views import ALL_VIEW_NAMES, HEAD_VIEWS
-from tests.conftest import USER
+from tests.conftest import SMALL_TREE, USER, make_cycle
+from tests.dbhelpers import (
+    make_pass,
+)
 
 
 def test_upgrade_from_empty_reaches_head(db_url: str) -> None:
@@ -214,3 +226,45 @@ def test_a_database_with_history_refuses_to_downgrade(engine: Engine) -> None:
         cfg.attributes["connection"] = connection
         command.downgrade(cfg, "base")
     assert current_revision(engine) == head_revision()
+
+
+# ----------------------------------------------------- constraints and re-initialisation (R1 fix 5)
+
+
+def test_evaluation_pass_uniqueness_includes_packet(session: Session, tree) -> None:
+    a, b = tree.packets[0].id, tree.packets[1].id
+    make_cycle(session, a, "c1")
+    session.add_all([make_pass(a), make_pass(b)])  # same cycle/field/pass on two packets: fine
+    session.commit()
+    session.add(make_pass(a))
+    with pytest.raises(IntegrityError):
+        session.commit()
+    session.rollback()
+    session.add(make_pass(a, cycle=None))  # the cycle id is mandatory
+    with pytest.raises(IntegrityError):
+        session.commit()
+
+
+def test_reinit_keeps_the_schema_and_ref_numbering(db_url: str) -> None:
+    """Re-running ``init-db`` on a populated database changes no schema object, and refs keep
+    counting from where they were (the downgrade round trip is ``test_schema``'s)."""
+    from tests.test_schema import _expected, _installed
+
+    engine = make_engine(db_url)
+    try:
+        init_db(engine)
+        factory = make_session_factory(engine)
+        with factory() as s:
+            persist_tree(s, ProjectTree.model_validate(SMALL_TREE), actor=USER)
+            s.commit()
+        assert init_db(engine)["revision_before"] == head_revision()
+        with engine.connect() as connection:
+            assert _installed(connection) == _expected(engine.dialect.name)
+        with factory() as s:
+            again = persist_tree(s, ProjectTree.model_validate(SMALL_TREE), actor=USER)
+            assert again.project.ref == "P-0002"
+            assert again.packets[0].ref == "PP-000004"
+            s.commit()
+        assert current_revision(engine) == head_revision()
+    finally:
+        engine.dispose()

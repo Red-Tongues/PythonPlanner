@@ -30,7 +30,7 @@ LOCKING = {"completed", "archived", "closed_unverified"}
 
 
 @pytest.mark.parametrize("dialect", ["sqlite", "postgresql"])
-def test_the_baseline_carries_the_m3_triggers(dialect: str) -> None:
+def test_the_baseline_carries_the_run_and_control_triggers(dialect: str) -> None:
     from tests.test_schema import baseline
 
     statements = baseline().STATEMENTS[dialect]

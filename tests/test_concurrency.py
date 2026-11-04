@@ -24,7 +24,13 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from orchestrator.budgets import Demand, reserve
-from orchestrator.contracts import AttemptOutcome, GenerationRunState, PacketStatus, ScopeStatus
+from orchestrator.contracts import (
+    AttemptOutcome,
+    GenerationRunState,
+    OverrideKind,
+    PacketStatus,
+    ScopeStatus,
+)
 from orchestrator.control import KernelLock, pause, scope_status
 from orchestrator.db.models import (
     BudgetReservation,
@@ -33,11 +39,14 @@ from orchestrator.db.models import (
     Confirmation,
     GenerationRun,
     Packet,
+    QueueAdmission,
     new_id,
 )
 from orchestrator.events import record_event
 from orchestrator.gates import note_confirmation
-from orchestrator.queue import claim
+from orchestrator.governance import add_override, grant_waiver, revoke
+from orchestrator.lifecycle import transition
+from orchestrator.queue import admit_next, claim
 from orchestrator.repository import get_packet, supersede_objective
 from orchestrator.runs import (
     approve_run,
@@ -48,6 +57,11 @@ from orchestrator.runs import (
     reject_run,
 )
 from tests.conftest import KERNEL, USER
+from tests.govfixtures import (
+    claim_race,
+    queued_ref,
+    ready_packet,
+)
 from tests.runfixtures import attempts, claimed_run, queued_packet
 
 R, S = GenerationRunState, PacketStatus
@@ -275,7 +289,6 @@ def test_approval_and_rejection_race_for_a_parked_run(factory: sessionmaker[Sess
 
 
 def test_approval_racing_a_governance_write_never_resumes(factory: sessionmaker[Session]) -> None:
-    from orchestrator.governance import grant_waiver
 
     ref, run_id, confirmation_id = _parked_run(factory)
 
@@ -326,7 +339,6 @@ def test_a_duplicate_result_is_recorded_once(factory: sessionmaker[Session]) -> 
 
 
 def test_a_late_result_after_lease_takeover_has_no_effect(factory: sessionmaker[Session]) -> None:
-    from orchestrator.lifecycle import transition
     from orchestrator.runs import reconcile_runs
 
     later = datetime.now(UTC) + timedelta(hours=2)
@@ -481,3 +493,69 @@ def test_two_kernels_race_for_an_expired_lock(factory: sessionmaker[Session]) ->
         except FencedOut:
             pass
         assert s.scalar(select(func.count()).select_from(Packet)) == 0
+
+
+# ----------------------------------------------------- admission and claim races (M2.1 fixes 2, 11)
+
+
+def test_waiver_revoked_between_check_and_claim(factory: sessionmaker[Session]) -> None:
+    ref, waiver_id = queued_ref(factory, waived=True)
+    outcome = claim_race(
+        factory,
+        ref,
+        lambda b: revoke(b, "waiver", waiver_id, actor=USER, reason="revoked mid-claim"),
+    )
+    assert outcome and outcome[0] != "won"
+    with factory() as s:
+        assert s.scalar(select(func.count()).select_from(GenerationRun)) == 0
+        assert get_packet(s, ref).status is PacketStatus.QUEUED
+
+
+def test_block_added_between_check_and_claim(factory: sessionmaker[Session]) -> None:
+    ref, _ = queued_ref(factory, waived=False)
+    outcome = claim_race(
+        factory,
+        ref,
+        lambda b: add_override(
+            b, ref, OverrideKind.BLOCK, actor=USER, reason="stop", scope="lineage"
+        ),
+    )
+    assert outcome and outcome[0] != "won"
+    with factory() as s:
+        assert s.scalar(select(func.count()).select_from(GenerationRun)) == 0
+
+
+def test_without_a_concurrent_write_the_claim_wins(factory: sessionmaker[Session]) -> None:
+    ref, _ = queued_ref(factory, waived=False)
+    assert claim_race(factory, ref, lambda b: None) == ["won"]
+    with factory() as s:
+        run = s.scalar(select(GenerationRun))
+        assert run is not None and run.evaluation_snapshot["packet"]["gate_revision"] == 0
+
+
+def test_concurrent_ticks_admit_once(factory: sessionmaker[Session]) -> None:
+    with factory() as s:
+        ref = ready_packet(s).ref
+        s.commit()
+    results: list[str] = []
+    barrier = threading.Barrier(2)
+
+    def tick() -> None:
+        with factory() as s:
+            barrier.wait()
+            try:
+                admitted = admit_next(s)
+                s.commit()
+                results.append(admitted.ref if admitted else "none")
+            except Exception:  # SQLite: the losing writer may get a snapshot conflict
+                s.rollback()
+                results.append("error")
+
+    threads = [threading.Thread(target=tick) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    assert results.count(ref) == 1
+    with factory() as s:
+        assert s.scalar(select(func.count()).select_from(QueueAdmission)) == 1

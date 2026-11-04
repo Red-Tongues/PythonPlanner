@@ -2,7 +2,7 @@
 (C25, E7, E8), parked-run decisions (R1, E2, D10 Q5), pauses (C26, Q4), the kernel lock (C26),
 scope-wide gate bumps (C25) and the kernel's claim error handling (M2.1 rulings 4–5).
 
-Single-session behaviour; the two-session races are in ``test_m3_races.py``.
+Single-session behaviour; the two-session races are in ``test_concurrency.py``.
 """
 
 from __future__ import annotations

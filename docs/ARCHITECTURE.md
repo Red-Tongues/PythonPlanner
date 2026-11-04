@@ -323,6 +323,6 @@ packets move to `blocked` and the kill can be undone by revoking it. Closing
 | **Outcomes** | `runs.record_outcome` | Append-only, unique per attempt; a report for an obsolete F is recorded as `stale` evidence and revives nothing |
 | **Kernel claim errors** (rulings 4–5) | `runs.try_claim` | A context mismatch at claim is committed; a lost claim (including SQLite's lock error) rolls back and is retried next tick |
 
-The C38 two-session scenarios for these pieces are in `tests/test_m3_races.py`; they assert the
+The C38 two-session scenarios for these pieces are in `tests/test_concurrency.py`; they assert the
 expected number of effects (committed, authorised attempt rows): one for an authorised
 operation, zero for one refused by governance, pause, fencing or budget, never two.

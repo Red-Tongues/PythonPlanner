@@ -4,10 +4,27 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from orchestrator.contracts import FieldKind, FieldLevel
-from orchestrator.db.models import CandidateFieldDefinitionRow, Event
-from orchestrator.db.seed import sync_candidate_fields
+from orchestrator.contracts import (
+    CandidateFieldDefinition,
+    FieldKind,
+    FieldLevel,
+)
+from orchestrator.db import init_db
+from orchestrator.db.models import (
+    CandidateFieldDefinitionRow,
+    Event,
+    FieldRegistryRevision,
+)
+from orchestrator.db.seed import (
+    current_registry_revision,
+    record_registry_revision,
+    sync_candidate_fields,
+)
 from orchestrator.fields import RegistryError, fields_for_level, load_candidate_fields
+from tests.conftest import USER
+from tests.dbhelpers import (
+    assert_db_rejects,
+)
 
 # Every candidate field listed in docs/archive/Python_Planner_v0_draft.md.
 DRAFT_TASK_TAGSETS = {
@@ -182,3 +199,31 @@ def test_sync_is_idempotent_and_versions_changes(session: Session) -> None:
     assert session.scalar(
         select(Event).where(Event.action == "fields.synced").order_by(Event.created_at.desc())
     ).after["updated"] == ["styles"]
+
+
+# ------------------------------------------------------------------- registry revisions (R1 fix 12)
+
+
+def test_registry_revision_recorded_and_versioned(engine, session: Session) -> None:
+    first = current_registry_revision(session)
+    assert first is not None and first.revision == 1 and first.field_count == 36
+    assert init_db(engine)["registry_revision"] == 1  # unchanged YAML → same revision
+
+    changed: list[CandidateFieldDefinition] = [
+        d.model_copy(update={"label": "Styles (renamed)"}) if d.name == "styles" else d
+        for d in load_candidate_fields()
+    ]
+    second = record_registry_revision(session, changed, actor=USER)
+    session.commit()
+    assert (second.revision, second.field_count) == (2, 36)
+    assert second.sha256 != first.sha256
+    assert any(d["label"] == "Styles (renamed)" for d in second.definitions)
+    event = session.scalar(
+        select(Event).where(Event.action == "fields.registry_revision", Event.entity_version == 2)
+    )
+    assert event is not None and event.after["sha256"] == second.sha256
+    assert_db_rejects(
+        engine, "UPDATE field_registry_revisions SET sha256 = 'x' WHERE id = :id", id=first.id
+    )
+    assert_db_rejects(engine, "DELETE FROM field_registry_revisions WHERE id = :id", id=first.id)
+    assert session.query(FieldRegistryRevision).count() == 2

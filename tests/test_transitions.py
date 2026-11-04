@@ -85,25 +85,25 @@ USER, KERNEL = ACTORS[ActorKind.USER], ACTORS[ActorKind.SYSTEM]
 
 @pytest.mark.parametrize("target", list(PacketStatus))
 @pytest.mark.parametrize("terminal", [S.COMPLETED, S.CLOSED_UNVERIFIED])
-def test_d8_1_2_terminal_packets_never_move(terminal: PacketStatus, target: PacketStatus) -> None:
+def test_terminal_packets_never_move(terminal: PacketStatus, target: PacketStatus) -> None:
     for actor in ACTORS.values():
         with pytest.raises(InvalidTransitionError):
             check_packet(terminal, target, actor)
 
 
-def test_d8_3_running_never_skips_evaluating_post() -> None:
+def test_running_never_skips_evaluating_post() -> None:
     for actor in ACTORS.values():
         with pytest.raises(InvalidTransitionError):
             check_packet(S.RUNNING, S.COMPLETED, actor)
 
 
-def test_d8_6_adding_a_hold_never_moves_blocked_to_held_for_the_kernel() -> None:
+def test_adding_a_hold_never_moves_blocked_to_held_for_the_kernel() -> None:
     # blocked → held exists only as the owner revoking the last BLOCK (HOLD remains)
     with pytest.raises(InvalidTransitionError):
         check_packet(S.BLOCKED, S.HELD, KERNEL)
 
 
-def test_d8_7_held_never_returns_to_ready_or_queued_without_the_owner() -> None:
+def test_held_never_returns_to_ready_or_queued_without_the_owner() -> None:
     for target in (S.READY, S.QUEUED):
         for actor in ACTORS.values():
             with pytest.raises(InvalidTransitionError):
@@ -140,7 +140,7 @@ def test_runs_never_skip_validation_or_revive() -> None:
         check_run(R.CLAIMED, R.DISPATCHED, KERNEL)  # a legacy claim has no fencing token
 
 
-def test_errata_rows_are_present() -> None:
+def test_promotion_approval_deadline_retry_and_stale_rows_exist() -> None:
     assert ActorKind.USER in PACKET_TRANSITIONS[("awaiting_confirmation", "evaluating_pre")].actors
     assert ("dispatched", "dispatched") in RUN_TRANSITIONS  # E11 deadline retry
     assert "E7" in PACKET_TRANSITIONS[("running", "evaluating_pre")].guard
@@ -162,7 +162,7 @@ def test_pair_lists_are_sorted_and_complete() -> None:
     assert set(run_pairs()) == {k for k in RUN_TRANSITIONS if k[0] != k[1]}
 
 
-def test_d9_r1_branch_kill_blocks_and_never_closes() -> None:
+def test_branch_kill_blocks_and_never_closes() -> None:
     close = PACKET_TRANSITIONS[("ready", "closed_unverified")]
     assert "branch kill is a BLOCK" in close.trigger
     for src in ("draft", "evaluating_pre", "ready", "queued", "needs_review", "failed", "held"):
@@ -170,7 +170,7 @@ def test_d9_r1_branch_kill_blocks_and_never_closes() -> None:
     check_packet(S.BLOCKED, S.EVALUATING_PRE, USER)  # undone by revoking the BLOCK
 
 
-def test_d10_q14_post_phase_recovery_rows() -> None:
+def test_post_phase_recovery_rows() -> None:
     check_packet(S.BLOCKED, S.EVALUATING_POST, KERNEL)  # scanner available again
     check_packet(S.NEEDS_REVIEW, S.EVALUATING_POST, USER)  # phase-post soft waiver
     with pytest.raises(InvalidTransitionError):

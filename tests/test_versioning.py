@@ -4,13 +4,24 @@ from __future__ import annotations
 
 import pytest
 from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from orchestrator.contracts import PacketStatus
-from orchestrator.db.models import Event, Packet, Setting
-from orchestrator.errors import AlreadySupersededError, ImmutableRecordError, NotFoundError
+from orchestrator.db.models import (
+    Event,
+    Packet,
+    Setting,
+    new_id,
+)
+from orchestrator.errors import (
+    AlreadySupersededError,
+    ImmutableRecordError,
+    NotFoundError,
+)
 from orchestrator.lifecycle import transition
 from orchestrator.repository import (
+    delete_packet,
     get_objective,
     get_packet,
     get_project,
@@ -23,6 +34,12 @@ from orchestrator.repository import (
     update_packet,
 )
 from tests.conftest import KERNEL, USER
+from tests.dbhelpers import (
+    assert_db_rejects,
+    assert_db_rejects_insert,
+    insert_row,
+    row_of,
+)
 from tests.evafixtures import complete_with_evidence
 
 
@@ -134,3 +151,82 @@ def test_settings_carry_a_version(session: Session) -> None:
     assert session.get(Setting, "aggregation.cross_weight").version == 1
     with pytest.raises(NotFoundError):
         set_setting(session, "nope", 1, actor=USER)
+
+
+# ------------------------------------------------- lineage invariants and supersede (R1 fixes 2, 8)
+
+
+def test_successor_must_keep_ref_version_and_ancestry(engine, tree) -> None:
+    base = row_of(engine, "packets", tree.packets[0].id)
+    good = {**base, "id": new_id(), "version": 2, "supersedes_id": base["id"], "locked": False}
+    for bad in (
+        {"version": 3},
+        {"ref": "PP-999999"},
+        {"root_id": tree.packets[1].id},
+        {"objective_id": tree.objectives[1].id},
+    ):
+        assert_db_rejects_insert(engine, {**good, **bad})
+    assert_db_rejects_insert(engine, {**base, "id": new_id(), "ref": "PP-999998", "version": 2})
+    insert_row(engine, "packets", good)  # the valid successor is accepted
+    with pytest.raises(IntegrityError):  # at most one successor per predecessor
+        insert_row(engine, "packets", {**good, "id": new_id(), "version": 2})
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [("ref", "PP-777777"), ("version", 5), ("parent_id", None), ("root_id", None)],
+)
+def test_lineage_fields_never_change(engine, tree, column, value) -> None:
+    pid = tree.packets[0].id
+    if column == "parent_id":
+        value = tree.packets[1].id
+    assert_db_rejects(engine, f"UPDATE packets SET {column} = :v WHERE id = :id", v=value, id=pid)
+    assert_db_rejects(
+        engine,
+        "UPDATE objectives SET project_id = :v WHERE id = :id",
+        v=new_id(),
+        id=tree.objectives[0].id,
+    )
+
+
+def test_superseding_versions_and_rows_with_dependents_cannot_be_deleted(
+    engine, session: Session, tree
+) -> None:
+    v2 = supersede_packet(session, tree.packets[2].ref, {"title": "v2"}, actor=USER)
+    session.commit()
+    assert_db_rejects(engine, "DELETE FROM packets WHERE id = :id", id=v2.id)
+    with pytest.raises(ImmutableRecordError, match="archive instead"):
+        delete_packet(session, get_packet(session, v2.ref), actor=USER)
+
+    # a child packet makes its parent undeletable (DB and repository)
+    parent = tree.packets[0]
+    child = {
+        **row_of(engine, "packets", parent.id),
+        "id": new_id(),
+        "ref": "PP-900001",
+        "parent_id": parent.id,
+        "root_id": parent.root_id,
+        "depth": 1,
+    }
+    insert_row(engine, "packets", child)
+    assert_db_rejects(engine, "DELETE FROM packets WHERE id = :id", id=parent.id)
+    session.expire_all()
+    with pytest.raises(ImmutableRecordError, match="child packet PP-900001"):
+        delete_packet(session, get_packet(session, parent.ref), actor=USER)
+
+    assert_db_rejects(engine, "DELETE FROM objectives WHERE id = :id", id=tree.objectives[0].id)
+    assert_db_rejects(engine, "DELETE FROM projects WHERE id = :id", id=tree.project.id)
+
+
+def test_a_plain_v1_draft_can_still_be_deleted(session: Session, tree) -> None:
+    delete_packet(session, get_packet(session, tree.packets[1].ref), actor=USER)
+    session.commit()
+
+
+def test_supersede_with_a_new_response_structure(session: Session, tree) -> None:
+    new = supersede_packet(
+        session, tree.packets[0].ref, {"response_structure": "json_object"}, actor=USER
+    )
+    assert new.response_structure == "json_object"
+    assert new.response_contract == "json_object@1.0"
+    assert get_packet(session, f"{new.ref}@1").response_contract == "markdown_document@1.0"
