@@ -176,3 +176,36 @@ Unknown or external failures don't move the indicator, but they still count in `
    - *Backlog (later, once fields and database structure are better defined):* define what is **objectively enforceable** versus not, so it can weight the **"user involvement" slider**. Much of this lives in **objective categories within task families**, e.g. the family "tasks that create more tasks", broken down further.
 3. **Partial work:** yes, keep it.
    - **New concept, "repo inclusion thresholds":** whether output (including failed or partial work) may enter the repo depends on where it's writing. **In uncharted repo space it's fine to include failures, as long as they are commented/tagged as such.** *(Fits C39: placeholders and failures are always flagged, never passed off as clean.)*
+
+## Round 4 (21:55–22:05)
+
+### Repo inclusion thresholds (Argon)
+**Chartedness of a target path** (0–10,000; deterministic, from SQL and git):
+- whether the path or its module already exists, and how many accepted artifacts have written there;
+- **inbound dependencies** (packets depending on it; repo references to it): its blast radius;
+- completed-packet coverage under the same objective;
+- a role weight from `repository_roles` tags (docs, reference or isolated module = lower; build, deployment or shared core = higher).
+
+*It is the mirror of context sensitivity.* Context sensitivity is how much the surroundings affect this task; chartedness is how much this task's output would affect the surroundings.
+
+**Inclusion rule:** `artifact_quality ≥ required_floor(chartedness)`
+- **Hard floor at any chartedness:** safety and security/data-integrity bounds. Unsafe or secret-leaking code is never committed.
+- Artifact quality comes from the post-generation evaluations (completeness, correctness, alignment, repo consistency) plus the C39 placeholder/failure flags.
+- **Uncharted** (e.g. below 2,500): the floor drops. Partial, placeholder or failed output may be committed as **provisional**, with a machine-readable banner (e.g. `# @ORCHESTRATOR:PROVISIONAL [packet=… rev=… status=partial]`), recorded as provisional on the artifact row.
+- **Charted:** the floor rises steeply. Established files with downstream dependents need a clean, fully accepted evaluation; partial output stays in quarantine.
+
+**Stopping provisional code becoming a foundation**
+- A dependent packet (or one targeting the same path) **can't become ready while the upstream artifact is provisional**, unless its explicit purpose is corrective.
+- As chartedness rises past the provisional ceiling, SQL boosts the packet's priority, or spawns a corrective revision, so the provisional file is replaced before dependants unlock.
+- No objective can **roll up to completed** while a provisional file remains on its paths. Provisional files are tracked in SQL (path, sha256) and in git (the banner plus the C39 scanner).
+
+### Linked history in the failure maths (GPT-6.1)
+- **New window, separate evidence:** the new window's accumulator `A` starts at 0. The old window contributes a small capped **prior**:
+  - **clarification:** `prior = min(1,000, old_A × 1,000 // 10,000)`, i.e. 10% of the old evidence, capped at 1,000;
+  - **split:** each child gets `prior × relevance // 10,000`, so it inherits only the evidence relevant to its scope. Not an equal division: an unresolved requirement may affect every child, while "too big" may be solved by the split itself.
+- `indicator = min(10,000, A + prior)`. The prior is never amplified or re-imported from ancestors. All links are kept for inspection, and repeated clarifications without new failures can't manufacture evidence.
+- **By task family, later:** expected production time, time weight and cap, and the six signal weights vary by family (decomposition matters most for task-creating families). Base contribution, amplification, prior cap and status thresholds stay global until evidence says otherwise. **Version the parameter set** used by each attempt so historical scores stay explainable.
+
+### Open questions for the CFO (round 4)
+1. **Provisional commits:** does Argon's curve match your intent? Failed or partial work may be committed in uncharted space with a banner, but blocks dependants and objective completion until it's replaced.
+2. **Approvals record causes** (GPT-6.1): when you approve a clarification or split, should the approval record *which failure causes it resolves*? It makes the inheritance maths much more precise, but adds a step for you. Possibly evaluators propose it and you just confirm.
