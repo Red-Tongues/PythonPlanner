@@ -577,19 +577,19 @@ def test_fix12_exhausted_budget_awaits_confirmation_then_approve(session: Sessio
     approve(
         session, _budget_confirmation(session, packet).id[:8], actor=USER, provider=FakeProvider()
     )
-    assert packet.status is PacketStatus.READY
+    assert packet.status is PacketStatus.QUEUED  # D8: back to the queue; the claim re-checks
     row = next(r for r in queue_rows(session) if r.packet_ref == packet.ref)
     assert row.eligible and row.failed_runs == 0  # a fresh budget
-    assert admit_next(session).ref == packet.ref
 
 
-def test_fix12_reject_marks_the_packet_failed(session: Session) -> None:
+def test_fix12_reject_holds_the_packet(session: Session) -> None:
+    """C27 supersedes M2.1 #12's rejection outcome: rejecting holds the packet, with the reason."""
     packet = _ready(session)
     set_setting(session, "queue.failure_budget", 1, actor=USER, reason="strict")
     _fail_runs(session, packet, 1, datetime.now(UTC) - timedelta(hours=2))
     admit_next(session)
     reject(session, _budget_confirmation(session, packet).id, actor=USER, reason="give up")
-    assert packet.status is PacketStatus.FAILED
+    assert packet.status is PacketStatus.HELD
 
 
 def test_post_evaluation_reads_the_newest_artifact(session: Session) -> None:

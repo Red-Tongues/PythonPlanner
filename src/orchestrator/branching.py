@@ -232,11 +232,14 @@ def split_packet(
         },
     )
     session.flush()
+    # The split is a kernel move (D8 ready → waiting_for_children); an owner's approval only
+    # authorises it, and is recorded as the approval and split events above.
     transition(
         packet,
         PacketStatus.WAITING_FOR_CHILDREN,
-        actor,
-        f"split into {len(children)} children",
+        actor if not actor.is_user else BRANCHER,
+        f"split into {len(children)} children"
+        + (f" (approved by {actor})" if actor.is_user else ""),
         session=session,
     )
     return children

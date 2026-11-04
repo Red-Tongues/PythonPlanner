@@ -107,7 +107,7 @@ def test_override_precedence_and_version_binding(session: Session) -> None:
     row = next(r for r in queue_rows(session) if r.packet_ref == b.ref)
     assert row.ineligible_reason == "blocked"
     # PIN lapses on revision (version-bound)
-    transition(c, PacketStatus.NEEDS_REVIEW, KERNEL)
+    transition(c, PacketStatus.HELD, USER, "revise it")
     v2 = supersede_packet(session, c.ref, {"title": "Task 2 again"}, actor=USER)
     transition(v2, PacketStatus.EVALUATING_PRE, KERNEL)
     accept_all(session, v2)

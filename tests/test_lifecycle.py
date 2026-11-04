@@ -69,24 +69,27 @@ def test_illegal_transition_raises_and_writes_nothing(session: Session, tree) ->
 
 
 def test_user_closes_unverified_work_but_completion_needs_evidence(session: Session, tree) -> None:
-    """M2.1 fix 5 (reverses M2 judgement call #9)."""
+    """M2.1 fix 5, as tightened by D8/C23: completion only from evaluating_post (or roll-up /
+    an optional-scan approval), and closing unverified needs a reason."""
     user = Actor.user("cli")
-    assert can_transition(S.DRAFT, S.COMPLETED, user)  # the table allows it…
-    with pytest.raises(InvalidTransitionError, match="cannot complete yet"):
-        transition(tree.packets[0], S.COMPLETED, user, "done by hand")  # …the gate does not
+    assert not can_transition(S.DRAFT, S.COMPLETED, user)  # D8: no skipping the pipeline
+    with pytest.raises(InvalidTransitionError, match="not in the packet table"):
+        transition(tree.packets[0], S.COMPLETED, user, "done by hand")
+    with pytest.raises(InvalidTransitionError, match="needs a reason"):
+        transition(tree.packets[0], S.CLOSED_UNVERIFIED, user)
     transition(tree.packets[0], S.CLOSED_UNVERIFIED, user, "done by hand")
     assert tree.packets[0].locked and tree.packets[0].status is S.CLOSED_UNVERIFIED
     assert not can_transition(S.DRAFT, S.CLOSED_UNVERIFIED, KERNEL)  # only a person closes
-    transition(tree.packets[1], S.ARCHIVED, KERNEL, "dropped")
-    assert tree.packets[1].locked
-    # with evidence a user may complete from any non-terminal status (here: draft)
+    with pytest.raises(InvalidTransitionError):  # archived is legacy: nothing enters it (M3)
+        transition(tree.packets[1], S.ARCHIVED, user, "dropped")
+    # with evidence a user may complete from evaluating_post (deviation P2: `packet complete`)
     complete_with_evidence(session, tree.packets[2], user)
     assert tree.packets[2].status is S.COMPLETED
 
 
 def test_terminal_packets_are_immutable(session: Session, tree) -> None:
     packet = tree.packets[0]
-    transition(packet, S.CLOSED_UNVERIFIED, USER)
+    transition(packet, S.CLOSED_UNVERIFIED, USER, "not needed")
     with pytest.raises(ImmutableRecordError):
         transition(packet, S.QUEUED, USER)
     with pytest.raises(ImmutableRecordError):
@@ -95,6 +98,6 @@ def test_terminal_packets_are_immutable(session: Session, tree) -> None:
 
 def test_failed_packets_can_retry(session: Session, tree) -> None:
     packet = tree.packets[0]
-    for status in [S.EVALUATING_PRE, S.FAILED, S.EVALUATING_PRE]:
+    for status in [S.EVALUATING_PRE, S.READY, S.QUEUED, S.RUNNING, S.FAILED, S.EVALUATING_PRE]:
         transition(packet, status, KERNEL)
     assert packet.status is S.EVALUATING_PRE and not packet.locked

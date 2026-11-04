@@ -472,17 +472,15 @@ def test_fix11_actor_is_typed() -> None:
 def test_fix11_only_users_complete_or_archive_by_hand(session: Session, tree) -> None:
     for actor in (LLM, KERNEL):
         for target in (PacketStatus.COMPLETED, PacketStatus.ARCHIVED):
-            if target is PacketStatus.ARCHIVED:
-                continue  # draft → archived is in the table for everyone
-            with pytest.raises(InvalidTransitionError):
+            with pytest.raises(InvalidTransitionError):  # archived is legacy: no entries (M3)
                 transition(tree.packets[0], target, actor)
     with pytest.raises(TypeError):
         transition(tree.packets[0], PacketStatus.COMPLETED, "user:cli")  # type: ignore[arg-type]
     with pytest.raises(TypeError):
         record_event(session, actor="user:cli", action="x", entity_type="x")  # type: ignore[arg-type]
     # M2.1 fix 5: by hand, a user closes unverified work (completion needs evidence)
-    with pytest.raises(InvalidTransitionError, match="cannot complete yet"):
-        transition(tree.packets[0], PacketStatus.COMPLETED, USER, "by hand")
+    with pytest.raises(InvalidTransitionError, match="not in the packet table"):
+        transition(tree.packets[0], PacketStatus.COMPLETED, USER, "by hand")  # D8: no skipping
     transition(tree.packets[0], PacketStatus.CLOSED_UNVERIFIED, USER, "by hand")
     assert tree.packets[0].locked
 

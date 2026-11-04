@@ -4,6 +4,7 @@ from orchestrator.contracts.enums import (
     EVA_TERMINAL_STATES,
     LOCKING_STATUSES,
     OVERRIDE_PRECEDENCE,
+    AttemptOutcome,
     AutonomyMode,
     Channel,
     ConfirmationStatus,
@@ -21,6 +22,8 @@ from orchestrator.contracts.enums import (
     PacketStatus,
     PassPlanName,
     RunStatus,
+    ScopeStatus,
+    ScopeType,
     Stage,
     ThresholdAction,
     ThresholdOperator,
@@ -47,6 +50,9 @@ from orchestrator.contracts.response_structures import (
 )
 
 __all__ = [
+    "AttemptOutcome",
+    "ScopeStatus",
+    "ScopeType",
     "ConsensusStatus",
     "CycleState",
     "DependencyKind",

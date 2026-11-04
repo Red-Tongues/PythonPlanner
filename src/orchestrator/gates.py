@@ -29,9 +29,10 @@ from orchestrator.events import record_event
 
 #: confirmation entity types that concern one genPacket's readiness
 PACKET_CONFIRMATION_TYPES: frozenset[str] = frozenset({"packet", "packet_review", "failure_budget"})
-#: statuses a context change sends back to evaluating_pre (allowed by the transition table)
+#: statuses a context change sends back to evaluating_pre (the kernel moves of D8 / C25).
+#: ``needs_review`` stays put: only an owner sends it back (D8), so a dispute never loops.
 REEVALUATE_FROM: frozenset[PacketStatus] = frozenset(
-    {PacketStatus.READY, PacketStatus.QUEUED, PacketStatus.NEEDS_REVIEW}
+    {PacketStatus.READY, PacketStatus.QUEUED, PacketStatus.FAILED}
 )
 
 

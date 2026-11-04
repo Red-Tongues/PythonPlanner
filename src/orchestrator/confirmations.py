@@ -7,8 +7,8 @@ Approving carries out what was proposed, as the approving user:
 * ``packet_review`` (``candidate_promotion``) — waive the listed *soft* fields for this packet
   version and, if the evaluation set is then acceptable, move it from ``needs_review`` to
   ``ready``. Hard gates are never waived (they stay listed as blockers);
-* ``failure_budget`` — retry with a fresh lifetime budget (``awaiting_confirmation → ready``);
-  rejecting marks the packet ``failed`` (B4, M2.1 fix 12);
+* ``failure_budget`` — retry with a fresh lifetime budget (``awaiting_confirmation → queued``,
+  or ``evaluating_pre`` if the context changed); rejecting holds the packet (C27, D8);
 * anything else (e.g. ``ingestion``) — recorded as approved.
 
 Rejecting records the decision; a rejected branching proposal is not proposed again for the
@@ -27,6 +27,9 @@ from orchestrator.errors import NotFoundError, OrchestratorError
 from orchestrator.events import record_event
 from orchestrator.gates import PACKET_CONFIRMATION_TYPES, note_confirmation
 from orchestrator.llm import LLMProvider
+
+#: the kernel's readiness decision, made inside an owner's approval transaction
+READINESS = Actor.system("readiness")
 
 
 class ConfirmationError(OrchestratorError):
@@ -124,17 +127,7 @@ def approve(
     elif confirmation.entity_type == "packet_review" and packet is not None:
         outcome.update(_approve_review(session, confirmation, packet, actor, reason))
     elif confirmation.entity_type == "failure_budget" and packet is not None:
-        from orchestrator.lifecycle import transition
-
-        # approval grants a fresh budget: v_queue stops counting failures before this decision
-        transition(
-            packet,
-            PacketStatus.READY,
-            actor,
-            "retry approved after the failure budget",
-            session=session,
-        )
-        outcome["status"] = "ready"
+        outcome["status"] = _resume_after_budget(session, packet, actor)
     record_event(
         session,
         actor=actor,
@@ -167,8 +160,47 @@ def _approve_review(
         waived.append(field)
     verdict = evaluation_verdict(session, packet, EvaPhase.PRE)
     if verdict.ok and PacketStatus(packet.status) is PacketStatus.NEEDS_REVIEW:
-        transition(packet, PacketStatus.READY, actor, "review approved", session=session)
+        # D8: the owner sends a reviewed packet back to evaluating_pre; readiness (a kernel
+        # decision, never the approver's) then admits it in the same transaction
+        transition(packet, PacketStatus.EVALUATING_PRE, actor, "review approved", session=session)
+        transition(
+            packet,
+            PacketStatus.READY,
+            READINESS,
+            "evaluation set acceptable after the review",
+            session=session,
+        )
     return {"waived": waived, "ready": verdict.ok, "blockers": verdict.blockers}
+
+
+def _resume_after_budget(session: Session, packet: Packet, actor: Actor) -> str:
+    """Failure-budget approval (D8): back to ``queued`` when the context fingerprint is still
+    current (the claim re-checks every gate), else to ``evaluating_pre`` (C25)."""
+    from orchestrator.evaluation.evaluator import refresh_input_hash
+    from orchestrator.gates import current_fingerprint
+    from orchestrator.lifecycle import transition
+
+    if PacketStatus(packet.status) is not PacketStatus.AWAITING_CONFIRMATION:
+        return PacketStatus(packet.status).value
+    if packet.input_hash is not None and current_fingerprint(session, packet) == packet.input_hash:
+        # approval grants a fresh budget: v_queue stops counting failures before this decision
+        transition(
+            packet,
+            PacketStatus.QUEUED,
+            actor,
+            "retry approved after the failure budget",
+            session=session,
+        )
+    else:
+        refresh_input_hash(session, packet, READINESS)
+        transition(
+            packet,
+            PacketStatus.EVALUATING_PRE,
+            READINESS,
+            "retry approved but the context changed: re-evaluate",
+            session=session,
+        )
+    return PacketStatus(packet.status).value
 
 
 def reject(session: Session, confirmation_id: str, *, actor: Actor, reason: str) -> None:
@@ -181,6 +213,7 @@ def reject(session: Session, confirmation_id: str, *, actor: Actor, reason: str)
 
         packet = session.get(Packet, confirmation.entity_id)
         if packet is not None and PacketStatus(packet.status) is PacketStatus.AWAITING_CONFIRMATION:
+            # C27: rejecting a failure-budget confirmation holds the packet, with the reason
             transition(
-                packet, PacketStatus.FAILED, actor, f"retry rejected: {reason}", session=session
+                packet, PacketStatus.HELD, actor, f"retry rejected: {reason}", session=session
             )
