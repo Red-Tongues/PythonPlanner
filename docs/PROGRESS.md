@@ -48,7 +48,7 @@ Handover from the PM after the CFO's directive (`docs/notes/2026-11-05_CFO_T1C_v
 
 **Known issues**
 - The directive's C.i line numbers predate PR #3's final tree; the M3a table uses current approximate locations.
-- **`git push` from this session was rejected by GitHub** (`fatal error in commit_refs`) for every ref, including pushing an existing commit to a new branch. The commits were recreated one by one through the GitHub API with the same messages and content. After each one, a fetch and `git diff` showed the remote tree identical to the local commit. Their SHAs differ from the local ones; the SHAs above are the pushed ones.
+- **`git push` was rejected by GitHub for the first six commits** (`fatal error in commit_refs`), for every ref tried, including pushing an existing commit to a new branch. Those commits were recreated one by one through the GitHub API with the same messages and content. After each one, a fetch and `git diff` showed the remote tree identical to the local commit. Their SHAs differ from the local ones; the SHAs above are the pushed ones. A later plain `git push` (the SHA-fix commit) succeeded, and the cause was not found.
 
 **Next:**
 1. The CFO reviews the draft PR and answers or delegates OQ1–OQ28.
