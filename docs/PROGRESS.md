@@ -4,6 +4,57 @@ Newest entries first. Every agent session appends an entry: what changed, decisi
 
 ---
 
+## 2026-11-05 (evening) — CFO directive folded in: T1-C v3, Q1 v2, M3a spec draft (Claude Code, docs only)
+
+Handover from the PM after the CFO's directive (`docs/notes/2026-11-05_CFO_T1C_v2_Directive_and_Review.docx`). The work is **docs only**: no `src/` changes and no M3a code. Branch `docs/t1c-v3-m3a-spec`, one commit per task, draft PR into `main` (not merged). PR #3 was already merged (6b89a18), so the directive's Step 1 is done.
+
+**What changed**
+- **Directive .md** (9e7a147): the committed Markdown is now a verbatim pandoc-checked conversion of the .docx.
+  - The earlier conversion had added a "Subject:" line, dropped the C.ii intro sentence, shortened Sketch 2's heading and changed `sonar_Hotspot_alignment`.
+  - A conversion note says the .docx is authoritative.
+- **PROJECT_PLAN §21** (e231aa9): dated entries for the directive, decisions Q1–Q7 and the PM note that Step 1 is satisfied.
+- **T1-C v3 (Final)** (`docs/notes/2026-11-05_T1C_v3_final.md`, dcf2e3e).
+  - **Kept:** the outbox, `field_revisions`, `content_blobs`, `sealed_bundles`, the trigger proof (T1–T6) and fencing.
+  - **Retired:**
+    - `supersedes_id` cloning of genPackets;
+    - `require_current_context` hard invalidation;
+    - `enforce_failure_budgets` and the K = 3 breaker (plus the lineage retry budget and the 10% prior);
+    - `binding_mismatch` staling on `gate_revision` / upstream `input_hash`;
+    - v2's "re-opening" and episode numbers. A genPacket now seals once and continues as a child.
+- **Q1 v2** (`docs/notes/2026-11-04_Q1_queue_maths_brainstorm.md`, fe6cbee):
+  - genQueue with evaQueue as a subset;
+  - continuous Ready/Queued enrichment;
+  - the 0–2 lockout;
+  - mandatory fields gate Ready, and relational score alone gates Queued;
+  - feedback as a weight;
+  - crashes counted apart from grades.
+  - Steps 1–3 are kept as history, each mapped to what Q1 v2 does with it.
+- **M3a spec draft** (`docs/milestones/M3a_genpacket_loop.md`, b56375d):
+  - scope = Step 3 (a)–(e);
+  - module/view change table (directive C.i, re-located to current line numbers);
+  - 35 acceptance criteria for SQLite + PostgreSQL 16;
+  - a table of 10 state-machine conflicts with ARCHITECTURE §7 / D8;
+  - **28 open questions for the CFO**.
+
+**Decisions / deviations**
+- Treated the directive's sketches as non-production references. Every gap was logged as an open question (OQ1–OQ28) rather than decided. Each one is referenced from T1-C v3 and Q1 v2 where it bites.
+- The biggest ones:
+  - **OQ6:** with the sketch's maths, an isolated root packet never reaches the 3,500 floor.
+  - **OQ13:** sealing every graded parent as `completed` would let poor output satisfy dependencies.
+  - **OQ14:** "a child regardless of grade" means a lineage has no stop rule.
+  - **OQ5:** `question_context` raises rank, which pushes packets into the lockout where they can't be refreshed.
+  - **OQ15:** today's repo write happens before post-evaluation.
+- Not edited: CLAUDE.md Golden Rule 1 and Requirement F. Their rewording waits for the CFO (OQ26).
+
+**Known issues:** the directive's C.i line numbers predate PR #3's final tree; the M3a table uses current approximate locations.
+
+**Next:**
+1. The CFO reviews the draft PR and answers or delegates OQ1–OQ28.
+2. The PM folds the answers into the M3a spec and T1-C v3.
+3. Then M3a implementation (directive Step 4) on a feature branch, with the baseline regenerated and both dialects green.
+
+---
+
 ## 2026-11-05 09:00–09:30 — R4 audit (Argon) J1–J3 fixed (Claude Code)
 
 Argon's independent audit of PR #3 was a **conditional pass: fix J1 and J2, then merge**. The PM decided J1–J3 under sprint autonomy (the CFO is busy). J4/J5 are informational, so no change. Not merged; the PM merges.
