@@ -4,6 +4,22 @@ Newest entries first. Every agent session appends an entry: what changed, decisi
 
 ---
 
+## 2026-11-05 02:10–03:00 — Sprint: T1-C v2 and R4 status (PM)
+
+- **R4 groups 3–11:** done by the GitHub Copilot cloud agent (SQLite 361 passed / 234 skipped; PostgreSQL not run). **Not pushed.** Waiting for the CFO to press *Create pull request*.
+  - PR #3 head (groups 1–2) is green in CI on PostgreSQL 16.
+  - PM read the visible diff. One D8 deviation: `awaiting_confirmation → ready` on split rejection. One minor gap: the failure-budget resume changes `input_hash` without that change appearing in the event's before/after (Golden Rule 5).
+- **T1-C → v2** (`docs/notes/2026-11-05_T1C_v2.md`): Argon G-audit → v2 → GPT-6.1 review → Argon audit #2, verdict *conditional pass, ready for CFO sign-off*.
+  - Trigger proof-of-concept executed on SQLite and PostgreSQL; one SQLite producer-attribution defect fixed.
+- **Q1 step 3** (integer ranking policy) recorded in the Q1 note.
+- **Next:**
+  1. The CFO creates the PR.
+  2. A fresh Claude Code session merges it into PR #3, runs the PostgreSQL suite and maps all 16 items (handover in `docs/notes/2026-11-05_sprint_plan.md`).
+  3. The CFO answers T1-C v2's 7 questions.
+  4. Then the M3a spec.
+
+---
+
 ## 2026-11-04 — M2.1: review R2 fix list (Claude Code)
 
 All 12 fixes from `docs/reviews/R2_consensus.md` are on PR #2 (branch `claude/clever-keller-jogsc2`), after merging `origin/main` at 7795b16 (docs only). GE7 is deferred to M3; GE8 and GE10 were declined and not implemented. Migrations 0001–0005 are untouched: all schema work is in the new frozen **0006**, and its trigger and view DDL live in the dialect modules (`db/ddl.py`, `sql/views.py`), with tests that the frozen literals equal them. Earlier the helper script `scripts/ask_gemini.py` was reverted (0e83b02) so the PR stays strictly M2.

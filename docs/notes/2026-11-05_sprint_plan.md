@@ -36,3 +36,17 @@
 3. **Safety brake (G9).** While the failure maths is only advisory, should a simple hard brake apply after N failures in a row on the same prompt?
 4. **Failures with an unknown cause (G5).** Should they only affect queue maths, or may they block the packet?
 5. **Inheritance after a split (G7).** Use an automatic small capped carry-over, or ask you to confirm each cause?
+
+## Outcome (02:40)
+- **Engineer track: blocked.** R4 groups 3–11 are still unpushed; this needs the CFO's *Create pull request*. No Claude Code session was started, so no Claude usage was spent idling. The handover above is still valid.
+- **Design track: done.**
+  - T1-C v2 written.
+  - GPT-6.1 reviewed it (5 fixes accepted).
+  - Argon audit #2: conditional pass, ready for CFO sign-off (H1–H8 folded).
+  - Trigger DDL proven on SQLite and PostgreSQL 16; one defect found and fixed.
+  - Q1 step 3 recorded.
+- **PM look at the R4 agent diff (visible half):**
+  - The D8 deviation on split rejection is confirmed.
+  - `_resume_after_budget` writes `input_hash` without listing it in the event's before/after.
+  - The budget-reserve event is now written before the reservation, which is safe only because callers roll back on `BudgetExhausted` (documented contract).
+  - The auditor should check all three once the PR exists.
