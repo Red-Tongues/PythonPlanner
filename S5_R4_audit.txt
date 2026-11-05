@@ -1,0 +1,1117 @@
+Hello Argon. Deep independent audit #3 for the CFO's sprint, this time of CODE. Context: R4 was a 16-item safety fix list for M3 Stage A of the Python Orchestrator (PR #3). Groups 1-2 were done by Claude Code; groups 3-11 by a GitHub Copilot cloud agent (SQLite-tested only, as you flagged in G8). A fresh Claude Code engineer then ran PostgreSQL 16 locally: 4 PG failures (3 test bugs, 1 REAL bug: a torn read under READ COMMITTED let a late approval stale a run the user had just rejected), fixed with a regression test that fails on both dialects without the fix. Engineer also fixed: input_hash rewrite now evented (rule 5), budget.reserved event moved after success, MR5 actor assertion. Local result: 597 passed, 4 skipped, 0 failed on both dialects; CI re-running.
+
+Please audit as an independent senior technical auditor, per your 8-point brief (accuracy & verification; logical coherence incl. deviations from R4 consensus or the D8 state machine; technical sophistication; critical limitations/edge cases esp. concurrency under PG READ COMMITTED, fencing, CAS, idempotency; alternatives; evidence quality; prioritised improvements; overall). Main question: is PR #3 safe to merge to main as the M3 Stage A foundation? Specific ask: is the split-rejection transition awaiting_confirmation -> ready (not in D8) acceptable? Number findings J1, J2... with severity. Under ~800 words.
+
+## A. R4 consensus
+# Review R4 — consensus on M3 Stage A code (PR #3) and the fix list
+
+**Panel:** MR = Microsoft Copilot GPT-6.1 Sol (findings MR1–MR13) · GR = GitHub Copilot (cross-check; supported all 13, added GR1) · GA = Gemini Argon (cross-check; supported all 14, added GA-R1–R5). PM-verified in code: MR1, MR2, MR3, GR1, GA-R3. **Every finding was supported by all three reviewers. None declined.**
+
+## Fix list (on PR #3, after the build tidy; data-model-independent)
+1. **MR1 Atomic binding guard.** Every binding-dependent run write (dispatch, accept, publish, park, approve) does a **packet-row CAS** in the same transaction:
+   - `UPDATE packets … WHERE id, version, status, locked=false, active_run_id, fencing_token, gate_revision, input_hash match, and the row is head`;
+   - rowcount 1, otherwise StaleRun.
+   
+   This works on both dialects (Argon's design). Add a PG barrier test at the `before_scopes` seam.
+2. **MR2 + MR3 Mandatory fence; approval-bound user dispatch.**
+   - System actors must pass a valid `KernelLock` (FencedOut otherwise).
+   - A user dispatch is allowed only via `approve_run` with a just-approved, run-bound confirmation, and only while the packet is `running` with no hold or block.
+   - No other path can dispatch a parked run.
+3. **MR4** Approved resume renews the run and packet leases atomically.
+4. **MR5** Confirmed split keeps the approving user as actor (or adds an explicit kernel continuation row bound to the consumed confirmation).
+5. **MR6** A retry requires the previous attempt's retry-eligible outcome, or recorded deadline expiry.
+6. **MR7** Separate dispatch sequence from chargeable attempts: exit-3 park/resume never consumes the attempt budget.
+7. **MR8** Staling a restricted packet's run records a deferred-recovery condition, processed once the restriction clears (E7 still applies). No ownerless `running` packets.
+8. **MR9** A stale-binding approval commits an audited stale disposition and retires the unusable confirmation. "Stays pending" applies only to recoverable refusals (pause, budget).
+9. **MR10** Reconciliation includes legacy `claimed` runs.
+10. **MR11** Budgets: non-negative integer validation plus DB CHECK constraints.
+11. **MR12 + MR13** Race tests:
+    - propagate unexpected exceptions; assert both workers' allowed outcomes; fail on timeout;
+    - integrated dispatch/acceptance tests with an effect-counting fake adapter.
+12. **GR1** `cancel_run` clears `active_run_id` only with a guarded UPDATE (`WHERE active_run_id = run.id AND fencing_token = run.fencing_token`).
+13. **GA-R1** `reject_run`'s packet CAS also guards `active_run_id` and `fencing_token`.
+14. **GA-R2** Failure-budget approval checks that `confirmation.entity_version == packet.version`, and applies the status transition and gate bump atomically.
+    *Note: failure-budget behaviour will be replaced by the T1 failure indicator later; fix only the atomicity.*
+15. **GA-R3** `packet_scopes`: a trunk packet (`root_id` NULL) includes its own branch scope, so a branch pause blocks the trunk too.
+16. **GA-R5** Verify the `budgets.reserve` audit/flush ordering. Record the event before `session.add`, or use `no_autoflush`. Add a test.
+
+**Resolved without code change:** GA-R4 (the run gate trigger allows exactly +1). "Reconsider" is valid only while `run.G == packet.G` and H is current (D10 V-D2). The trigger stays as it is.
+
+**Constraints:**
+- Immutability triggers stay on, including in tests.
+- Tests run on both dialects.
+- One focused commit per fix group.
+- No Stage B / M3a feature work: the genPacket field-revision model (`docs/notes/2026-11-04_T1_*`) is still under CFO review.
+
+
+## B. Commits since groups 1-2
+- c6b5e6a Record the R4 PostgreSQL verification, fixes and review in PROGRESS.md
+- fa203b8 Merge origin/main (docs only) into PR #3 to clear the PROGRESS.md conflict
+- c8f444a Assert the confirmed split's actor and confirmation binding (R4 MR5)
+- 39f5385 Record budget.reserved only after every demand succeeds (R4 GA-R5)
+- ad66ca3 Event the input_hash rewrite on a failure-budget approval (R4 GA-R2, rule 5)
+- 75e801e Make a stale-binding approval retire its own confirmation first (R4 MR9)
+- 95cb2f1 Fix three R4 race/guard tests that fail on PostgreSQL
+- 66076d0 Harden R4 concurrency tests and record completion
+- d205356 Complete R4 run and governance safety fixes
+- af55504 Sprint 5 Nov 02:10: record outcomes in PROGRESS, plan log and sprint plan
+- ecf47c3 T1-C v2: execute trigger proof on SQLite and PostgreSQL; fix producer attribution
+- 8542dc4 T1-C v2: record Argon audit #2 (conditional pass) and fold H1-H8
+- 1dba816 Fold GPT-6.1 review into T1-C v2; record Q1 step 3
+- 12a45a7 Draft T1-C v2 alignment patch (Mutable Head + Immutable Seal)
+- fd900a8 Record Argon audit of T1-C and plan the 02:10 sprint
+- ec19555 T1-C: refer to the owner as the CFO
+- 8a9daae T1-C corrective specification draft (answers audit A1 hold conditions)
+- 29556d3 Q1 step 2 (Flash-Lite input)
+- e98e7f4 Audit A1 (GPT-5.6 Think, standing in for Argon); fix stale plan status; correct Juggler storage note
+- 01a43ae Q1 queue maths brainstorm, step 1 (GPT-6.1)
+
+## C. PR #3 description (engineer's map)
+Draft. M3 is being re-scoped (M3a / M3b, CFO–Argon clarification on main). This PR holds Stage A, the approved **build-process tidy** (CFO decision Q4) and the **R4 fix list** (16 items, mapped below). M3a / Stage B feature work stays paused until the data model is settled. **Do not merge** until the CFO decides the D8 split-rejection point below.
+
+Details: `docs/PROGRESS.md` (the R4, build-tidy and Stage A entries), `docs/ARCHITECTURE.md` §6–§8.
+
+## Build-process tidy (CFO Q4)
+| # | Item | Status |
+|---|---|---|
+| 1 | One master schema: tables in `db/models.py`, every trigger in `db/ddl.py`, every view in `sql/views.py`, assembled by `db/schema.py` | ✅ |
+| 2 | Migrations 0001–0007 squashed into one generated `0001_baseline`. Frozen manifest, its test and `freeze_views.py` removed. A drift test checks baseline = master on both dialects. Immutability, append-only and transition triggers are unchanged and keep their tests | ✅ |
+| 3 | One contracts location (`contracts/evaluation.py`) | ✅ |
+| 4 | Tests named by capability; every test kept (564 → 571 items) | ✅ |
+| 5 | CLAUDE.md (golden rule 7), README, ARCHITECTURE §6, PROGRESS.md | ✅ |
+
+Equivalence: before squashing, I compared the baseline object by object with the old head schema.
+- **SQLite:** identical.
+- **PostgreSQL:** three benign differences, listed in PROGRESS.md.
+
+## Stage A (checkpoint report in PROGRESS.md)
+C22–C26 and the applicable C38 races ✅. Deviations P1–P6 and R1, and all 17 judgement calls, are provisionally accepted by the PM.
+
+## R4 fixes (16 items) — status on this branch
+
+Groups 1–2 by Claude Code (6dae604, c83d407). Groups 3–11 by the GitHub Copilot agent (d205356, 66076d0); it tested only on SQLite. Then Claude Code (5 Nov) ran the suite on PostgreSQL 16, fixed what failed, and reviewed the agent's code against `docs/reviews/R4_consensus.md` (95cb2f1 … c8f444a, merge fa203b8).
+
+**Status columns:** **Panel** = all three reviewers supported the finding (true for all 16). **Code** = I read the code and it does what R4 asks. **Test** = a test fails if the fix is removed, or asserts the exact behaviour, on SQLite **and** PostgreSQL 16.
+
+| # | R4 item | Code | Test(s) | Panel | Code | Test |
+|---|---|---|---|---|---|---|
+| 1 | MR1 atomic binding guard (packet-row CAS) | `runs.guard_bindings`, `_binding_conditions` (dispatch, accept, publish, park, `_bump_pair`) | `test_concurrency::test_a_governance_write_after_the_binding_check_stops_the_dispatch` (PG barrier at `before_scopes`), `test_runs::test_acceptance_needs_every_binding` | ✅ | ✅ | ✅ |
+| 2 | MR2+MR3 mandatory fence; approval-bound user dispatch | `runs._require_fence`, `_check_approval`, `authorise_dispatch` | `test_runs::test_kernel_writes_without_the_lock_are_refused`, `test_only_an_approval_resumes_a_parked_run`, `test_a_fenced_out_kernel_cannot_dispatch_or_publish` | ✅ | ✅ | ✅ |
+| 3 | MR4 approved resume renews run + packet leases atomically | `approve_run` → `_packet_cas(lease)` + `authorise_dispatch(_resume_lease)` in one transaction | `test_runs::test_approved_resume_renews_expired_packet_and_run_leases` | ✅ | ✅ | ✅ |
+| 4 | MR5 confirmed split keeps the approving user as actor | `branching.split_packet(approval=…)`, `confirmations.approve` | `test_branching::test_confirm_scope_queues_then_approve_or_reject` (actor + confirmation id asserted, added c8f444a) | ✅ | ✅ | ✅ |
+| 5 | MR6 retry needs a retry-eligible outcome or deadline expiry | `runs._retry_is_eligible` | `test_runs::test_retries_pass_the_same_guard_and_stop_at_max_attempts`, `test_recorded_deadline_expiry_allows_a_retry` | ✅ | ✅ | ✅ |
+| 6 | MR7 dispatch sequence ≠ chargeable attempts | `authorise_dispatch` (`chargeable_attempts`, `attempt_number`) | `test_runs::test_parking_keeps_the_run_matched_and_resumes_once_on_approval` (`attempt == 2`, `run.attempts == 1`) | ✅ | ✅ | ✅ |
+| 7 | MR8 deferred recovery for a restricted packet | `packets.recovery_pending`, `stale_run`, `_recover_deferred`, `reconcile_runs` | `test_runs::test_a_stale_run_keeps_a_paused_packet_where_it_is` | ✅ | ✅ | ✅ |
+| 8 | MR9 stale-binding approval: audited stale disposition, confirmation retired | `approve_run` stale branch (**fixed 75e801e**: retires *its* confirmation with the once-only CAS before staling) | `test_runs::test_approval_after_another_governance_write_is_refused`; `test_concurrency::test_approval_and_rejection_race_for_a_parked_run`, `test_a_late_approval_never_stales_a_rejected_parked_run` (new) | ✅ | ✅ | ✅ |
+| 9 | MR10 reconciliation includes legacy `claimed` runs | `transitions.RUN_ACTIVE` | `test_runs::test_legacy_claimed_run_is_included_in_reconciliation` | ✅ | ✅ | ✅ |
+| 10 | MR11 budgets non-negative + DB CHECKs | `budgets._require_nonnegative_integer`; CHECKs in `models.py` / baseline | `test_runs::test_budget_validation_and_multi_demand_audit_order`, `test_db_guards::test_budget_tables_reject_negative_values` (**fixed for PG 95cb2f1**) | ✅ | ✅ | ✅ |
+| 11 | MR12+MR13 race tests: propagate errors, assert outcomes, timeouts; effect-counting adapter | `tests/test_concurrency.py` `_both`, `_run_threads`, `EffectCountingFakeAdapter` | `test_dispatch_budget_and_acceptance_guards_prevent_unapproved_effects` + all races (**3 agent test bugs fixed 95cb2f1**) | ✅ | ✅ | ✅ |
+| 12 | GR1 `cancel_run` guarded ownership release | `runs.cancel_run` | `test_runs::test_cancel_run_does_not_clear_a_replacement_owner` | ✅ | ✅ | ✅ |
+| 13 | GA-R1 `reject_run` CAS guards `active_run_id` + F | `runs.reject_run` | `test_runs::test_rejection_holds_the_packet_and_leaves_the_run_parked` (happy path only) | ✅ | ✅ | ❌ |
+| 14 | GA-R2 failure-budget approval: version check + atomic transition and gate bump | `confirmations.approve`, `_resume_after_budget` (**event fixed ad66ca3**) | `test_queue::test_failure_budget_approval_rejects_a_stale_packet_version`, `test_exhausted_budget_awaits_confirmation_then_approve`, `test_failure_budget_approval_with_a_changed_context_events_the_new_hash` (new) | ✅ | ✅ | ✅ |
+| 15 | GA-R3 trunk includes its own branch scope | `runs.packet_scopes` | `test_runs::test_trunk_dispatch_includes_its_own_branch_scope` | ✅ | ✅ | ✅ |
+| 16 | GA-R5 `budgets.reserve` audit/flush ordering | `budgets.reserve` (**reordered 39f5385**) | `test_runs::test_budget_validation_and_multi_demand_audit_order`, `test_a_refused_reservation_records_no_reserved_event` (new) | ✅ | ✅ | ✅ |
+
+**Why #13 is not test-proven:** `reject_run` runs `_bump_pair` first, in the same transaction. `_bump_pair` already CASes the packet row on every binding, including `active_run_id` and F. So the GA-R1 guard on the later `held` CAS is defence in depth that no test can reach on its own. Code-verified only.
+
+### What the PostgreSQL run found, and the fixes
+There was **no CI run for 66076d0**: PR #3 conflicted with the force-updated `main` (PROGRESS.md), so GitHub built no merge ref. I ran PG 16 locally and got 4 failures; the SQLite suite had 1 of the same.
+1. **Real bug (75e801e, MR9):** a torn read under READ COMMITTED. `approve_run` read the run at G, a concurrent rejection committed (G+1 on both rows), then it read the packet at G+1. It took the stale path and **staled the run the user had just rejected**, releasing the packet's ownership. Now the stale disposition first retires its own confirmation with the once-only CAS, so a decided confirmation makes the approval lose. A deterministic regression test injects the torn read; it fails without the fix on both dialects.
+2. **Test bug, both dialects:** the late-result test rejected the legitimate `"duplicate"` outcome.
+3. **Test bug, PG:** the pause-first test asserted that the dispatcher finishes while the pause is uncommitted. On PG the dispatcher waits on that row lock, so the two deadlocked. The bounded hold is restored.
+4. **Test bug, PG:** `pytest.raises` sat inside `begin_nested`, so the savepoint was RELEASEd on an aborted transaction. The order is swapped.
+
+### PM observations
+- **(b) `_resume_after_budget` input_hash (Golden Rule 5): fixed (ad66ca3).** Before/after now carry the old and new hash when the context changed.
+- **(c) `budget.reserved` before success: confirmed safe, and moved anyway (39f5385).** The only caller chain is `approve_run → authorise_dispatch → reserve`, and nothing in `src/` catches `BudgetExhausted`, so every caller rolls back. The event and reservation rows are now added only after every counter UPDATE succeeds (still under `no_autoflush`, so the flush guard sees them together). A future Stage B caller that swallows the error can no longer leave an event claiming a reservation. The rollback contract stays, because it is what undoes earlier counter UPDATEs.
+- **(a) Split rejection `awaiting_confirmation → ready` deviates from D8. Recommendation: remove it** (not changed here; CFO/PM decision).
+  - D8 row 61 says "awaiting_confirmation → held — rejection (any type) · user, reason required".
+  - `ready` is a kernel readiness decision. A user moving a packet straight to `ready` skips readiness. `_approve_review` deliberately avoids exactly that (owner → `evaluating_pre`, then the kernel admits).
+  - Every other rejection (exit 3, failure budget) goes to `held`.
+  - Cost: one more owner step (release `held`). If the CFO wants no extra step, use the review pattern instead (user → `evaluating_pre`, readiness re-admits in the same transaction), not a direct user `→ ready`.
+  - Related and also not in D8: the agent added kernel `ready → awaiting_confirmation` when a split confirmation is requested. **Recommend keep.** D8 row 60 (`awaiting_confirmation → waiting_for_children`, split approval) needs the packet in `awaiting_confirmation`, and split triggers fire on `ready` packets. It is the same kind of gap-fill as P1.
+
+**Tests now:** 597 passed, 4 skipped locally on SQLite + PostgreSQL 16 (concurrency suite 5/5 repeat runs green). Ruff clean.
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+https://claude.ai/code/session_01QDiwrYT4iwN3tb9UnHYmKs
+
+
+## D. Tests changed (stat only)
+ tests/test_branching.py   |  13 ++-
+ tests/test_concurrency.py | 289 ++++++++++++++++++++++++++++++++++++++--------
+ tests/test_db_guards.py   |  54 +++++++++
+ tests/test_queue.py       |  51 +++++++-
+ tests/test_runs.py        | 160 +++++++++++++++++++++++--
+ 5 files changed, 512 insertions(+), 55 deletions(-)
+
+## E. Source diff ff489f6..c6b5e6a (generated migration omitted)
+```diff
+diff --git a/src/orchestrator/branching.py b/src/orchestrator/branching.py
+index 2f91c54..c28eb28 100644
+--- a/src/orchestrator/branching.py
++++ b/src/orchestrator/branching.py
+@@ -153,10 +153,20 @@ def split_packet(
+     provider: LLMProvider,
+     *,
+     actor: Actor = BRANCHER,
++    approval: Confirmation | None = None,
+ ) -> list[Packet]:
+     """Create the children of one split and park the trunk (idempotent per rule version)."""
+     from orchestrator.lifecycle import transition
+ 
++    if actor.is_user and (
++        approval is None
++        or approval.stage is not Stage.BRANCHING
++        or approval.entity_id != packet.id
++        or approval.entity_version != packet.version
++        or ConfirmationStatus(approval.status) is not ConfirmationStatus.APPROVED
++    ):
++        raise BranchingError("a user split needs its approved, version-bound confirmation")
++
+     existing = session.scalar(
+         select(BranchApplication).where(
+             BranchApplication.packet_id == packet.id,
+@@ -232,14 +242,12 @@ def split_packet(
+         },
+     )
+     session.flush()
+-    # The split is a kernel move (D8 ready → waiting_for_children); an owner's approval only
+-    # authorises it, and is recorded as the approval and split events above.
+     transition(
+         packet,
+         PacketStatus.WAITING_FOR_CHILDREN,
+-        actor if not actor.is_user else BRANCHER,
++        actor,
+         f"split into {len(children)} children"
+-        + (f" (approved by {actor})" if actor.is_user else ""),
++        + (f" (approved by {actor}, confirmation {approval.id})" if actor.is_user else ""),
+         session=session,
+     )
+     return children
+@@ -304,6 +312,8 @@ def apply_branch_triggers(
+ 
+ 
+ def _request_confirmation(session: Session, packet: Packet, rule: Threshold, actor: Actor) -> str:
++    from orchestrator.lifecycle import transition
++
+     pending = session.scalar(
+         select(Confirmation).where(
+             Confirmation.stage == Stage.BRANCHING,
+@@ -337,6 +347,13 @@ def _request_confirmation(session: Session, packet: Packet, rule: Threshold, act
+     )
+     session.flush()
+     note_confirmation(session, confirmation, actor=actor)
++    transition(
++        packet,
++        PacketStatus.AWAITING_CONFIRMATION,
++        BRANCHER,
++        "branch split awaits owner approval",
++        session=session,
++    )
+     return f"awaiting confirmation {confirmation.id}"
+ 
+ 
+diff --git a/src/orchestrator/budgets.py b/src/orchestrator/budgets.py
+index 9eaac13..aae185f 100644
+--- a/src/orchestrator/budgets.py
++++ b/src/orchestrator/budgets.py
+@@ -34,6 +34,11 @@ class BudgetExhausted(OrchestratorError):
+     """The reservation would exceed the limit; nothing was reserved."""
+ 
+ 
++def _require_nonnegative_integer(value: int, name: str) -> None:
++    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
++        raise ValueError(f"{name} must be a non-negative integer")
++
++
+ @dataclass(frozen=True)
+ class Demand:
+     scope_type: str
+@@ -86,39 +91,55 @@ def reserve(
+     Returns the reservation ids."""
+     t = BudgetCounter.__table__
+     ids: list[str] = []
+-    for d in sorted(demands, key=lambda x: (x.scope_type, x.scope_id, x.metric, x.period)):
+-        counter_id = _counter(session, d)
+-        result = session.execute(
+-            update(t)
+-            .where(t.c.id == counter_id, t.c.used + d.amount <= d.limit)
+-            .values(used=t.c.used + d.amount, updated_at=utcnow())
+-        )
+-        if result.rowcount != 1:
+-            raise BudgetExhausted(
+-                f"{d.scope_type}:{d.scope_id} {d.metric}/{d.period} has no capacity for "
+-                f"{d.amount} (limit {d.limit})"
++    ordered = sorted(demands, key=lambda x: (x.scope_type, x.scope_id, x.metric, x.period))
++    for demand in ordered:
++        _require_nonnegative_integer(demand.amount, "budget demand amount")
++        _require_nonnegative_integer(demand.limit, "budget demand limit")
++    reservations: list[BudgetReservation] = []
++    # GA-R5 / PM (c): the counter UPDATEs run first under no_autoflush (nothing is flushed
++    # mid-loop, so the flush guard never sees a reservation without its event); the event and
++    # the reservation rows are added together only once every demand has succeeded, so a
++    # refused reservation never leaves a "budget.reserved" event behind, even for a caller
++    # that does not roll back. (The caller must still roll back: earlier counter UPDATEs in a
++    # refused multi-demand reservation are only undone by the rollback.)
++    with session.no_autoflush:
++        for d in ordered:
++            counter_id = _counter(session, d)
++            result = session.execute(
++                update(t)
++                .where(t.c.id == counter_id, t.c.used + d.amount <= d.limit)
++                .values(used=t.c.used + d.amount, updated_at=utcnow())
++            )
++            if result.rowcount != 1:
++                raise BudgetExhausted(
++                    f"{d.scope_type}:{d.scope_id} {d.metric}/{d.period} has no capacity for "
++                    f"{d.amount} (limit {d.limit})"
++                )
++            reservations.append(
++                BudgetReservation(
++                    id=new_id(),
++                    operation_id=operation_id,
++                    counter_id=counter_id,
++                    amount=d.amount,
++                    packet_id=packet_id,
++                    generation_run_id=generation_run_id,
++                )
+             )
+-        reservation = BudgetReservation(
+-            id=new_id(),
+-            operation_id=operation_id,
+-            counter_id=counter_id,
+-            amount=d.amount,
+-            packet_id=packet_id,
+-            generation_run_id=generation_run_id,
++        record_event(
++            session,
++            actor=actor,
++            action="budget.reserved",
++            entity_type="budget_reservation",
++            entity_id=None,
++            after={
++                "operation_id": operation_id,
++                "demands": [
++                    [d.scope_type, d.scope_id, d.metric, d.period, d.amount] for d in ordered
++                ],
++            },
+         )
+-        session.add(reservation)
+-        ids.append(reservation.id)
+-    record_event(
+-        session,
+-        actor=actor,
+-        action="budget.reserved",
+-        entity_type="budget_reservation",
+-        entity_id=None,
+-        after={
+-            "operation_id": operation_id,
+-            "demands": [[d.scope_type, d.scope_id, d.metric, d.period, d.amount] for d in demands],
+-        },
+-    )
++        session.add_all(reservations)
++        ids.extend(r.id for r in reservations)
+     session.flush()
+     return ids
+ 
+@@ -126,6 +147,7 @@ def reserve(
+ def reconcile(session: Session, reservation_id: str, actual: int, *, actor: Actor) -> bool:
+     """Record actual usage once (C36). Releases ``amount - actual`` when less was used. Returns
+     False when this reservation was already reconciled (a duplicate report changes nothing)."""
++    _require_nonnegative_integer(actual, "actual budget usage")
+     if session.scalar(
+         select(BudgetReconciliation.id).where(BudgetReconciliation.reservation_id == reservation_id)
+     ):
+diff --git a/src/orchestrator/confirmations.py b/src/orchestrator/confirmations.py
+index 0746e8b..d0af883 100644
+--- a/src/orchestrator/confirmations.py
++++ b/src/orchestrator/confirmations.py
+@@ -17,8 +17,9 @@ same packet version and rule version.
+ 
+ from __future__ import annotations
+ 
+-from sqlalchemy import select
++from sqlalchemy import select, update
+ from sqlalchemy.orm import Session
++from sqlalchemy.orm.attributes import set_committed_value
+ 
+ from orchestrator.actors import Actor
+ from orchestrator.contracts import Channel, ConfirmationStatus, EvaPhase, PacketStatus, Stage
+@@ -27,6 +28,7 @@ from orchestrator.errors import NotFoundError, OrchestratorError
+ from orchestrator.events import record_event
+ from orchestrator.gates import PACKET_CONFIRMATION_TYPES, note_confirmation
+ from orchestrator.llm import LLMProvider
++from orchestrator.transitions import check_packet
+ 
+ #: the kernel's readiness decision, made inside an owner's approval transaction
+ READINESS = Actor.system("readiness")
+@@ -97,6 +99,8 @@ def _decide(
+     actor: Actor,
+     reason: str | None,
+     outcome: dict | None = None,
++    *,
++    update_gate: bool = True,
+ ) -> None:
+     decide_once(session, confirmation, status, actor, reason)
+     record_event(
+@@ -112,7 +116,8 @@ def _decide(
+         reason=reason,
+     )
+     session.flush()
+-    note_confirmation(session, confirmation, actor=actor)
++    if update_gate:
++        note_confirmation(session, confirmation, actor=actor)
+ 
+ 
+ def approve(
+@@ -138,8 +143,28 @@ def approve(
+ 
+         if not is_head(session, packet):
+             raise ConfirmationError(f"{packet.ref} v{packet.version} has been superseded")
+-    # decide first: a pending approval blocks readiness, and the effects below re-check it
+-    _decide(session, confirmation, ConfirmationStatus.APPROVED, actor, reason)
++    if confirmation.entity_type == "failure_budget":
++        if packet is None:
++            raise ConfirmationError("failure-budget confirmation has no packet")
++        if confirmation.entity_version != packet.version:
++            raise ConfirmationError(
++                f"failure-budget confirmation targets v{confirmation.entity_version}, "
++                f"but {packet.ref} is v{packet.version}"
++            )
++        if PacketStatus(packet.status) is not PacketStatus.AWAITING_CONFIRMATION:
++            raise ConfirmationError(f"{packet.ref} is no longer awaiting confirmation")
++        _decide(
++            session,
++            confirmation,
++            ConfirmationStatus.APPROVED,
++            actor,
++            reason,
++            update_gate=False,
++        )
++        outcome["status"] = _resume_after_budget(session, confirmation, packet, actor)
++    else:
++        # decide first: a pending approval blocks readiness, and effects below re-check it
++        _decide(session, confirmation, ConfirmationStatus.APPROVED, actor, reason)
+     if stage is Stage.BRANCHING and packet is not None:
+         from orchestrator.branching import split_packet
+ 
+@@ -148,7 +173,10 @@ def approve(
+         rule = session.get(Threshold, confirmation.payload["threshold_id"])
+         assert rule is not None
+         outcome["children"] = [
+-            c.ref for c in split_packet(session, packet, rule, provider, actor=actor)
++            c.ref
++            for c in split_packet(
++                session, packet, rule, provider, actor=actor, approval=confirmation
++            )
+         ]
+     elif stage is Stage.ROUTING and packet is not None:
+         from orchestrator.branching import apply_channel
+@@ -158,8 +186,6 @@ def approve(
+         outcome["channel"] = channel.value
+     elif confirmation.entity_type == "packet_review" and packet is not None:
+         outcome.update(_approve_review(session, confirmation, packet, actor, reason))
+-    elif confirmation.entity_type == "failure_budget" and packet is not None:
+-        outcome["status"] = _resume_after_budget(session, packet, actor)
+     record_event(
+         session,
+         actor=actor,
+@@ -205,34 +231,73 @@ def _approve_review(
+     return {"waived": waived, "ready": verdict.ok, "blockers": verdict.blockers}
+ 
+ 
+-def _resume_after_budget(session: Session, packet: Packet, actor: Actor) -> str:
+-    """Failure-budget approval (D8): back to ``queued`` when the context fingerprint is still
+-    current (the claim re-checks every gate), else to ``evaluating_pre`` (C25)."""
+-    from orchestrator.evaluation.evaluator import refresh_input_hash
++def _resume_after_budget(
++    session: Session, confirmation: Confirmation, packet: Packet, actor: Actor
++) -> str:
++    """Apply the confirmation, packet transition, and gate bump in one guarded write."""
+     from orchestrator.gates import current_fingerprint
+-    from orchestrator.lifecycle import transition
+ 
+-    if PacketStatus(packet.status) is not PacketStatus.AWAITING_CONFIRMATION:
+-        return PacketStatus(packet.status).value
+-    if packet.input_hash is not None and current_fingerprint(session, packet) == packet.input_hash:
+-        # approval grants a fresh budget: v_queue stops counting failures before this decision
+-        transition(
+-            packet,
+-            PacketStatus.QUEUED,
+-            actor,
+-            "retry approved after the failure budget",
+-            session=session,
+-        )
+-    else:
+-        refresh_input_hash(session, packet, READINESS)
+-        transition(
+-            packet,
+-            PacketStatus.EVALUATING_PRE,
+-            READINESS,
+-            "retry approved but the context changed: re-evaluate",
+-            session=session,
++    source = PacketStatus(packet.status)
++    if source is not PacketStatus.AWAITING_CONFIRMATION:
++        raise ConfirmationError(f"{packet.ref} is no longer awaiting confirmation")
++    current_hash = current_fingerprint(session, packet)
++    unchanged = packet.input_hash is not None and current_hash == packet.input_hash
++    target = PacketStatus.QUEUED if unchanged else PacketStatus.EVALUATING_PRE
++    transition_actor = actor if unchanged else READINESS
++    check_packet(source, target, transition_actor)
++    table = Packet.__table__
++    observed_gate = packet.gate_revision
++    observed_hash = packet.input_hash
++    values = {
++        "status": target.value,
++        "gate_revision": observed_gate + 1,
++        "updated_at": utcnow(),
++    }
++    if not unchanged:
++        values["input_hash"] = current_hash
++    result = session.connection().execute(
++        update(table)
++        .where(
++            table.c.id == packet.id,
++            table.c.version == confirmation.entity_version,
++            table.c.status == source.value,
++            table.c.locked.is_(False),
++            table.c.gate_revision == observed_gate,
+         )
+-    return PacketStatus(packet.status).value
++        .values(**values)
++    )
++    if result.rowcount != 1:
++        raise ConfirmationError(f"{packet.ref} changed while approving its failure budget")
++    for attr, value in values.items():
++        set_committed_value(packet, attr, PacketStatus(value) if attr == "status" else value)
++    reason = (
++        "retry approved after the failure budget"
++        if unchanged
++        else "retry approved but the context changed: re-evaluate"
++    )
++    record_event(
++        session,
++        actor=transition_actor,
++        action="packet.transition",
++        entity_type="packet",
++        entity_id=packet.id,
++        entity_ref=packet.ref,
++        entity_version=packet.version,
++        # Golden Rule 5: every column this write changes is in before/after (input_hash too)
++        before={
++            "status": source.value,
++            "gate_revision": observed_gate,
++            **({} if unchanged else {"input_hash": observed_hash}),
++        },
++        after={
++            "status": target.value,
++            "gate_revision": observed_gate + 1,
++            **({} if unchanged else {"input_hash": current_hash}),
++        },
++        reason=reason,
++    )
++    session.flush()
++    return target.value
+ 
+ 
+ def reject(session: Session, confirmation_id: str, *, actor: Actor, reason: str) -> None:
+@@ -240,7 +305,19 @@ def reject(session: Session, confirmation_id: str, *, actor: Actor, reason: str)
+         raise PermissionError("only a user may reject a confirmation")
+     confirmation = _find(session, confirmation_id)
+     _decide(session, confirmation, ConfirmationStatus.REJECTED, actor, reason)
+-    if confirmation.entity_type == "failure_budget":
++    if confirmation.stage is Stage.BRANCHING and confirmation.entity_type == "packet":
++        from orchestrator.lifecycle import transition
++
++        packet = session.get(Packet, confirmation.entity_id)
++        if packet is not None and PacketStatus(packet.status) is PacketStatus.AWAITING_CONFIRMATION:
++            transition(
++                packet,
++                PacketStatus.READY,
++                actor,
++                f"branch split rejected: {reason}",
++                session=session,
++            )
++    elif confirmation.entity_type == "failure_budget":
+         from orchestrator.lifecycle import transition
+ 
+         packet = session.get(Packet, confirmation.entity_id)
+diff --git a/src/orchestrator/contracts/enums.py b/src/orchestrator/contracts/enums.py
+index c393873..cd9737d 100644
+--- a/src/orchestrator/contracts/enums.py
++++ b/src/orchestrator/contracts/enums.py
+@@ -119,6 +119,7 @@ class ConfirmationStatus(StrEnum):
+     PENDING = "pending"
+     APPROVED = "approved"
+     REJECTED = "rejected"
++    RETIRED = "retired"
+ 
+ 
+ class EvaPhase(StrEnum):
+diff --git a/src/orchestrator/db/models.py b/src/orchestrator/db/models.py
+index e76319c..cb988e0 100644
+--- a/src/orchestrator/db/models.py
++++ b/src/orchestrator/db/models.py
+@@ -237,6 +237,11 @@ class Packet(Base):
+     )
+     #: M3 E7: the generation run that currently owns this packet version (NULL when none)
+     active_run_id: Mapped[str | None] = mapped_column(String(36))
++    #: A stale run was detached while a pause/hold/block prevents recovery; reconcile resumes
++    #: the packet once restrictions clear without losing the run that deferred it.
++    recovery_pending: Mapped[bool] = mapped_column(
++        Boolean, default=False, server_default=false(), nullable=False
++    )
+     created_at: Mapped[datetime] = _created()
+     updated_at: Mapped[datetime] = _updated()
+ 
+@@ -903,6 +908,7 @@ class BudgetCounter(Base):
+     __tablename__ = "budget_counters"
+     __table_args__ = (
+         UniqueConstraint("scope_type", "scope_id", "metric", "period", "period_start"),
++        CheckConstraint("used >= 0", name="used_nonnegative"),
+     )
+ 
+     id: Mapped[str] = _id()
+@@ -919,7 +925,10 @@ class BudgetReservation(Base):
+     """One reservation of capacity before an external attempt (C36). **Append-only**."""
+ 
+     __tablename__ = "budget_reservations"
+-    __table_args__ = (UniqueConstraint("operation_id", "counter_id"),)
++    __table_args__ = (
++        UniqueConstraint("operation_id", "counter_id"),
++        CheckConstraint("amount >= 0", name="amount_nonnegative"),
++    )
+ 
+     id: Mapped[str] = _id()
+     operation_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+@@ -935,6 +944,7 @@ class BudgetReconciliation(Base):
+     reservation with unknown usage has no row and keeps its reservation."""
+ 
+     __tablename__ = "budget_reconciliations"
++    __table_args__ = (CheckConstraint("actual >= 0", name="actual_nonnegative"),)
+ 
+     id: Mapped[str] = _id()
+     reservation_id: Mapped[str] = mapped_column(
+@@ -948,6 +958,7 @@ class BudgetTopup(Base):
+     """An owner-authorised budget top-up (C27 failure allowance, C36). **Append-only**."""
+ 
+     __tablename__ = "budget_topups"
++    __table_args__ = (CheckConstraint("amount >= 0", name="amount_nonnegative"),)
+ 
+     id: Mapped[str] = _id()
+     scope_type: Mapped[ScopeType] = mapped_column(enum_type(ScopeType), nullable=False)
+diff --git a/src/orchestrator/runs.py b/src/orchestrator/runs.py
+index 57468ea..55b0d13 100644
+--- a/src/orchestrator/runs.py
++++ b/src/orchestrator/runs.py
+@@ -31,10 +31,10 @@ from __future__ import annotations
+ 
+ import logging
+ from collections.abc import Sequence
+-from datetime import datetime
++from datetime import datetime, timedelta
+ from typing import Any
+ 
+-from sqlalchemy import select, update
++from sqlalchemy import func, select, update
+ from sqlalchemy.orm import Session, sessionmaker
+ from sqlalchemy.orm.attributes import set_committed_value
+ 
+@@ -183,7 +183,14 @@ def _packet_cas(
+         entity_ref=packet.ref,
+         entity_version=packet.version,
+         before={"status": source.value},
+-        after={"status": target.value, **{k: v for k, v in values.items() if k != "updated_at"}},
++        after={
++            "status": target.value,
++            **{
++                k: v.isoformat() if isinstance(v, datetime) else v
++                for k, v in values.items()
++                if k != "updated_at"
++            },
++        },
+         reason=reason,
+     )
+     session.flush()
+@@ -292,10 +299,9 @@ def packet_scopes(session: Session, packet: Packet) -> list[tuple[str, str]]:
+         objective = session.get(Objective, packet.objective_id)
+         if objective is not None:
+             scopes.append(("objective", objective.ref))
+-    if packet.root_id:
+-        root = session.get(Packet, packet.root_id)
+-        if root is not None:
+-            scopes.append(("branch", root.ref))
++    root = session.get(Packet, packet.root_id) if packet.root_id else packet
++    if root is not None:
++        scopes.append(("branch", root.ref))
+     if packet.channel:
+         scopes.append(("channel", Channel(packet.channel).value))
+     return scopes
+@@ -309,6 +315,7 @@ def stale_run(session: Session, run: GenerationRun, reason: str, *, actor: Actor
+     still ``running`` and owned by this run with this run's F, and nothing restricts it (E7);
+     otherwise its state and restrictions are kept. Terminal packets are never touched."""
+     move_run(session, run, R.STALE, actor, reason, stale_reason=reason)
++    _retire_parked_confirmations(session, run, actor, reason)
+     packet = session.get(Packet, run.packet_id)
+     if packet is None or packet.locked:
+         return
+@@ -319,8 +326,9 @@ def stale_run(session: Session, run: GenerationRun, reason: str, *, actor: Actor
+     table = Packet.__table__
+     owner = [table.c.active_run_id == run.id, table.c.fencing_token == run.fencing_token]
+     is_head = session.scalar(select(Packet.id).where(Packet.supersedes_id == packet.id)) is None
++    status = PacketStatus(packet.status)
+     if (
+-        PacketStatus(packet.status) is S.RUNNING
++        status in (S.RUNNING, S.AWAITING_CONFIRMATION)
+         and is_head
+         and _restricted(session, packet) is None
+     ):
+@@ -332,14 +340,49 @@ def stale_run(session: Session, run: GenerationRun, reason: str, *, actor: Actor
+             f"run {run.id} stale: {reason}",
+             where=owner,
+             active_run_id=None,
++            recovery_pending=False,
+             claimed_by=None,
+             lease_expires_at=None,
+         )
++    elif status in (S.RUNNING, S.AWAITING_CONFIRMATION) and is_head:
++        result = session.connection().execute(
++            update(table)
++            .where(table.c.id == packet.id, table.c.status == status.value, *owner)
++            .values(
++                recovery_pending=True,
++                claimed_by=None,
++                lease_expires_at=None,
++                heartbeat_at=None,
++                updated_at=utcnow(),
++            )
++        )
++        if result.rowcount != 1:
++            raise LostRace(f"{packet.ref}: deferred recovery lost ownership")
++        set_committed_value(packet, "recovery_pending", True)
++        set_committed_value(packet, "claimed_by", None)
++        set_committed_value(packet, "lease_expires_at", None)
++        set_committed_value(packet, "heartbeat_at", None)
++        record_event(
++            session,
++            actor=actor,
++            action="packet.recovery_deferred",
++            entity_type="packet",
++            entity_id=packet.id,
++            entity_ref=packet.ref,
++            entity_version=packet.version,
++            before={"active_run_id": run.id, "status": status.value},
++            after={"active_run_id": run.id, "status": status.value, "recovery_pending": True},
++            reason=f"run {run.id} stale: {reason}; recovery waits for restrictions to clear",
++        )
++        session.flush()
+     else:  # keep state and restrictions; only release the ownership (evented)
+         session.connection().execute(
+-            update(table).where(table.c.id == packet.id, *owner).values(active_run_id=None)
++            update(table)
++            .where(table.c.id == packet.id, *owner)
++            .values(active_run_id=None, recovery_pending=False)
+         )
+         set_committed_value(packet, "active_run_id", None)
++        set_committed_value(packet, "recovery_pending", False)
+         record_event(
+             session,
+             actor=actor,
+@@ -355,6 +398,67 @@ def stale_run(session: Session, run: GenerationRun, reason: str, *, actor: Actor
+         session.flush()
+ 
+ 
++def _retire_parked_confirmations(
++    session: Session, run: GenerationRun, actor: Actor, reason: str
++) -> None:
++    from orchestrator.confirmations import decide_once
++
++    confirmations = session.scalars(
++        select(Confirmation).where(
++            Confirmation.entity_type == "generation_run",
++            Confirmation.entity_id == run.id,
++            Confirmation.status == ConfirmationStatus.PENDING,
++        )
++    ).all()
++    for confirmation in confirmations:
++        decide_once(session, confirmation, ConfirmationStatus.RETIRED, actor, reason)
++        record_event(
++            session,
++            actor=actor,
++            action="confirmation.retired",
++            entity_type="confirmation",
++            entity_id=confirmation.id,
++            entity_ref=confirmation.entity_ref,
++            entity_version=confirmation.entity_version,
++            before={"status": ConfirmationStatus.PENDING.value},
++            after={"status": ConfirmationStatus.RETIRED.value, "run": run.id},
++            reason=f"parked run became stale: {reason}",
++        )
++    if confirmations:
++        session.flush()
++
++
++def _recover_deferred(session: Session, packet: Packet, run: GenerationRun, actor: Actor) -> bool:
++    if (
++        not packet.recovery_pending
++        or packet.locked
++        or PacketStatus(packet.status) not in (S.RUNNING, S.AWAITING_CONFIRMATION)
++        or packet.active_run_id != run.id
++        or packet.fencing_token != run.fencing_token
++        or session.scalar(select(Packet.id).where(Packet.supersedes_id == packet.id)) is not None
++        or _restricted(session, packet) is not None
++    ):
++        return False
++    _packet_cas(
++        session,
++        packet,
++        S.EVALUATING_PRE,
++        actor,
++        f"deferred recovery after stale run {run.id}",
++        where=[
++            Packet.__table__.c.active_run_id == run.id,
++            Packet.__table__.c.fencing_token == run.fencing_token,
++            Packet.__table__.c.recovery_pending.is_(True),
++        ],
++        active_run_id=None,
++        recovery_pending=False,
++        claimed_by=None,
++        lease_expires_at=None,
++        heartbeat_at=None,
++    )
++    return True
++
++
+ def reconcile_runs(session: Session, *, now: datetime | None = None) -> list[str]:
+     """Stale every active run whose bindings no longer hold (startup and every tick). A parked
+     run has no lease to expire: it waits for its owner, but any other governance change still
+@@ -370,6 +474,18 @@ def reconcile_runs(session: Session, *, now: datetime | None = None) -> list[str
+         if why is not None:
+             stale_run(session, run, why)
+             staled.append(run.id)
++    deferred = session.scalars(
++        select(GenerationRun)
++        .join(Packet, Packet.active_run_id == GenerationRun.id)
++        .where(
++            GenerationRun.state == R.STALE.value,
++            Packet.recovery_pending.is_(True),
++        )
++    ).all()
++    for run in deferred:
++        packet = session.get(Packet, run.packet_id)
++        if packet is not None:
++            _recover_deferred(session, packet, run, KERNEL)
+     return staled
+ 
+ 
+@@ -395,6 +511,7 @@ def _check_approval(
+     if (
+         approval.entity_type != "generation_run"
+         or approval.entity_id != run.id
++        or approval.entity_version != run.packet_version
+         or ConfirmationStatus(approval.status) is not ConfirmationStatus.APPROVED
+     ):
+         raise RunError(f"run {run.id}: the approval is not a decided approval of this run")
+@@ -418,6 +535,36 @@ _DISPATCH_FROM = {
+ }
+ 
+ 
++def _retry_is_eligible(
++    session: Session, run: GenerationRun, source: GenerationRunState, now: datetime
++) -> bool:
++    if source is R.DISPATCHED:
++        attempt = session.scalar(
++            select(ChannelRun)
++            .where(ChannelRun.generation_run_id == run.id)
++            .order_by(ChannelRun.attempt.desc())
++            .limit(1)
++        )
++        deadline = attempt.deadline_at if attempt is not None else run.deadline_at
++        return deadline is not None and deadline <= now
++
++    attempt = session.scalar(
++        select(ChannelRun)
++        .where(ChannelRun.generation_run_id == run.id)
++        .order_by(ChannelRun.attempt.desc())
++        .limit(1)
++    )
++    if attempt is None:
++        return False
++    outcome = session.scalar(
++        select(ChannelRunOutcome.outcome).where(ChannelRunOutcome.channel_run_id == attempt.id)
++    )
++    if outcome in (AttemptOutcome.FAILED, AttemptOutcome.INVALID, AttemptOutcome.TIMEOUT):
++        return True
++    deadline = attempt.deadline_at or run.deadline_at
++    return deadline is not None and deadline <= now
++
++
+ def authorise_dispatch(
+     session: Session,
+     run: GenerationRun,
+@@ -429,6 +576,7 @@ def authorise_dispatch(
+     contract: str = "generation@1",
+     before_scopes: Any = None,
+     approval: Confirmation | None = None,
++    _resume_lease: datetime | None = None,
+ ) -> ChannelRun:
+     """The single dispatch guard (E3). Returns the new immutable attempt row; the caller commits
+     and only then performs the effect under ``attempt.operation_id``.
+@@ -449,25 +597,40 @@ def authorise_dispatch(
+     if run.channel is None:  # fail closed: never guess a channel for an unrouted packet
+         raise RunError(f"run {run.id} has no channel (the packet was not routed)")
+     parked = source is R.AWAITING_CONFIRMATION
++    if _resume_lease is not None and not parked:
++        raise RunError(f"run {run.id}: only an approved resume can renew its lease")
+     if actor.is_user:
+         _check_approval(session, run, approval, parked=parked)
+     else:
+         _require_fence(lock, session, now)
+         if parked or approval is not None:
+             raise RunError(f"run {run.id}: a parked run resumes only through approve_run")
++    chargeable_attempts = run.attempts + (0 if parked else 1)
++    if run.max_attempts is not None and chargeable_attempts > run.max_attempts:
++        raise RunError(f"run {run.id} has used all {run.max_attempts} attempts")
+     why = binding_mismatch(session, run, now=now, lease=not parked)
+     if why is not None:
+         raise StaleRun(f"run {run.id}: {why}")
++    if source in (R.DISPATCHED, R.AWAITING_RESULT, R.VALIDATING) and not _retry_is_eligible(
++        session, run, source, now
++    ):
++        raise RunError(f"run {run.id}: the previous dispatch is not retry-eligible")
+     packet = session.get(Packet, run.packet_id)
+     assert packet is not None
+     if before_scopes is not None:
+         before_scopes()
+     guard_bindings(session, run)  # MR1: the check and the write are one statement
+     authorise_scopes(session, packet_scopes(session, packet))
+-    attempt_no = run.attempts + 1
+-    if run.max_attempts is not None and attempt_no > run.max_attempts and not parked:
+-        raise RunError(f"run {run.id} has used all {run.max_attempts} attempts")
+-    operation_id = f"{run.id}:{attempt_no}"
++    attempt_number = (
++        int(
++            session.scalar(
++                select(func.max(ChannelRun.attempt)).where(ChannelRun.generation_run_id == run.id)
++            )
++            or 0
++        )
++        + 1
++    )
++    operation_id = f"{run.id}:{attempt_number}"
+     if demands:
+         reserve(
+             session,
+@@ -484,8 +647,8 @@ def authorise_dispatch(
+         run_id=f"{prefix}{allocate(session, f'run:{prefix}'):06d}",
+         channel=channel,
+         packet_id=packet.id,
+-        attempt=attempt_no,
+-        max_attempts=run.max_attempts or attempt_no,
++        attempt=attempt_number,
++        max_attempts=run.max_attempts or attempt_number,
+         contract=contract,
+         state="authorised",
+         idempotency_key=operation_id,
+@@ -493,6 +656,7 @@ def authorise_dispatch(
+         policy_revision=str(run.gate_revision),
+         status="running",
+         started_at=now,
++        deadline_at=run.deadline_at,
+         generation_run_id=run.id,
+         operation_id=operation_id,
+         fencing_token=run.fencing_token,
+@@ -507,7 +671,10 @@ def authorise_dispatch(
+         entity_version=run.packet_version,
+         after={
+             "run": run.id,
+-            "console": f"#{attempt.run_id} [attempt {attempt_no}/{attempt.max_attempts}]",
++            "console": (
++                f"#{attempt.run_id} [dispatch {attempt_number}; "
++                f"chargeable {chargeable_attempts}/{attempt.max_attempts}]"
++            ),
+             "operation_id": operation_id,
+             "fencing_token": run.fencing_token,
+         },
+@@ -518,9 +685,10 @@ def authorise_dispatch(
+         run,
+         _DISPATCH_FROM[source],
+         actor,
+-        f"attempt {attempt_no} authorised ({operation_id})",
+-        attempts=attempt_no,
++        f"dispatch {attempt_number} authorised ({operation_id})",
++        attempts=chargeable_attempts,
+         heartbeat_at=now,
++        **({"lease_expires_at": _resume_lease} if _resume_lease is not None else {}),
+     )
+     return attempt
+ 
+@@ -733,15 +901,45 @@ def approve_run(
+     now: datetime | None = None,
+     demands: Sequence[Demand] = (),
+     reason: str | None = None,
+-) -> ChannelRun:
++) -> ChannelRun | None:
+     """Approve a parked run (R1, E3): decide the confirmation once, check ``run.G == packet.G``
+     and bump both, revalidate every binding, then resume the *same* run through the dispatch
+-    guard. Any failure raises and the caller rolls back: nothing is decided or dispatched."""
+-    from orchestrator.confirmations import decide_once
++    guard. Recoverable refusals raise so the caller rolls back and the confirmation stays pending.
++    A stale binding is committed as a stale run with a retired confirmation and returns ``None``.
++    """
++    from orchestrator.confirmations import ConfirmationError, decide_once
+ 
+     if not actor.is_user:
+         raise PermissionError("only a user may approve a parked run")
++    from orchestrator.settings_store import get_int
++
++    now = now or utcnow()
+     confirmation, run, packet = _parked(session, confirmation_id)
++    if ConfirmationStatus(confirmation.status) is not ConfirmationStatus.PENDING:
++        raise ConfirmationError(f"confirmation {confirmation.id} is already {confirmation.status}")
++    if GenerationRunState(run.state) is not R.AWAITING_CONFIRMATION:
++        raise RunError(f"run {run.id} is {GenerationRunState(run.state).value}, not parked")
++    why = binding_mismatch(session, run, now=now, lease=False)
++    if why is not None:
++        # MR9: retire *this* confirmation first, with the same once-only CAS a decision uses.
++        # If a concurrent rejection (or approval) decided it after we read it, this raises
++        # ConfirmationError and we roll back: a late approval must not stale a run that the
++        # winning decision kept parked (its G moved with the packet's, so it reads as stale).
++        decide_once(session, confirmation, ConfirmationStatus.RETIRED, KERNEL, why)
++        record_event(
++            session,
++            actor=KERNEL,
++            action="confirmation.retired",
++            entity_type="confirmation",
++            entity_id=confirmation.id,
++            entity_ref=confirmation.entity_ref,
++            entity_version=confirmation.entity_version,
++            before={"status": ConfirmationStatus.PENDING.value},
++            after={"status": ConfirmationStatus.RETIRED.value, "run": run.id},
++            reason=f"approval by {actor} found the binding stale: {why}",
++        )
++        stale_run(session, run, why, actor=KERNEL)
++        return None
+     decide_once(session, confirmation, ConfirmationStatus.APPROVED, actor, reason)
+     record_event(
+         session,
+@@ -753,12 +951,8 @@ def approve_run(
+         after={"run": run.id},
+         reason=reason,
+     )
+-    if GenerationRunState(run.state) is not R.AWAITING_CONFIRMATION:
+-        raise RunError(f"run {run.id} is {GenerationRunState(run.state).value}, not parked")
+-    why = binding_mismatch(session, run, now=now, lease=False)
+-    if why is not None:
+-        raise StaleRun(f"run {run.id}: {why}")
+     _bump_pair(session, packet, run, "parked run approved", actor)
++    lease = now + timedelta(minutes=get_int(session, "queue.lease_minutes", 30))
+     _packet_cas(
+         session,
+         packet,
+@@ -766,9 +960,17 @@ def approve_run(
+         actor,
+         reason or "parked run approved",
+         where=[Packet.__table__.c.active_run_id == run.id],
++        lease_expires_at=lease,
++        heartbeat_at=now,
+     )
+     return authorise_dispatch(
+-        session, run, actor=actor, now=now, demands=demands, approval=confirmation
++        session,
++        run,
++        actor=actor,
++        now=now,
++        demands=demands,
++        approval=confirmation,
++        _resume_lease=lease,
+     )
+ 
+ 
+@@ -794,7 +996,17 @@ def reject_run(session: Session, confirmation_id: str, *, actor: Actor, reason:
+         reason=reason,
+     )
+     _bump_pair(session, packet, run, "parked run rejected", actor)
+-    _packet_cas(session, packet, S.HELD, actor, f"parked run rejected: {reason}")
++    _packet_cas(
++        session,
++        packet,
++        S.HELD,
++        actor,
++        f"parked run rejected: {reason}",
++        where=[
++            Packet.__table__.c.active_run_id == run.id,
++            Packet.__table__.c.fencing_token == run.fencing_token,
++        ],
++    )
+ 
+ 
+ def cancel_run(session: Session, run_id: str, *, actor: Actor, reason: str) -> None:
+@@ -824,10 +1036,19 @@ def cancel_run(session: Session, run_id: str, *, actor: Actor, reason: str) -> N
+     packet = session.get(Packet, run.packet_id)
+     if packet is not None and not packet.locked and packet.active_run_id == run.id:
+         table = Packet.__table__
+-        session.connection().execute(
+-            update(table).where(table.c.id == packet.id).values(active_run_id=None)
++        result = session.connection().execute(
++            update(table)
++            .where(
++                table.c.id == packet.id,
++                table.c.active_run_id == run.id,
++                table.c.fencing_token == run.fencing_token,
++            )
++            .values(active_run_id=None, recovery_pending=False)
+         )
++        if result.rowcount != 1:
++            raise LostRace(f"{packet.ref}: cancellation lost packet ownership")
+         set_committed_value(packet, "active_run_id", None)
++        set_committed_value(packet, "recovery_pending", False)
+         record_event(
+             session,
+             actor=actor,
+diff --git a/src/orchestrator/transitions.py b/src/orchestrator/transitions.py
+index 240b96b..d49ebd1 100644
+--- a/src/orchestrator/transitions.py
++++ b/src/orchestrator/transitions.py
+@@ -87,6 +87,13 @@ _PACKET_RULES: list[Rule] = [
+     ),
+     *_p(S.EVALUATING_PRE, S.NEEDS_REVIEW, K, "evaluation", "tier-1 dispute, B12, ambiguity"),
+     *_p(S.EVALUATING_PRE, S.AWAITING_CONFIRMATION, K, "promotion/branch", "scope = confirm"),
++    *_p(
++        S.READY,
++        S.AWAITING_CONFIRMATION,
++        K,
++        "branch split confirmation",
++        "one version-bound approval",
++    ),
+     *_p(
+         [S.EVALUATING_PRE, S.READY],
+         S.WAITING_FOR_CHILDREN,
+@@ -193,6 +200,7 @@ _PACKET_RULES: list[Rule] = [
+         "R1; then the shared dispatch guard (E3); resumes the same conversation exactly once",
+     ),
+     *_p(S.AWAITING_CONFIRMATION, S.QUEUED, U, "failure-budget or 48 h approval", "H current"),
++    *_p(S.AWAITING_CONFIRMATION, S.READY, U, "branch split rejected", "decision is recorded"),
+     *_p(
+         S.AWAITING_CONFIRMATION,
+         S.EVALUATING_POST,
+@@ -309,7 +317,15 @@ RUN_TERMINAL: frozenset[GenerationRunState] = frozenset(
+ )
+ #: run states holding a live claim on their packet
+ RUN_ACTIVE: frozenset[GenerationRunState] = frozenset(
+-    {R.PLANNED, R.DISPATCHED, R.AWAITING_RESULT, R.VALIDATING, R.ACCEPTED, R.AWAITING_CONFIRMATION}
++    {
++        R.CLAIMED,
++        R.PLANNED,
++        R.DISPATCHED,
++        R.AWAITING_RESULT,
++        R.VALIDATING,
++        R.ACCEPTED,
++        R.AWAITING_CONFIRMATION,
++    }
+ )
+ 
+ 
+```
