@@ -193,6 +193,7 @@ change (DB-enforced).
 | `awaiting_confirmation` → `evaluating_pre` | kernel / user | approval but H stale (C25); candidate-promotion approval (E1) | targets the current version and context; promotion and C25 gate bump atomic; readiness recomputed; a stale approval does not apply |  |
 | `awaiting_confirmation` → `held` | kernel / user | rejection (any type); HOLD (user) or alignment hold (governor) | reason required; E2: an exit-3 rejection keeps the run parked |  |
 | `awaiting_confirmation` → `queued` | user | failure-budget or 48 h approval | H current |  |
+| `awaiting_confirmation` → `ready` | user | branch split rejected | decision is recorded |  |
 | `awaiting_confirmation` → `running` | user | exit-3 approval | R1; then the shared dispatch guard (E3); resumes the same conversation exactly once |  |
 | `awaiting_confirmation` → `waiting_for_children` | user | split approval | E10 split guard; the confirmation is validated and C25 applied |  |
 | `blocked` → `closed_unverified` | user | explicit owner close (branch kill is a BLOCK, not a close: D9-R1) | reason required; locks; in-flight runs staled |  |
@@ -242,7 +243,7 @@ change (DB-enforced).
 | `queued` → `evaluating_pre` | kernel | fingerprint or readiness changed | H ≠ current or not ready; the kernel commits (M2.1 ruling 4) |  |
 | `queued` → `held` | kernel / user | HOLD (user) or alignment hold (governor) | no active BLOCK |  |
 | `queued` → `running` | kernel | claim | E9: H recomputed, then the full readiness predicate; guarded UPDATE (status, version, H, G, lease); not paused (C26); budget reserved (C36); snapshot written and F incremented in the same transaction |  |
-| `ready` → `awaiting_confirmation` | kernel | failure budget | one confirmation | P1 |
+| `ready` → `awaiting_confirmation` | kernel | branch split confirmation; failure budget | one version-bound approval | P1 |
 | `ready` → `blocked` | user | BLOCK, incl. branch kill (D9-R1: a branch-scope BLOCK, reversible) | G bumped in scope (C35) |  |
 | `ready` → `closed_unverified` | user | explicit owner close (branch kill is a BLOCK, not a close: D9-R1) | reason required; locks; in-flight runs staled |  |
 | `ready` → `evaluating_pre` | kernel | fingerprint or readiness changed | H ≠ current or not ready; the kernel commits (M2.1 ruling 4) |  |

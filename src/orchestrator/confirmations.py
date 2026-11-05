@@ -17,8 +17,9 @@ same packet version and rule version.
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import set_committed_value
 
 from orchestrator.actors import Actor
 from orchestrator.contracts import Channel, ConfirmationStatus, EvaPhase, PacketStatus, Stage
@@ -27,6 +28,7 @@ from orchestrator.errors import NotFoundError, OrchestratorError
 from orchestrator.events import record_event
 from orchestrator.gates import PACKET_CONFIRMATION_TYPES, note_confirmation
 from orchestrator.llm import LLMProvider
+from orchestrator.transitions import check_packet
 
 #: the kernel's readiness decision, made inside an owner's approval transaction
 READINESS = Actor.system("readiness")
@@ -97,6 +99,8 @@ def _decide(
     actor: Actor,
     reason: str | None,
     outcome: dict | None = None,
+    *,
+    update_gate: bool = True,
 ) -> None:
     decide_once(session, confirmation, status, actor, reason)
     record_event(
@@ -112,7 +116,8 @@ def _decide(
         reason=reason,
     )
     session.flush()
-    note_confirmation(session, confirmation, actor=actor)
+    if update_gate:
+        note_confirmation(session, confirmation, actor=actor)
 
 
 def approve(
@@ -138,8 +143,28 @@ def approve(
 
         if not is_head(session, packet):
             raise ConfirmationError(f"{packet.ref} v{packet.version} has been superseded")
-    # decide first: a pending approval blocks readiness, and the effects below re-check it
-    _decide(session, confirmation, ConfirmationStatus.APPROVED, actor, reason)
+    if confirmation.entity_type == "failure_budget":
+        if packet is None:
+            raise ConfirmationError("failure-budget confirmation has no packet")
+        if confirmation.entity_version != packet.version:
+            raise ConfirmationError(
+                f"failure-budget confirmation targets v{confirmation.entity_version}, "
+                f"but {packet.ref} is v{packet.version}"
+            )
+        if PacketStatus(packet.status) is not PacketStatus.AWAITING_CONFIRMATION:
+            raise ConfirmationError(f"{packet.ref} is no longer awaiting confirmation")
+        _decide(
+            session,
+            confirmation,
+            ConfirmationStatus.APPROVED,
+            actor,
+            reason,
+            update_gate=False,
+        )
+        outcome["status"] = _resume_after_budget(session, confirmation, packet, actor)
+    else:
+        # decide first: a pending approval blocks readiness, and effects below re-check it
+        _decide(session, confirmation, ConfirmationStatus.APPROVED, actor, reason)
     if stage is Stage.BRANCHING and packet is not None:
         from orchestrator.branching import split_packet
 
@@ -148,7 +173,10 @@ def approve(
         rule = session.get(Threshold, confirmation.payload["threshold_id"])
         assert rule is not None
         outcome["children"] = [
-            c.ref for c in split_packet(session, packet, rule, provider, actor=actor)
+            c.ref
+            for c in split_packet(
+                session, packet, rule, provider, actor=actor, approval=confirmation
+            )
         ]
     elif stage is Stage.ROUTING and packet is not None:
         from orchestrator.branching import apply_channel
@@ -158,8 +186,6 @@ def approve(
         outcome["channel"] = channel.value
     elif confirmation.entity_type == "packet_review" and packet is not None:
         outcome.update(_approve_review(session, confirmation, packet, actor, reason))
-    elif confirmation.entity_type == "failure_budget" and packet is not None:
-        outcome["status"] = _resume_after_budget(session, packet, actor)
     record_event(
         session,
         actor=actor,
@@ -205,34 +231,63 @@ def _approve_review(
     return {"waived": waived, "ready": verdict.ok, "blockers": verdict.blockers}
 
 
-def _resume_after_budget(session: Session, packet: Packet, actor: Actor) -> str:
-    """Failure-budget approval (D8): back to ``queued`` when the context fingerprint is still
-    current (the claim re-checks every gate), else to ``evaluating_pre`` (C25)."""
-    from orchestrator.evaluation.evaluator import refresh_input_hash
+def _resume_after_budget(
+    session: Session, confirmation: Confirmation, packet: Packet, actor: Actor
+) -> str:
+    """Apply the confirmation, packet transition, and gate bump in one guarded write."""
     from orchestrator.gates import current_fingerprint
-    from orchestrator.lifecycle import transition
 
-    if PacketStatus(packet.status) is not PacketStatus.AWAITING_CONFIRMATION:
-        return PacketStatus(packet.status).value
-    if packet.input_hash is not None and current_fingerprint(session, packet) == packet.input_hash:
-        # approval grants a fresh budget: v_queue stops counting failures before this decision
-        transition(
-            packet,
-            PacketStatus.QUEUED,
-            actor,
-            "retry approved after the failure budget",
-            session=session,
+    source = PacketStatus(packet.status)
+    if source is not PacketStatus.AWAITING_CONFIRMATION:
+        raise ConfirmationError(f"{packet.ref} is no longer awaiting confirmation")
+    current_hash = current_fingerprint(session, packet)
+    unchanged = packet.input_hash is not None and current_hash == packet.input_hash
+    target = PacketStatus.QUEUED if unchanged else PacketStatus.EVALUATING_PRE
+    transition_actor = actor if unchanged else READINESS
+    check_packet(source, target, transition_actor)
+    table = Packet.__table__
+    observed_gate = packet.gate_revision
+    values = {
+        "status": target.value,
+        "gate_revision": observed_gate + 1,
+        "updated_at": utcnow(),
+    }
+    if not unchanged:
+        values["input_hash"] = current_hash
+    result = session.connection().execute(
+        update(table)
+        .where(
+            table.c.id == packet.id,
+            table.c.version == confirmation.entity_version,
+            table.c.status == source.value,
+            table.c.locked.is_(False),
+            table.c.gate_revision == observed_gate,
         )
-    else:
-        refresh_input_hash(session, packet, READINESS)
-        transition(
-            packet,
-            PacketStatus.EVALUATING_PRE,
-            READINESS,
-            "retry approved but the context changed: re-evaluate",
-            session=session,
-        )
-    return PacketStatus(packet.status).value
+        .values(**values)
+    )
+    if result.rowcount != 1:
+        raise ConfirmationError(f"{packet.ref} changed while approving its failure budget")
+    for attr, value in values.items():
+        set_committed_value(packet, attr, PacketStatus(value) if attr == "status" else value)
+    reason = (
+        "retry approved after the failure budget"
+        if unchanged
+        else "retry approved but the context changed: re-evaluate"
+    )
+    record_event(
+        session,
+        actor=transition_actor,
+        action="packet.transition",
+        entity_type="packet",
+        entity_id=packet.id,
+        entity_ref=packet.ref,
+        entity_version=packet.version,
+        before={"status": source.value, "gate_revision": observed_gate},
+        after={"status": target.value, "gate_revision": observed_gate + 1},
+        reason=reason,
+    )
+    session.flush()
+    return target.value
 
 
 def reject(session: Session, confirmation_id: str, *, actor: Actor, reason: str) -> None:
@@ -240,7 +295,19 @@ def reject(session: Session, confirmation_id: str, *, actor: Actor, reason: str)
         raise PermissionError("only a user may reject a confirmation")
     confirmation = _find(session, confirmation_id)
     _decide(session, confirmation, ConfirmationStatus.REJECTED, actor, reason)
-    if confirmation.entity_type == "failure_budget":
+    if confirmation.stage is Stage.BRANCHING and confirmation.entity_type == "packet":
+        from orchestrator.lifecycle import transition
+
+        packet = session.get(Packet, confirmation.entity_id)
+        if packet is not None and PacketStatus(packet.status) is PacketStatus.AWAITING_CONFIRMATION:
+            transition(
+                packet,
+                PacketStatus.READY,
+                actor,
+                f"branch split rejected: {reason}",
+                session=session,
+            )
+    elif confirmation.entity_type == "failure_budget":
         from orchestrator.lifecycle import transition
 
         packet = session.get(Packet, confirmation.entity_id)

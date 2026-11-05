@@ -237,6 +237,11 @@ class Packet(Base):
     )
     #: M3 E7: the generation run that currently owns this packet version (NULL when none)
     active_run_id: Mapped[str | None] = mapped_column(String(36))
+    #: A stale run was detached while a pause/hold/block prevents recovery; reconcile resumes
+    #: the packet once restrictions clear without losing the run that deferred it.
+    recovery_pending: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false(), nullable=False
+    )
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = _updated()
 
@@ -903,6 +908,7 @@ class BudgetCounter(Base):
     __tablename__ = "budget_counters"
     __table_args__ = (
         UniqueConstraint("scope_type", "scope_id", "metric", "period", "period_start"),
+        CheckConstraint("used >= 0", name="used_nonnegative"),
     )
 
     id: Mapped[str] = _id()
@@ -919,7 +925,10 @@ class BudgetReservation(Base):
     """One reservation of capacity before an external attempt (C36). **Append-only**."""
 
     __tablename__ = "budget_reservations"
-    __table_args__ = (UniqueConstraint("operation_id", "counter_id"),)
+    __table_args__ = (
+        UniqueConstraint("operation_id", "counter_id"),
+        CheckConstraint("amount >= 0", name="amount_nonnegative"),
+    )
 
     id: Mapped[str] = _id()
     operation_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
@@ -935,6 +944,7 @@ class BudgetReconciliation(Base):
     reservation with unknown usage has no row and keeps its reservation."""
 
     __tablename__ = "budget_reconciliations"
+    __table_args__ = (CheckConstraint("actual >= 0", name="actual_nonnegative"),)
 
     id: Mapped[str] = _id()
     reservation_id: Mapped[str] = mapped_column(
@@ -948,6 +958,7 @@ class BudgetTopup(Base):
     """An owner-authorised budget top-up (C27 failure allowance, C36). **Append-only**."""
 
     __tablename__ = "budget_topups"
+    __table_args__ = (CheckConstraint("amount >= 0", name="amount_nonnegative"),)
 
     id: Mapped[str] = _id()
     scope_type: Mapped[ScopeType] = mapped_column(enum_type(ScopeType), nullable=False)

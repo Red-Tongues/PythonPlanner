@@ -12,6 +12,7 @@ import itertools
 import pytest
 from alembic import command
 from sqlalchemy import Connection, Engine, text
+from sqlalchemy.exc import IntegrityError
 
 from orchestrator.contracts import GenerationRunState, PacketStatus
 from orchestrator.db import init_db, make_engine
@@ -43,6 +44,59 @@ def test_the_run_attempts_view_is_installed_and_answers(engine: Engine) -> None:
     assert set(RUN_VIEWS) <= set(baseline().VIEWS)
     with engine.connect() as c:
         assert c.execute(text("SELECT COUNT(*) FROM v_run_attempts")).scalar() == 0
+
+
+def test_budget_tables_reject_negative_values(engine: Engine) -> None:
+    with engine.begin() as c:
+        c.execute(
+            text(
+                "INSERT INTO budget_counters (id, scope_type, scope_id, metric, period,"
+                " period_start, used, updated_at) VALUES ('b1', 'channel', 'c', 'runs',"
+                " 'hour', :t, 0, :t)"
+            ),
+            {"t": NOW},
+        )
+        c.execute(
+            text(
+                "INSERT INTO budget_reservations (id, operation_id, counter_id, amount,"
+                " created_at) VALUES ('r1', 'op', 'b1', 1, :t)"
+            ),
+            {"t": NOW},
+        )
+        c.execute(
+            text(
+                "INSERT INTO budget_reconciliations (id, reservation_id, actual, created_at)"
+                " VALUES ('a1', 'r1', 0, :t)"
+            ),
+            {"t": NOW},
+        )
+        invalid_rows = [
+            (
+                "INSERT INTO budget_counters (id, scope_type, scope_id, metric, period,"
+                " period_start, used, updated_at) VALUES ('b2', 'channel', 'c', 'runs',"
+                " 'hour', :t, -1, :t)",
+                {"t": NOW},
+            ),
+            (
+                "INSERT INTO budget_reservations (id, operation_id, counter_id, amount,"
+                " created_at) VALUES ('r2', 'op-2', 'b1', -1, :t)",
+                {"t": NOW},
+            ),
+            (
+                "INSERT INTO budget_reconciliations (id, reservation_id, actual, created_at)"
+                " VALUES ('a2', 'r1', -1, :t)",
+                {"t": NOW},
+            ),
+            (
+                "INSERT INTO budget_topups (id, scope_type, scope_id, metric, amount, actor,"
+                " reason, created_at) VALUES ('t2', 'objective', 'o', 'tokens', -1, 'user:x',"
+                " 'r', :t)",
+                {"t": NOW},
+            ),
+        ]
+        for statement, values in invalid_rows:
+            with c.begin_nested(), pytest.raises(IntegrityError):
+                c.execute(text(statement), values)
 
 
 # --------------------------------------------------------------------------- raw helpers

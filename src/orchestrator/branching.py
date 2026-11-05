@@ -153,9 +153,19 @@ def split_packet(
     provider: LLMProvider,
     *,
     actor: Actor = BRANCHER,
+    approval: Confirmation | None = None,
 ) -> list[Packet]:
     """Create the children of one split and park the trunk (idempotent per rule version)."""
     from orchestrator.lifecycle import transition
+
+    if actor.is_user and (
+        approval is None
+        or approval.stage is not Stage.BRANCHING
+        or approval.entity_id != packet.id
+        or approval.entity_version != packet.version
+        or ConfirmationStatus(approval.status) is not ConfirmationStatus.APPROVED
+    ):
+        raise BranchingError("a user split needs its approved, version-bound confirmation")
 
     existing = session.scalar(
         select(BranchApplication).where(
@@ -232,14 +242,12 @@ def split_packet(
         },
     )
     session.flush()
-    # The split is a kernel move (D8 ready → waiting_for_children); an owner's approval only
-    # authorises it, and is recorded as the approval and split events above.
     transition(
         packet,
         PacketStatus.WAITING_FOR_CHILDREN,
-        actor if not actor.is_user else BRANCHER,
+        actor,
         f"split into {len(children)} children"
-        + (f" (approved by {actor})" if actor.is_user else ""),
+        + (f" (approved by {actor}, confirmation {approval.id})" if actor.is_user else ""),
         session=session,
     )
     return children
@@ -304,6 +312,8 @@ def apply_branch_triggers(
 
 
 def _request_confirmation(session: Session, packet: Packet, rule: Threshold, actor: Actor) -> str:
+    from orchestrator.lifecycle import transition
+
     pending = session.scalar(
         select(Confirmation).where(
             Confirmation.stage == Stage.BRANCHING,
@@ -337,6 +347,13 @@ def _request_confirmation(session: Session, packet: Packet, rule: Threshold, act
     )
     session.flush()
     note_confirmation(session, confirmation, actor=actor)
+    transition(
+        packet,
+        PacketStatus.AWAITING_CONFIRMATION,
+        BRANCHER,
+        "branch split awaits owner approval",
+        session=session,
+    )
     return f"awaiting confirmation {confirmation.id}"
 
 

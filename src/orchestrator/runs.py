@@ -31,10 +31,10 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.orm.attributes import set_committed_value
 
@@ -183,7 +183,14 @@ def _packet_cas(
         entity_ref=packet.ref,
         entity_version=packet.version,
         before={"status": source.value},
-        after={"status": target.value, **{k: v for k, v in values.items() if k != "updated_at"}},
+        after={
+            "status": target.value,
+            **{
+                k: v.isoformat() if isinstance(v, datetime) else v
+                for k, v in values.items()
+                if k != "updated_at"
+            },
+        },
         reason=reason,
     )
     session.flush()
@@ -292,10 +299,9 @@ def packet_scopes(session: Session, packet: Packet) -> list[tuple[str, str]]:
         objective = session.get(Objective, packet.objective_id)
         if objective is not None:
             scopes.append(("objective", objective.ref))
-    if packet.root_id:
-        root = session.get(Packet, packet.root_id)
-        if root is not None:
-            scopes.append(("branch", root.ref))
+    root = session.get(Packet, packet.root_id) if packet.root_id else packet
+    if root is not None:
+        scopes.append(("branch", root.ref))
     if packet.channel:
         scopes.append(("channel", Channel(packet.channel).value))
     return scopes
@@ -309,6 +315,7 @@ def stale_run(session: Session, run: GenerationRun, reason: str, *, actor: Actor
     still ``running`` and owned by this run with this run's F, and nothing restricts it (E7);
     otherwise its state and restrictions are kept. Terminal packets are never touched."""
     move_run(session, run, R.STALE, actor, reason, stale_reason=reason)
+    _retire_parked_confirmations(session, run, actor, reason)
     packet = session.get(Packet, run.packet_id)
     if packet is None or packet.locked:
         return
@@ -319,8 +326,9 @@ def stale_run(session: Session, run: GenerationRun, reason: str, *, actor: Actor
     table = Packet.__table__
     owner = [table.c.active_run_id == run.id, table.c.fencing_token == run.fencing_token]
     is_head = session.scalar(select(Packet.id).where(Packet.supersedes_id == packet.id)) is None
+    status = PacketStatus(packet.status)
     if (
-        PacketStatus(packet.status) is S.RUNNING
+        status in (S.RUNNING, S.AWAITING_CONFIRMATION)
         and is_head
         and _restricted(session, packet) is None
     ):
@@ -332,14 +340,49 @@ def stale_run(session: Session, run: GenerationRun, reason: str, *, actor: Actor
             f"run {run.id} stale: {reason}",
             where=owner,
             active_run_id=None,
+            recovery_pending=False,
             claimed_by=None,
             lease_expires_at=None,
         )
+    elif status in (S.RUNNING, S.AWAITING_CONFIRMATION) and is_head:
+        result = session.connection().execute(
+            update(table)
+            .where(table.c.id == packet.id, table.c.status == status.value, *owner)
+            .values(
+                recovery_pending=True,
+                claimed_by=None,
+                lease_expires_at=None,
+                heartbeat_at=None,
+                updated_at=utcnow(),
+            )
+        )
+        if result.rowcount != 1:
+            raise LostRace(f"{packet.ref}: deferred recovery lost ownership")
+        set_committed_value(packet, "recovery_pending", True)
+        set_committed_value(packet, "claimed_by", None)
+        set_committed_value(packet, "lease_expires_at", None)
+        set_committed_value(packet, "heartbeat_at", None)
+        record_event(
+            session,
+            actor=actor,
+            action="packet.recovery_deferred",
+            entity_type="packet",
+            entity_id=packet.id,
+            entity_ref=packet.ref,
+            entity_version=packet.version,
+            before={"active_run_id": run.id, "status": status.value},
+            after={"active_run_id": run.id, "status": status.value, "recovery_pending": True},
+            reason=f"run {run.id} stale: {reason}; recovery waits for restrictions to clear",
+        )
+        session.flush()
     else:  # keep state and restrictions; only release the ownership (evented)
         session.connection().execute(
-            update(table).where(table.c.id == packet.id, *owner).values(active_run_id=None)
+            update(table)
+            .where(table.c.id == packet.id, *owner)
+            .values(active_run_id=None, recovery_pending=False)
         )
         set_committed_value(packet, "active_run_id", None)
+        set_committed_value(packet, "recovery_pending", False)
         record_event(
             session,
             actor=actor,
@@ -353,6 +396,67 @@ def stale_run(session: Session, run: GenerationRun, reason: str, *, actor: Actor
             reason=f"run {run.id} stale: {reason}; packet state kept",
         )
         session.flush()
+
+
+def _retire_parked_confirmations(
+    session: Session, run: GenerationRun, actor: Actor, reason: str
+) -> None:
+    from orchestrator.confirmations import decide_once
+
+    confirmations = session.scalars(
+        select(Confirmation).where(
+            Confirmation.entity_type == "generation_run",
+            Confirmation.entity_id == run.id,
+            Confirmation.status == ConfirmationStatus.PENDING,
+        )
+    ).all()
+    for confirmation in confirmations:
+        decide_once(session, confirmation, ConfirmationStatus.RETIRED, actor, reason)
+        record_event(
+            session,
+            actor=actor,
+            action="confirmation.retired",
+            entity_type="confirmation",
+            entity_id=confirmation.id,
+            entity_ref=confirmation.entity_ref,
+            entity_version=confirmation.entity_version,
+            before={"status": ConfirmationStatus.PENDING.value},
+            after={"status": ConfirmationStatus.RETIRED.value, "run": run.id},
+            reason=f"parked run became stale: {reason}",
+        )
+    if confirmations:
+        session.flush()
+
+
+def _recover_deferred(session: Session, packet: Packet, run: GenerationRun, actor: Actor) -> bool:
+    if (
+        not packet.recovery_pending
+        or packet.locked
+        or PacketStatus(packet.status) not in (S.RUNNING, S.AWAITING_CONFIRMATION)
+        or packet.active_run_id != run.id
+        or packet.fencing_token != run.fencing_token
+        or session.scalar(select(Packet.id).where(Packet.supersedes_id == packet.id)) is not None
+        or _restricted(session, packet) is not None
+    ):
+        return False
+    _packet_cas(
+        session,
+        packet,
+        S.EVALUATING_PRE,
+        actor,
+        f"deferred recovery after stale run {run.id}",
+        where=[
+            Packet.__table__.c.active_run_id == run.id,
+            Packet.__table__.c.fencing_token == run.fencing_token,
+            Packet.__table__.c.recovery_pending.is_(True),
+        ],
+        active_run_id=None,
+        recovery_pending=False,
+        claimed_by=None,
+        lease_expires_at=None,
+        heartbeat_at=None,
+    )
+    return True
 
 
 def reconcile_runs(session: Session, *, now: datetime | None = None) -> list[str]:
@@ -370,6 +474,18 @@ def reconcile_runs(session: Session, *, now: datetime | None = None) -> list[str
         if why is not None:
             stale_run(session, run, why)
             staled.append(run.id)
+    deferred = session.scalars(
+        select(GenerationRun)
+        .join(Packet, Packet.active_run_id == GenerationRun.id)
+        .where(
+            GenerationRun.state == R.STALE.value,
+            Packet.recovery_pending.is_(True),
+        )
+    ).all()
+    for run in deferred:
+        packet = session.get(Packet, run.packet_id)
+        if packet is not None:
+            _recover_deferred(session, packet, run, KERNEL)
     return staled
 
 
@@ -395,6 +511,7 @@ def _check_approval(
     if (
         approval.entity_type != "generation_run"
         or approval.entity_id != run.id
+        or approval.entity_version != run.packet_version
         or ConfirmationStatus(approval.status) is not ConfirmationStatus.APPROVED
     ):
         raise RunError(f"run {run.id}: the approval is not a decided approval of this run")
@@ -418,6 +535,36 @@ _DISPATCH_FROM = {
 }
 
 
+def _retry_is_eligible(
+    session: Session, run: GenerationRun, source: GenerationRunState, now: datetime
+) -> bool:
+    if source is R.DISPATCHED:
+        attempt = session.scalar(
+            select(ChannelRun)
+            .where(ChannelRun.generation_run_id == run.id)
+            .order_by(ChannelRun.attempt.desc())
+            .limit(1)
+        )
+        deadline = attempt.deadline_at if attempt is not None else run.deadline_at
+        return deadline is not None and deadline <= now
+
+    attempt = session.scalar(
+        select(ChannelRun)
+        .where(ChannelRun.generation_run_id == run.id)
+        .order_by(ChannelRun.attempt.desc())
+        .limit(1)
+    )
+    if attempt is None:
+        return False
+    outcome = session.scalar(
+        select(ChannelRunOutcome.outcome).where(ChannelRunOutcome.channel_run_id == attempt.id)
+    )
+    if outcome in (AttemptOutcome.FAILED, AttemptOutcome.INVALID, AttemptOutcome.TIMEOUT):
+        return True
+    deadline = attempt.deadline_at or run.deadline_at
+    return deadline is not None and deadline <= now
+
+
 def authorise_dispatch(
     session: Session,
     run: GenerationRun,
@@ -429,6 +576,7 @@ def authorise_dispatch(
     contract: str = "generation@1",
     before_scopes: Any = None,
     approval: Confirmation | None = None,
+    _resume_lease: datetime | None = None,
 ) -> ChannelRun:
     """The single dispatch guard (E3). Returns the new immutable attempt row; the caller commits
     and only then performs the effect under ``attempt.operation_id``.
@@ -449,25 +597,40 @@ def authorise_dispatch(
     if run.channel is None:  # fail closed: never guess a channel for an unrouted packet
         raise RunError(f"run {run.id} has no channel (the packet was not routed)")
     parked = source is R.AWAITING_CONFIRMATION
+    if _resume_lease is not None and not parked:
+        raise RunError(f"run {run.id}: only an approved resume can renew its lease")
     if actor.is_user:
         _check_approval(session, run, approval, parked=parked)
     else:
         _require_fence(lock, session, now)
         if parked or approval is not None:
             raise RunError(f"run {run.id}: a parked run resumes only through approve_run")
+    chargeable_attempts = run.attempts + (0 if parked else 1)
+    if run.max_attempts is not None and chargeable_attempts > run.max_attempts:
+        raise RunError(f"run {run.id} has used all {run.max_attempts} attempts")
     why = binding_mismatch(session, run, now=now, lease=not parked)
     if why is not None:
         raise StaleRun(f"run {run.id}: {why}")
+    if source in (R.DISPATCHED, R.AWAITING_RESULT, R.VALIDATING) and not _retry_is_eligible(
+        session, run, source, now
+    ):
+        raise RunError(f"run {run.id}: the previous dispatch is not retry-eligible")
     packet = session.get(Packet, run.packet_id)
     assert packet is not None
     if before_scopes is not None:
         before_scopes()
     guard_bindings(session, run)  # MR1: the check and the write are one statement
     authorise_scopes(session, packet_scopes(session, packet))
-    attempt_no = run.attempts + 1
-    if run.max_attempts is not None and attempt_no > run.max_attempts and not parked:
-        raise RunError(f"run {run.id} has used all {run.max_attempts} attempts")
-    operation_id = f"{run.id}:{attempt_no}"
+    attempt_number = (
+        int(
+            session.scalar(
+                select(func.max(ChannelRun.attempt)).where(ChannelRun.generation_run_id == run.id)
+            )
+            or 0
+        )
+        + 1
+    )
+    operation_id = f"{run.id}:{attempt_number}"
     if demands:
         reserve(
             session,
@@ -484,8 +647,8 @@ def authorise_dispatch(
         run_id=f"{prefix}{allocate(session, f'run:{prefix}'):06d}",
         channel=channel,
         packet_id=packet.id,
-        attempt=attempt_no,
-        max_attempts=run.max_attempts or attempt_no,
+        attempt=attempt_number,
+        max_attempts=run.max_attempts or attempt_number,
         contract=contract,
         state="authorised",
         idempotency_key=operation_id,
@@ -493,6 +656,7 @@ def authorise_dispatch(
         policy_revision=str(run.gate_revision),
         status="running",
         started_at=now,
+        deadline_at=run.deadline_at,
         generation_run_id=run.id,
         operation_id=operation_id,
         fencing_token=run.fencing_token,
@@ -507,7 +671,10 @@ def authorise_dispatch(
         entity_version=run.packet_version,
         after={
             "run": run.id,
-            "console": f"#{attempt.run_id} [attempt {attempt_no}/{attempt.max_attempts}]",
+            "console": (
+                f"#{attempt.run_id} [dispatch {attempt_number}; "
+                f"chargeable {chargeable_attempts}/{attempt.max_attempts}]"
+            ),
             "operation_id": operation_id,
             "fencing_token": run.fencing_token,
         },
@@ -518,9 +685,10 @@ def authorise_dispatch(
         run,
         _DISPATCH_FROM[source],
         actor,
-        f"attempt {attempt_no} authorised ({operation_id})",
-        attempts=attempt_no,
+        f"dispatch {attempt_number} authorised ({operation_id})",
+        attempts=chargeable_attempts,
         heartbeat_at=now,
+        **({"lease_expires_at": _resume_lease} if _resume_lease is not None else {}),
     )
     return attempt
 
@@ -733,15 +901,28 @@ def approve_run(
     now: datetime | None = None,
     demands: Sequence[Demand] = (),
     reason: str | None = None,
-) -> ChannelRun:
+) -> ChannelRun | None:
     """Approve a parked run (R1, E3): decide the confirmation once, check ``run.G == packet.G``
     and bump both, revalidate every binding, then resume the *same* run through the dispatch
-    guard. Any failure raises and the caller rolls back: nothing is decided or dispatched."""
-    from orchestrator.confirmations import decide_once
+    guard. Recoverable refusals raise so the caller rolls back and the confirmation stays pending.
+    A stale binding is committed as a stale run with a retired confirmation and returns ``None``.
+    """
+    from orchestrator.confirmations import ConfirmationError, decide_once
 
     if not actor.is_user:
         raise PermissionError("only a user may approve a parked run")
+    from orchestrator.settings_store import get_int
+
+    now = now or utcnow()
     confirmation, run, packet = _parked(session, confirmation_id)
+    if ConfirmationStatus(confirmation.status) is not ConfirmationStatus.PENDING:
+        raise ConfirmationError(f"confirmation {confirmation.id} is already {confirmation.status}")
+    if GenerationRunState(run.state) is not R.AWAITING_CONFIRMATION:
+        raise RunError(f"run {run.id} is {GenerationRunState(run.state).value}, not parked")
+    why = binding_mismatch(session, run, now=now, lease=False)
+    if why is not None:
+        stale_run(session, run, why, actor=KERNEL)
+        return None
     decide_once(session, confirmation, ConfirmationStatus.APPROVED, actor, reason)
     record_event(
         session,
@@ -753,12 +934,8 @@ def approve_run(
         after={"run": run.id},
         reason=reason,
     )
-    if GenerationRunState(run.state) is not R.AWAITING_CONFIRMATION:
-        raise RunError(f"run {run.id} is {GenerationRunState(run.state).value}, not parked")
-    why = binding_mismatch(session, run, now=now, lease=False)
-    if why is not None:
-        raise StaleRun(f"run {run.id}: {why}")
     _bump_pair(session, packet, run, "parked run approved", actor)
+    lease = now + timedelta(minutes=get_int(session, "queue.lease_minutes", 30))
     _packet_cas(
         session,
         packet,
@@ -766,9 +943,17 @@ def approve_run(
         actor,
         reason or "parked run approved",
         where=[Packet.__table__.c.active_run_id == run.id],
+        lease_expires_at=lease,
+        heartbeat_at=now,
     )
     return authorise_dispatch(
-        session, run, actor=actor, now=now, demands=demands, approval=confirmation
+        session,
+        run,
+        actor=actor,
+        now=now,
+        demands=demands,
+        approval=confirmation,
+        _resume_lease=lease,
     )
 
 
@@ -794,7 +979,17 @@ def reject_run(session: Session, confirmation_id: str, *, actor: Actor, reason: 
         reason=reason,
     )
     _bump_pair(session, packet, run, "parked run rejected", actor)
-    _packet_cas(session, packet, S.HELD, actor, f"parked run rejected: {reason}")
+    _packet_cas(
+        session,
+        packet,
+        S.HELD,
+        actor,
+        f"parked run rejected: {reason}",
+        where=[
+            Packet.__table__.c.active_run_id == run.id,
+            Packet.__table__.c.fencing_token == run.fencing_token,
+        ],
+    )
 
 
 def cancel_run(session: Session, run_id: str, *, actor: Actor, reason: str) -> None:
@@ -824,10 +1019,19 @@ def cancel_run(session: Session, run_id: str, *, actor: Actor, reason: str) -> N
     packet = session.get(Packet, run.packet_id)
     if packet is not None and not packet.locked and packet.active_run_id == run.id:
         table = Packet.__table__
-        session.connection().execute(
-            update(table).where(table.c.id == packet.id).values(active_run_id=None)
+        result = session.connection().execute(
+            update(table)
+            .where(
+                table.c.id == packet.id,
+                table.c.active_run_id == run.id,
+                table.c.fencing_token == run.fencing_token,
+            )
+            .values(active_run_id=None, recovery_pending=False)
         )
+        if result.rowcount != 1:
+            raise LostRace(f"{packet.ref}: cancellation lost packet ownership")
         set_committed_value(packet, "active_run_id", None)
+        set_committed_value(packet, "recovery_pending", False)
         record_event(
             session,
             actor=actor,

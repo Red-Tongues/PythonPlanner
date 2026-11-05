@@ -34,6 +34,11 @@ class BudgetExhausted(OrchestratorError):
     """The reservation would exceed the limit; nothing was reserved."""
 
 
+def _require_nonnegative_integer(value: int, name: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{name} must be a non-negative integer")
+
+
 @dataclass(frozen=True)
 class Demand:
     scope_type: str
@@ -86,39 +91,46 @@ def reserve(
     Returns the reservation ids."""
     t = BudgetCounter.__table__
     ids: list[str] = []
-    for d in sorted(demands, key=lambda x: (x.scope_type, x.scope_id, x.metric, x.period)):
-        counter_id = _counter(session, d)
-        result = session.execute(
-            update(t)
-            .where(t.c.id == counter_id, t.c.used + d.amount <= d.limit)
-            .values(used=t.c.used + d.amount, updated_at=utcnow())
+    ordered = sorted(demands, key=lambda x: (x.scope_type, x.scope_id, x.metric, x.period))
+    for demand in ordered:
+        _require_nonnegative_integer(demand.amount, "budget demand amount")
+        _require_nonnegative_integer(demand.limit, "budget demand limit")
+    with session.no_autoflush:
+        record_event(
+            session,
+            actor=actor,
+            action="budget.reserved",
+            entity_type="budget_reservation",
+            entity_id=None,
+            after={
+                "operation_id": operation_id,
+                "demands": [
+                    [d.scope_type, d.scope_id, d.metric, d.period, d.amount] for d in ordered
+                ],
+            },
         )
-        if result.rowcount != 1:
-            raise BudgetExhausted(
-                f"{d.scope_type}:{d.scope_id} {d.metric}/{d.period} has no capacity for "
-                f"{d.amount} (limit {d.limit})"
+        for d in ordered:
+            counter_id = _counter(session, d)
+            result = session.execute(
+                update(t)
+                .where(t.c.id == counter_id, t.c.used + d.amount <= d.limit)
+                .values(used=t.c.used + d.amount, updated_at=utcnow())
             )
-        reservation = BudgetReservation(
-            id=new_id(),
-            operation_id=operation_id,
-            counter_id=counter_id,
-            amount=d.amount,
-            packet_id=packet_id,
-            generation_run_id=generation_run_id,
-        )
-        session.add(reservation)
-        ids.append(reservation.id)
-    record_event(
-        session,
-        actor=actor,
-        action="budget.reserved",
-        entity_type="budget_reservation",
-        entity_id=None,
-        after={
-            "operation_id": operation_id,
-            "demands": [[d.scope_type, d.scope_id, d.metric, d.period, d.amount] for d in demands],
-        },
-    )
+            if result.rowcount != 1:
+                raise BudgetExhausted(
+                    f"{d.scope_type}:{d.scope_id} {d.metric}/{d.period} has no capacity for "
+                    f"{d.amount} (limit {d.limit})"
+                )
+            reservation = BudgetReservation(
+                id=new_id(),
+                operation_id=operation_id,
+                counter_id=counter_id,
+                amount=d.amount,
+                packet_id=packet_id,
+                generation_run_id=generation_run_id,
+            )
+            session.add(reservation)
+            ids.append(reservation.id)
     session.flush()
     return ids
 
@@ -126,6 +138,7 @@ def reserve(
 def reconcile(session: Session, reservation_id: str, actual: int, *, actor: Actor) -> bool:
     """Record actual usage once (C36). Releases ``amount - actual`` when less was used. Returns
     False when this reservation was already reconciled (a duplicate report changes nothing)."""
+    _require_nonnegative_integer(actual, "actual budget usage")
     if session.scalar(
         select(BudgetReconciliation.id).where(BudgetReconciliation.reservation_id == reservation_id)
     ):

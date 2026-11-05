@@ -9,9 +9,10 @@ import pytest
 from sqlalchemy import Engine, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
-from orchestrator.confirmations import approve, reject
+from orchestrator.confirmations import ConfirmationError, approve, reject
 from orchestrator.contracts import (
     Channel,
+    ConfirmationStatus,
     OverrideKind,
     PacketStatus,
     ProjectTree,
@@ -229,6 +230,7 @@ def test_exhausted_budget_awaits_confirmation_then_approve(session: Session) -> 
     fail_runs(session, packet, 3, datetime.now(UTC) - timedelta(hours=2))
     assert admit_next(session) is None
     assert packet.status is PacketStatus.AWAITING_CONFIRMATION
+    gate = packet.gate_revision
     event = session.scalar(
         select(Event).where(
             Event.action == "packet.transition",
@@ -241,8 +243,29 @@ def test_exhausted_budget_awaits_confirmation_then_approve(session: Session) -> 
         session, budget_confirmation(session, packet).id[:8], actor=USER, provider=FakeProvider()
     )
     assert packet.status is PacketStatus.QUEUED  # D8: back to the queue; the claim re-checks
+    assert packet.gate_revision == gate + 1
     row = next(r for r in queue_rows(session) if r.packet_ref == packet.ref)
     assert row.eligible and row.failed_runs == 0  # a fresh budget
+
+
+def test_failure_budget_approval_rejects_a_stale_packet_version(session: Session) -> None:
+    packet = ready_packet(session)
+    fail_runs(session, packet, 3, datetime.now(UTC) - timedelta(hours=2))
+    admit_next(session)
+    confirmation = budget_confirmation(session, packet)
+    session.execute(
+        text("UPDATE confirmations SET entity_version = :version WHERE id = :id"),
+        {"version": packet.version + 1, "id": confirmation.id},
+    )
+    session.refresh(confirmation)
+    gate = packet.gate_revision
+
+    with pytest.raises(ConfirmationError, match="targets v"):
+        approve(session, confirmation.id, actor=USER)
+
+    assert confirmation.status is ConfirmationStatus.PENDING
+    assert packet.status is PacketStatus.AWAITING_CONFIRMATION
+    assert packet.gate_revision == gate
 
 
 def test_reject_holds_the_packet(session: Session) -> None:

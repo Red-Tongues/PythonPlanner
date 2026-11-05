@@ -119,6 +119,7 @@ class ConfirmationStatus(StrEnum):
     PENDING = "pending"
     APPROVED = "approved"
     REJECTED = "rejected"
+    RETIRED = "retired"
 
 
 class EvaPhase(StrEnum):

@@ -18,6 +18,7 @@ from orchestrator.confirmations import ConfirmationError
 from orchestrator.contracts import (
     AttemptOutcome,
     AutonomyMode,
+    ConfirmationStatus,
     GenerationRunState,
     OverrideKind,
     PacketStatus,
@@ -34,6 +35,7 @@ from orchestrator.db.models import (
     Packet,
 )
 from orchestrator.errors import InvalidTransitionError
+from orchestrator.events import record_event
 from orchestrator.gates import bump_scope
 from orchestrator.governance import add_override, grant_waiver
 from orchestrator.queue import claim
@@ -106,7 +108,8 @@ def test_dispatch_writes_intent_before_any_effect(session: Session) -> None:
     assert attempt.operation_id == f"{run.id}:1" and attempt.fencing_token == 1
     assert attempt.run_id.startswith("LG") and attempt.generation_run_id == run.id
     event = session.scalar(select(Event).where(Event.action == "run.attempt_authorised"))
-    assert event is not None and event.after["console"] == f"#{attempt.run_id} [attempt 1/3]"
+    assert event is not None
+    assert event.after["console"] == f"#{attempt.run_id} [dispatch 1; chargeable 1/3]"
     view = session.execute(
         __import__("sqlalchemy").text(
             "SELECT run_id, attempt, outcome FROM v_run_attempts WHERE generation_run_id = :r"
@@ -119,14 +122,31 @@ def test_dispatch_writes_intent_before_any_effect(session: Session) -> None:
 def test_retries_pass_the_same_guard_and_stop_at_max_attempts(session: Session) -> None:
     packet, run, first = _dispatched(session)
     record_outcome(session, first, AttemptOutcome.FAILED, exit_code=1)
-    second = authorise_dispatch(
-        session, run, lock=held(session)
-    )  # awaiting_result → awaiting_result (retry)
+    second = authorise_dispatch(session, run, lock=held(session))
+    with pytest.raises(RunError, match="not retry-eligible"):
+        authorise_dispatch(session, run, lock=held(session))
+    record_outcome(session, second, AttemptOutcome.FAILED, exit_code=1)
     third = authorise_dispatch(session, run, lock=held(session))
     assert [a.attempt for a in (first, second, third)] == [1, 2, 3]
     assert run.state is R.AWAITING_RESULT and attempts(session) == 3
     with pytest.raises(RunError, match="used all 3 attempts"):
         authorise_dispatch(session, run, lock=held(session))
+
+
+def test_recorded_deadline_expiry_allows_a_retry(session: Session) -> None:
+    _, run = claimed_run(session)
+    run.deadline_at = datetime.now(UTC) - timedelta(seconds=1)
+    record_event(
+        session,
+        actor=KERNEL,
+        action="test.deadline",
+        entity_type="generation_run",
+        entity_id=run.id,
+    )
+    session.flush()
+    first = authorise_dispatch(session, run, lock=held(session))
+    second = authorise_dispatch(session, run, lock=held(session))
+    assert (first.attempt, second.attempt) == (1, 2)
 
 
 def test_a_governance_write_stales_the_run_before_dispatch(session: Session) -> None:
@@ -137,7 +157,8 @@ def test_a_governance_write_stales_the_run_before_dispatch(session: Session) -> 
     assert attempts(session) == 0 and run.state is R.PLANNED  # unchanged on refusal
     assert reconcile_runs(session) == [run.id]
     # E7/V2: a HOLD applies, so only the run goes stale; the packet keeps its state
-    assert run.state is R.STALE and packet.status is S.RUNNING and packet.active_run_id is None
+    assert run.state is R.STALE and packet.status is S.RUNNING
+    assert packet.recovery_pending and packet.active_run_id == run.id
 
 
 def test_stale_reset_returns_an_unrestricted_owned_packet_to_evaluation(session: Session) -> None:
@@ -184,6 +205,11 @@ def test_a_stale_run_keeps_a_paused_packet_where_it_is(session: Session) -> None
     grant_waiver(session, packet.ref, "tools_needed", actor=USER, reason="x")
     reconcile_runs(session)
     assert run.state is R.STALE and packet.status is S.RUNNING  # restriction kept (V2)
+    assert packet.recovery_pending and packet.active_run_id == run.id
+    resume(session, "global", "*", actor=USER, reason="continue")
+    assert reconcile_runs(session) == []
+    assert packet.status is S.EVALUATING_PRE
+    assert not packet.recovery_pending and packet.active_run_id is None
 
 
 def test_dispatch_reserves_budget_or_changes_nothing(session: Session) -> None:
@@ -216,6 +242,31 @@ def test_reservations_reconcile_exactly_once(session: Session) -> None:
     assert reconcile(session, rid, 120, actor=KERNEL)
     assert not reconcile(session, rid, 120, actor=KERNEL)  # a duplicate report changes nothing
     assert session.scalar(select(BudgetCounter.used)) == 120
+
+
+def test_budget_validation_and_multi_demand_audit_order(session: Session) -> None:
+    hour = datetime(2026, 11, 4, 12, tzinfo=UTC)
+    demands = [
+        Demand("objective", "O-1", "tokens", "day", hour, 2, 10),
+        Demand("channel", "local_generation", "runs", "hour", hour, 1, 3),
+    ]
+    reservation_ids = reserve(session, "op-multi", demands, actor=KERNEL)
+    assert len(reservation_ids) == 2
+    assert (
+        session.scalar(
+            select(func.count()).select_from(Event).where(Event.action == "budget.reserved")
+        )
+        == 1
+    )
+    with pytest.raises(ValueError, match="non-negative integer"):
+        reserve(
+            session,
+            "op-negative",
+            [Demand("channel", "local_generation", "runs", "hour", hour, -1, 3)],
+            actor=KERNEL,
+        )
+    with pytest.raises(ValueError, match="non-negative integer"):
+        reconcile(session, reservation_ids[0], -1, actor=KERNEL)
 
 
 # --------------------------------------------------------------------------- outcomes, acceptance
@@ -284,17 +335,43 @@ def test_parking_keeps_the_run_matched_and_resumes_once_on_approval(session: Ses
     resumed = approve_run(session, confirmation.id, actor=USER)
     assert run.state is R.DISPATCHED and packet.status is S.RUNNING
     assert run.gate_revision == packet.gate_revision == before + 1  # R1
-    assert resumed.attempt == 2 and attempts(session) == 2
+    assert resumed.attempt == 2 and run.attempts == 1 and attempts(session) == 2
     with pytest.raises(ConfirmationError):  # decided once
         approve_run(session, confirmation.id, actor=USER)
+
+
+def test_approved_resume_renews_expired_packet_and_run_leases(session: Session) -> None:
+    packet, run, confirmation = _parked(session)
+    now = datetime.now(UTC) + timedelta(hours=2)
+    expired = now - timedelta(minutes=1)
+    packet.lease_expires_at = expired
+    run.lease_expires_at = expired
+    record_event(
+        session, actor=KERNEL, action="test.lease", entity_type="packet", entity_id=packet.id
+    )
+    record_event(
+        session,
+        actor=KERNEL,
+        action="test.lease",
+        entity_type="generation_run",
+        entity_id=run.id,
+    )
+    session.flush()
+
+    resumed = approve_run(session, confirmation.id, actor=USER, now=now)
+
+    assert resumed.attempt == 2
+    assert packet.lease_expires_at is not None and packet.lease_expires_at > now
+    assert run.lease_expires_at is not None and run.lease_expires_at > now
 
 
 def test_approval_after_another_governance_write_is_refused(session: Session) -> None:
     packet, run, confirmation = _parked(session)
     grant_waiver(session, packet.ref, "tools_needed", actor=USER, reason="x")  # not the approval
-    with pytest.raises((StaleRun, LostRace)):
-        approve_run(session, confirmation.id, actor=USER)
+    assert approve_run(session, confirmation.id, actor=USER) is None
     assert attempts(session) == 1  # nothing new was authorised (the caller rolls back)
+    assert run.state is R.STALE and packet.status is S.EVALUATING_PRE
+    assert confirmation.status is ConfirmationStatus.RETIRED
 
 
 def test_rejection_holds_the_packet_and_leaves_the_run_parked(session: Session) -> None:
@@ -308,6 +385,36 @@ def test_rejection_holds_the_packet_and_leaves_the_run_parked(session: Session) 
     assert packet.status is S.HELD and packet.active_run_id is None
 
 
+def test_trunk_dispatch_includes_its_own_branch_scope(session: Session) -> None:
+    packet, run = claimed_run(session)
+    assert packet.parent_id is None
+    pause(session, "branch", packet.ref, actor=USER, reason="pause this branch")
+    with pytest.raises(DispatchRefused, match=f"branch:{packet.ref} is paused"):
+        authorise_dispatch(session, run, lock=held(session))
+
+
+def test_legacy_claimed_run_is_included_in_reconciliation(session: Session) -> None:
+    from orchestrator.db.models import new_id
+    from orchestrator.events import record_event
+
+    packet = queued_packet(session)
+    run = GenerationRun(
+        id=new_id(),
+        packet_id=packet.id,
+        packet_version=packet.version,
+        input_hash="legacy",
+        claimed_by="legacy-worker",
+        state=R.CLAIMED,
+        evaluation_snapshot={},
+    )
+    session.add(run)
+    record_event(session, actor=KERNEL, action="test.legacy_run", entity_type="generation_run")
+    session.flush()
+
+    assert reconcile_runs(session) == [run.id]
+    assert run.state is R.STALE
+
+
 def test_cancel_needs_the_decision_first_and_an_owner(session: Session) -> None:
     packet, run, confirmation = _parked(session)
     with pytest.raises(RunError, match="pending confirmation"):
@@ -315,6 +422,26 @@ def test_cancel_needs_the_decision_first_and_an_owner(session: Session) -> None:
     reject_run(session, confirmation.id, actor=USER, reason="no")
     with pytest.raises(PermissionError):
         cancel_run(session, run.id, actor=KERNEL, reason="x")
+
+
+def test_cancel_run_does_not_clear_a_replacement_owner(session: Session) -> None:
+    packet, run, confirmation = _parked(session)
+    reject_run(session, confirmation.id, actor=USER, reason="no")
+    session.commit()
+    session.connection().execute(
+        Packet.__table__.update()
+        .where(Packet.__table__.c.id == packet.id)
+        .values(active_run_id="replacement-run")
+    )
+    session.commit()
+
+    with pytest.raises(LostRace, match="lost packet ownership"):
+        cancel_run(session, run.id, actor=USER, reason="cancel")
+    session.rollback()
+    session.refresh(packet)
+    session.refresh(run)
+    assert packet.active_run_id == "replacement-run"
+    assert run.state is R.AWAITING_CONFIRMATION
 
 
 def test_a_later_unrelated_change_stales_a_rejected_parked_run(session: Session) -> None:

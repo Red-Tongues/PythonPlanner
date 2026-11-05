@@ -88,6 +88,13 @@ _PACKET_RULES: list[Rule] = [
     *_p(S.EVALUATING_PRE, S.NEEDS_REVIEW, K, "evaluation", "tier-1 dispute, B12, ambiguity"),
     *_p(S.EVALUATING_PRE, S.AWAITING_CONFIRMATION, K, "promotion/branch", "scope = confirm"),
     *_p(
+        S.READY,
+        S.AWAITING_CONFIRMATION,
+        K,
+        "branch split confirmation",
+        "one version-bound approval",
+    ),
+    *_p(
         [S.EVALUATING_PRE, S.READY],
         S.WAITING_FOR_CHILDREN,
         K,
@@ -193,6 +200,7 @@ _PACKET_RULES: list[Rule] = [
         "R1; then the shared dispatch guard (E3); resumes the same conversation exactly once",
     ),
     *_p(S.AWAITING_CONFIRMATION, S.QUEUED, U, "failure-budget or 48 h approval", "H current"),
+    *_p(S.AWAITING_CONFIRMATION, S.READY, U, "branch split rejected", "decision is recorded"),
     *_p(
         S.AWAITING_CONFIRMATION,
         S.EVALUATING_POST,
@@ -309,7 +317,15 @@ RUN_TERMINAL: frozenset[GenerationRunState] = frozenset(
 )
 #: run states holding a live claim on their packet
 RUN_ACTIVE: frozenset[GenerationRunState] = frozenset(
-    {R.PLANNED, R.DISPATCHED, R.AWAITING_RESULT, R.VALIDATING, R.ACCEPTED, R.AWAITING_CONFIRMATION}
+    {
+        R.CLAIMED,
+        R.PLANNED,
+        R.DISPATCHED,
+        R.AWAITING_RESULT,
+        R.VALIDATING,
+        R.ACCEPTED,
+        R.AWAITING_CONFIRMATION,
+    }
 )
 
 
