@@ -28,8 +28,13 @@ from orchestrator.db.models import (
     Artifact,
     AutonomyScope,
     BranchApplication,
+    BudgetCounter,
+    BudgetReconciliation,
+    BudgetReservation,
+    BudgetTopup,
     CandidateFieldDefinitionRow,
     ChannelRun,
+    ChannelRunOutcome,
     Confirmation,
     ControlState,
     EvaluationCycle,
@@ -41,6 +46,9 @@ from orchestrator.db.models import (
     Exemplar,
     FieldRegistryRevision,
     GenerationRun,
+    GovernorEvent,
+    GovernorState,
+    KernelLease,
     Objective,
     Packet,
     PacketDependency,
@@ -67,6 +75,13 @@ APPEND_ONLY_MODELS: tuple[type, ...] = (
     QueueAdmission,
     BranchApplication,
     PacketDependency,  # M2.1 fix 6: changes go through revocations
+    # M3 (0007): one row per attempt / observation / reservation
+    ChannelRun,
+    ChannelRunOutcome,
+    GovernorEvent,
+    BudgetReservation,
+    BudgetReconciliation,
+    BudgetTopup,
 )
 LOCKABLE_MODELS: tuple[type, ...] = (Project, Objective, Packet)
 VERSIONED_MODELS: tuple[type, ...] = (Setting, CandidateFieldDefinitionRow, Threshold)
@@ -99,6 +114,14 @@ ENTITY_TYPES: dict[type, str] = {
     GenerationRun: "generation_run",
     QueueAdmission: "queue_admission",
     BranchApplication: "branch_application",
+    ChannelRunOutcome: "channel_run_outcome",
+    KernelLease: "kernel_lease",
+    GovernorState: "governor_state",
+    GovernorEvent: "governor_event",
+    BudgetCounter: "budget_counter",
+    BudgetReservation: "budget_reservation",
+    BudgetReconciliation: "budget_reconciliation",
+    BudgetTopup: "budget_topup",
 }
 
 

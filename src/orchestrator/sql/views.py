@@ -1,8 +1,7 @@
-"""Authoring reference for the M2 SQL layer (views on SQLite and PostgreSQL).
+"""Every SQL view of the schema, on SQLite and PostgreSQL (part of the master schema).
 
-Migration ``0005`` holds *frozen literal copies* of the statements generated here (R1 fix 4);
-``tests/test_sql_views.py`` asserts the installed views match this module exactly, so the two
-can never drift. To change a view: edit it here, then write a NEW revision with the literal text.
+``orchestrator.db.schema`` assembles these with the tables and triggers; the baseline migration
+holds the generated text, and ``tests/test_schema.py`` fails if the two ever differ.
 
 Every dialect difference is a token in ``_DIALECT`` (golden rule 7); the view text is otherwise
 identical. Semantic contracts (columns, types, NULL semantics, ordering) are documented in
@@ -47,7 +46,7 @@ _DIALECT: dict[str, Dialect] = {
     ),
 }
 
-#: views created by 0005, in dependency order
+#: the M2 decision views, in dependency order
 VIEW_NAMES: tuple[str, ...] = (
     "v_eva_progress",
     "v_eva_item_consensus",
@@ -565,7 +564,7 @@ def _queue(dialect: str) -> str:
 
 
 def view_statements(dialect: str) -> list[str]:
-    """``CREATE VIEW`` statements in dependency order."""
+    """The M2 decision views (``VIEW_NAMES``), in dependency order."""
     d = _DIALECT[dialect]
     return [
         _eva_progress(),
@@ -579,3 +578,59 @@ def view_statements(dialect: str) -> list[str]:
         _ready_candidates(),
         _queue(dialect),
     ]
+
+
+# --------------------------------------------------------------------------- lineage heads (M1, A2)
+
+#: view → table: for every row, the current head of its lineage, following ``supersedes_id``.
+#: ``is_head`` is 1/0 on SQLite, true/false on PostgreSQL.
+HEAD_VIEWS: dict[str, str] = {
+    "v_project_heads": "projects",
+    "v_objective_heads": "objectives",
+    "v_packet_heads": "packets",
+}
+
+
+def _head_view(view: str, table: str) -> str:
+    return (
+        f"CREATE VIEW {view} AS\n"
+        "WITH RECURSIVE chain(row_id, current_id) AS (\n"
+        f"  SELECT id, id FROM {table}\n"
+        "  UNION ALL\n"
+        f"  SELECT chain.row_id, nxt.id FROM chain JOIN {table} nxt "
+        "ON nxt.supersedes_id = chain.current_id\n"
+        ")\n"
+        "SELECT chain.row_id AS id, head.id AS head_id, head.ref AS head_ref,\n"
+        "       head.version AS head_version, (chain.row_id = head.id) AS is_head\n"
+        f"FROM chain JOIN {table} head ON head.id = chain.current_id\n"
+        f"WHERE NOT EXISTS (SELECT 1 FROM {table} s WHERE s.supersedes_id = head.id)"
+    )
+
+
+# --------------------------------------------------------------------------- runs (M3, D10 Q3)
+
+#: the console's view of each generation run's latest attempt and its outcome
+RUN_VIEWS: dict[str, str] = {
+    "v_run_attempts": (
+        "CREATE VIEW v_run_attempts AS\n"
+        "SELECT r.id AS generation_run_id, r.packet_id, r.packet_version, r.state, r.channel,\n"
+        "       r.fencing_token, r.attempts, r.max_attempts, c.id AS channel_run_id, c.run_id,\n"
+        "       c.attempt, c.operation_id, c.created_at AS authorised_at, o.outcome,\n"
+        "       o.exit_code, o.error, o.created_at AS outcome_at\n"
+        "FROM generation_runs r\n"
+        "LEFT JOIN channel_runs c ON c.generation_run_id = r.id\n"
+        "  AND NOT EXISTS (SELECT 1 FROM channel_runs c2\n"
+        "                  WHERE c2.generation_run_id = r.id AND c2.attempt > c.attempt)\n"
+        "LEFT JOIN channel_run_outcomes o ON o.channel_run_id = c.id"
+    ),
+}
+
+#: every view of the schema, in creation order
+ALL_VIEW_NAMES: tuple[str, ...] = (*HEAD_VIEWS, *VIEW_NAMES, *RUN_VIEWS)
+
+
+def all_view_statements(dialect: str) -> list[str]:
+    """Every ``CREATE VIEW`` of the schema, in dependency order (golden rule 7: the dialect
+    differences are the ``_DIALECT`` tokens)."""
+    heads = [_head_view(view, table) for view, table in HEAD_VIEWS.items()]
+    return heads + view_statements(dialect) + list(RUN_VIEWS.values())

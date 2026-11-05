@@ -9,18 +9,40 @@ import pytest
 from sqlalchemy import Engine, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
-from orchestrator.contracts import Channel, OverrideKind, PacketStatus, ProjectTree, RunStatus
+from orchestrator.confirmations import ConfirmationError, approve, reject
+from orchestrator.contracts import (
+    Channel,
+    ConfirmationStatus,
+    OverrideKind,
+    PacketStatus,
+    ProjectTree,
+    RunStatus,
+)
 from orchestrator.db.ddl import is_immutability_violation
-from orchestrator.db.models import ChannelRun, GenerationRun, Packet, QueueAdmission, new_id
+from orchestrator.db.models import (
+    ChannelRun,
+    Event,
+    GenerationRun,
+    Packet,
+    QueueAdmission,
+    new_id,
+)
 from orchestrator.errors import ImmutableRecordError
 from orchestrator.events import record_event
-from orchestrator.governance import add_override
+from orchestrator.gates import guarded_status_update
+from orchestrator.governance import add_override, grant_waiver
 from orchestrator.ingest import persist_tree
 from orchestrator.lifecycle import transition
+from orchestrator.llm import FakeProvider
 from orchestrator.queue import ClaimError, admit_next, claim, queue_rows
-from orchestrator.repository import get_packet, supersede_packet
+from orchestrator.repository import get_packet, set_setting, supersede_packet
 from tests.conftest import KERNEL, USER
 from tests.evafixtures import accept_all
+from tests.govfixtures import (
+    budget_confirmation,
+    fail_runs,
+    ready_packet,
+)
 
 TREE = {
     "project": {"name": "Q"},
@@ -107,7 +129,7 @@ def test_override_precedence_and_version_binding(session: Session) -> None:
     row = next(r for r in queue_rows(session) if r.packet_ref == b.ref)
     assert row.ineligible_reason == "blocked"
     # PIN lapses on revision (version-bound)
-    transition(c, PacketStatus.NEEDS_REVIEW, KERNEL)
+    transition(c, PacketStatus.HELD, USER, "revise it")
     v2 = supersede_packet(session, c.ref, {"title": "Task 2 again"}, actor=USER)
     transition(v2, PacketStatus.EVALUATING_PRE, KERNEL)
     accept_all(session, v2)
@@ -184,3 +206,99 @@ def test_two_workers_one_claim(engine: Engine, factory: sessionmaker[Session]) -
     assert sorted(results) == ["lost", "won"]
     with factory() as s:
         assert len(s.scalars(select(GenerationRun)).all()) == 1
+
+
+# ------------------------------------- guarded admission and the failure budget (M2.1 fixes 11, 12)
+
+
+def test_admission_is_a_guarded_update(session: Session) -> None:
+    packet = ready_packet(session)
+    stale_gate = packet.gate_revision
+    grant_waiver(session, packet.ref, "tools_needed", actor=USER, reason="bumps the gate")
+    assert not guarded_status_update(
+        session,
+        packet,
+        expected=PacketStatus.READY,
+        observed_gate=stale_gate,
+        values={"status": PacketStatus.QUEUED},
+    )
+    assert get_packet(session, packet.ref).status is PacketStatus.READY
+
+
+def test_exhausted_budget_awaits_confirmation_then_approve(session: Session) -> None:
+    packet = ready_packet(session)
+    fail_runs(session, packet, 3, datetime.now(UTC) - timedelta(hours=2))
+    assert admit_next(session) is None
+    assert packet.status is PacketStatus.AWAITING_CONFIRMATION
+    gate = packet.gate_revision
+    event = session.scalar(
+        select(Event).where(
+            Event.action == "packet.transition",
+            Event.entity_id == packet.id,
+            Event.reason.like("lifetime failure budget%"),
+        )
+    )
+    assert event is not None
+    approve(
+        session, budget_confirmation(session, packet).id[:8], actor=USER, provider=FakeProvider()
+    )
+    assert packet.status is PacketStatus.QUEUED  # D8: back to the queue; the claim re-checks
+    assert packet.gate_revision == gate + 1
+    row = next(r for r in queue_rows(session) if r.packet_ref == packet.ref)
+    assert row.eligible and row.failed_runs == 0  # a fresh budget
+
+
+def test_failure_budget_approval_rejects_a_stale_packet_version(session: Session) -> None:
+    packet = ready_packet(session)
+    fail_runs(session, packet, 3, datetime.now(UTC) - timedelta(hours=2))
+    admit_next(session)
+    confirmation = budget_confirmation(session, packet)
+    session.execute(
+        text("UPDATE confirmations SET entity_version = :version WHERE id = :id"),
+        {"version": packet.version + 1, "id": confirmation.id},
+    )
+    session.refresh(confirmation)
+    gate = packet.gate_revision
+
+    with pytest.raises(ConfirmationError, match="targets v"):
+        approve(session, confirmation.id, actor=USER)
+
+    assert confirmation.status is ConfirmationStatus.PENDING
+    assert packet.status is PacketStatus.AWAITING_CONFIRMATION
+    assert packet.gate_revision == gate
+
+
+def test_reject_holds_the_packet(session: Session) -> None:
+    """C27 supersedes M2.1 #12's rejection outcome: rejecting holds the packet, with the reason."""
+    packet = ready_packet(session)
+    set_setting(session, "queue.failure_budget", 1, actor=USER, reason="strict")
+    fail_runs(session, packet, 1, datetime.now(UTC) - timedelta(hours=2))
+    admit_next(session)
+    reject(session, budget_confirmation(session, packet).id, actor=USER, reason="give up")
+    assert packet.status is PacketStatus.HELD
+
+
+def test_failure_budget_approval_with_a_changed_context_events_the_new_hash(
+    session: Session,
+) -> None:
+    """Golden Rule 5 (PM review of R4 GA-R2): when the context changed, the approval rewrites
+    ``input_hash`` and the event's before/after names it, old and new."""
+    packet = ready_packet(session)
+    fail_runs(session, packet, 3, datetime.now(UTC) - timedelta(hours=2))
+    admit_next(session)
+    session.execute(  # simulate a context change since the packet was admitted
+        text("UPDATE packets SET input_hash = 'old-context' WHERE id = :id"), {"id": packet.id}
+    )
+    session.refresh(packet)
+    approve(session, budget_confirmation(session, packet).id, actor=USER)
+    assert packet.status is PacketStatus.EVALUATING_PRE
+    assert packet.input_hash not in (None, "old-context")
+    event = session.scalars(
+        select(Event)
+        .where(Event.entity_id == packet.id, Event.action == "packet.transition")
+        .order_by(Event.created_at.desc())
+    ).first()
+    assert event is not None and event.after is not None and event.before is not None
+    assert event.before["input_hash"] == "old-context"
+    assert event.after["input_hash"] == packet.input_hash
+    assert event.after["status"] == PacketStatus.EVALUATING_PRE.value

@@ -1,7 +1,7 @@
 """Default seeds, candidate-field registry sync and registry revisions.
 
 Default settings, scopes, thresholds, control state and evaPacket presets are seeded by the
-frozen migrations ``0003`` and ``0005`` (R1 fix 4) and re-ensured on every ``init-db`` (GE6).
+inserted by ``ensure_defaults`` on every ``init-db`` (GE6); the schema migration holds no seed rows.
 The field registry is synced from YAML by ``init-db`` (the YAML is the source
 of truth for definitions, per the M1 spec): changed fields are updated with a version bump,
 removed ones disabled, and every change is evented. Each distinct registry content is also
@@ -149,10 +149,9 @@ def record_registry_revision(
 
 
 # --------------------------------------------------------------------------- default seeds (GE6)
-# Live copies of the defaults the frozen migrations 0003 and 0005 seed. ``ensure_defaults`` runs
-# on every ``init-db`` and re-inserts any that are missing, so a deleted default comes back. It
-# never overwrites a row that exists (user edits survive). ``tests/test_seed_defaults.py`` asserts
-# these equal what the migrations seed, so the two copies cannot drift.
+# The one copy of every default. ``ensure_defaults`` runs on every ``init-db`` and inserts any
+# that are missing, so a deleted default comes back. It never overwrites a row that exists (user
+# edits survive).
 
 # (stage, mode, is_fixed, description) — PROJECT_PLAN §11
 AUTONOMY_SCOPES = (

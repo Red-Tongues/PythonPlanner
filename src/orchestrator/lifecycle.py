@@ -1,11 +1,13 @@
-"""Packet lifecycle: an explicit allowed-transition table, applied with an event per change.
+"""Packet lifecycle: apply one transition of the M3 table (``orchestrator.transitions``) with
+an event per change.
 
-System and LLM actors may only follow ``ALLOWED_TRANSITIONS``. A *user* actor (typed, R1 fix 11 —
-see ``orchestrator.actors``) may additionally complete, archive or close-unverified any
-non-terminal packet by hand. Completing always passes the completion gate (post-evaluation of the
-exact artifact, or child roll-up), for users too (M2.1 fix 5): a person who closes work the kernel
-never verified records ``closed_unverified``, a terminal non-success disposition. Every terminal
-transition locks the packet in the same UPDATE statement.
+Each (from, to) pair names the actor kinds that may make it (C23, D8): kernel moves are
+``system`` actors, owner decisions are ``user`` actors, and ``llm`` actors never move a packet.
+Completing always passes the completion gate (post-evaluation of the exact artifact, or child
+roll-up), for users too (M2.1 fix 5); closing without that evidence is ``closed_unverified``, a
+terminal non-success disposition that needs a reason. Every terminal transition locks the
+packet in the same UPDATE statement, and the database trigger rejects any pair not in the
+table at the database too.
 """
 
 from __future__ import annotations
@@ -19,66 +21,21 @@ from orchestrator.db.models import Event, Packet, utcnow
 from orchestrator.errors import ImmutableRecordError, InvalidTransitionError
 from orchestrator.events import record_event
 from orchestrator.repository import is_head, packet_snapshot
+from orchestrator.transitions import PACKET_TRANSITIONS, can_move_packet, check_packet
 
 S = PacketStatus
 
-#: The B9 genPacket lifecycle. Side states: needs_review (a human must look), held / blocked
-#: (human restrictions), awaiting_confirmation (an autonomy-scope approval), waiting_for_children
-#: (a split trunk, B5), failed. Legacy M1 statuses only have exits into this lifecycle.
-_RELEASE = frozenset({S.DRAFT, S.EVALUATING_PRE, S.READY, S.ARCHIVED})
+#: Derived view of ``orchestrator.transitions.PACKET_TRANSITIONS`` (any actor kind): status →
+#: the statuses it may move to. The tables themselves live in ``orchestrator.transitions``
+#: (M3 C23); this module applies them with an event per change.
 ALLOWED_TRANSITIONS: dict[PacketStatus, frozenset[PacketStatus]] = {
-    S.DRAFT: frozenset({S.EVALUATING_PRE, S.HELD, S.BLOCKED, S.ARCHIVED}),
-    S.EVALUATING_PRE: frozenset(
-        {S.READY, S.NEEDS_REVIEW, S.FAILED, S.HELD, S.BLOCKED, S.DRAFT, S.WAITING_FOR_CHILDREN}
-    ),
-    S.READY: frozenset(
-        {
-            S.QUEUED,
-            S.EVALUATING_PRE,
-            S.NEEDS_REVIEW,
-            S.AWAITING_CONFIRMATION,
-            S.WAITING_FOR_CHILDREN,
-            S.HELD,
-            S.BLOCKED,
-            S.ARCHIVED,
-        }
-    ),
-    S.QUEUED: frozenset(
-        {S.RUNNING, S.READY, S.EVALUATING_PRE, S.HELD, S.BLOCKED, S.AWAITING_CONFIRMATION}
-    ),
-    S.RUNNING: frozenset({S.EVALUATING_POST, S.READY, S.FAILED, S.AWAITING_CONFIRMATION}),
-    S.EVALUATING_POST: frozenset({S.COMPLETED, S.NEEDS_REVIEW, S.FAILED, S.READY}),
-    S.NEEDS_REVIEW: frozenset({S.EVALUATING_PRE, S.READY, S.HELD, S.BLOCKED, S.ARCHIVED}),
-    S.HELD: _RELEASE,
-    S.BLOCKED: _RELEASE,
-    S.AWAITING_CONFIRMATION: frozenset({S.READY, S.EVALUATING_PRE, S.NEEDS_REVIEW, S.FAILED}),
-    S.WAITING_FOR_CHILDREN: frozenset({S.COMPLETED, S.NEEDS_REVIEW, S.FAILED}),
-    S.FAILED: frozenset({S.DRAFT, S.EVALUATING_PRE, S.AWAITING_CONFIRMATION, S.ARCHIVED}),
-    S.COMPLETED: frozenset(),
-    S.ARCHIVED: frozenset(),
-    S.CLOSED_UNVERIFIED: frozenset(),
-    # legacy M1 statuses
-    S.EVALUATING: frozenset({S.EVALUATING_PRE, S.READY, S.FAILED, S.ARCHIVED}),
-    S.IN_PROGRESS: frozenset({S.RUNNING, S.FAILED, S.ARCHIVED}),
-    S.PROCESSED: frozenset({S.EVALUATING_POST, S.ARCHIVED}),
+    status: frozenset(PacketStatus(t) for (s, t) in PACKET_TRANSITIONS if s == status.value)
+    for status in PacketStatus
 }
-
-#: Extra transitions only a user actor may make, from any non-terminal status. Completing still
-#: has to pass the completion gate (M2.1 fix 5); ``closed_unverified`` is the honest way to close
-#: work without that evidence.
-USER_ONLY_TARGETS: frozenset[PacketStatus] = frozenset(
-    {S.COMPLETED, S.ARCHIVED, S.CLOSED_UNVERIFIED}
-)
 
 
 def can_transition(from_status: PacketStatus, to_status: PacketStatus, actor: Actor) -> bool:
-    if to_status in ALLOWED_TRANSITIONS[from_status]:
-        return True
-    return (
-        actor.is_user
-        and to_status in USER_ONLY_TARGETS
-        and bool(ALLOWED_TRANSITIONS[from_status])  # not already terminal
-    )
+    return can_move_packet(from_status, to_status, actor)
 
 
 def transition(
@@ -101,12 +58,12 @@ def transition(
         raise ImmutableRecordError(f"{packet.ref} v{packet.version} is superseded (history)")
     if not isinstance(actor, Actor):
         raise TypeError("transition needs a typed Actor (see orchestrator.actors)")
-    if not can_transition(current, target, actor):
-        allowed = sorted(s.value for s in ALLOWED_TRANSITIONS[current])
-        raise InvalidTransitionError(
-            f"{packet.ref}: {current.value} → {target.value} is not allowed for {actor} "
-            f"(allowed: {allowed or 'none — terminal'})"
-        )
+    try:
+        check_packet(current, target, actor)
+    except InvalidTransitionError as exc:
+        raise InvalidTransitionError(f"{packet.ref}: {exc}") from None
+    if target is S.CLOSED_UNVERIFIED and not (reason or "").strip():
+        raise InvalidTransitionError(f"{packet.ref}: closing unverified needs a reason (C23)")
 
     if target is S.COMPLETED:  # every actor, users included (M2.1 fix 5)
         _completion_gate(session, packet, current)

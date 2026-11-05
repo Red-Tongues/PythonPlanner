@@ -83,12 +83,12 @@ With `ORCH_TEST_POSTGRES_URL` set, every database test runs on both dialects, an
 |---|---|
 | `orchestrator.contracts` | Strict, versioned Pydantic contracts (`ProjectTree`, `TaskCore`, `CandidateFieldDefinition`, …), enums, response-structure registry |
 | `orchestrator.fields` | Candidate-field registry seed (`candidate_fields.yaml`) and loader |
-| `orchestrator.db` | SQLAlchemy models, Alembic migrations (`schema_version` table), all dialect-specific triggers and views (`ddl.py`), seeds |
+| `orchestrator.db` | The master schema: SQLAlchemy models (`models.py`), every trigger (`ddl.py`), assembly (`schema.py`); the generated baseline migration (`schema_version` table); seeds |
 | `orchestrator.repository` | Governed reads and writes: head/version lookups, `supersede_*`, guarded updates, each with an event |
 | `orchestrator.lifecycle` | Allowed packet-status transitions; every transition writes an event |
 | `orchestrator.ingest` | `.md` / `.txt` / `.docx` → `ProjectTree` → draft packets (+ a confirmation if the ingestion scope is `confirm`) |
 | `orchestrator.llm` | Provider protocol, `FakeProvider`, OpenAI-compatible and Ollama providers with digest pinning |
 | `orchestrator.evaluation` | evaPacket evaluator, pass plans, prompts, contracts, consensus oracle, readiness |
-| `orchestrator.sql` | Authoring source of the SQL views (frozen into migration 0005) |
+| `orchestrator.sql` | Every SQL view (part of the master schema) |
 | `orchestrator.queue`, `governance`, `branching`, `confirmations` | Queue admission and claims; waivers and overrides; splits and promotion; approval actions |
 | `orchestrator.cli` | The Typer CLI |

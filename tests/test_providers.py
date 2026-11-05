@@ -12,7 +12,9 @@ from typer.testing import CliRunner
 
 from orchestrator.cli import app
 from orchestrator.config import Settings
-from orchestrator.db.models import Event
+from orchestrator.db.models import (
+    Event,
+)
 from orchestrator.evaluation import evaluate_packet
 from orchestrator.ingest.llm_extract import extract_tree_with_llm
 from orchestrator.llm import (
@@ -22,6 +24,10 @@ from orchestrator.llm import (
     OllamaProvider,
     OpenAICompatibleProvider,
     make_provider,
+)
+from tests.govfixtures import (
+    event_actions,
+    ollama_with_tags,
 )
 
 DIGEST = "a" * 64
@@ -130,3 +136,34 @@ def test_llm_tree_extraction_validates_and_retries() -> None:
         "# Demo\n\n## Build\n- Write the parser\n- Write the CLI\n", provider, name="Demo"
     )
     assert tree.task_count == 2 and len(provider.calls) == 3
+
+
+# ---------------------------------------------------------- model pinning fails closed (M2.1 fix 8)
+
+
+def test_unpinned_or_unverifiable_evaluators_are_refused(session, tree) -> None:  # type: ignore[no-untyped-def]
+    unpinned = {r: ModelSpec(f"eva-{r}") for r in ("a", "b", "c")}
+    with pytest.raises(ModelPinningError, match="no pinned digest"):
+        evaluate_packet(session, tree.packets[0], ollama_with_tags("d" * 64), specs=unpinned)
+    pinned = {r: ModelSpec(f"eva-{r}", digest="d" * 64) for r in ("a", "b", "c")}
+    with pytest.raises(ModelPinningError, match="cannot verify"):
+        evaluate_packet(
+            session, tree.packets[0], OpenAICompatibleProvider("http://x/v1"), specs=pinned
+        )
+    assert "evaluation.models_verified" not in event_actions(session)
+    assert "evaluation.model_pinning_failed" in event_actions(session)
+
+
+def test_pinned_and_verified_models_are_recorded(session, tree) -> None:  # type: ignore[no-untyped-def]
+    from orchestrator.evaluation.evaluator import Evaluator
+
+    pinned = {r: ModelSpec(f"eva-{r}", digest="d" * 64) for r in ("a", "b", "c")}
+    Evaluator(session, ollama_with_tags("sha256:" + "d" * 64), specs=pinned).verify_models()
+    event = session.scalar(select(Event).where(Event.action == "evaluation.models_verified"))
+    assert event is not None and event.after["digests"] == {"eva-a": "d" * 64, "eva-b": "d" * 64}
+
+
+def test_fake_provider_is_never_recorded_as_verified(session, tree) -> None:  # type: ignore[no-untyped-def]
+    evaluate_packet(session, tree.packets[0], FakeProvider(), fields=["coding_intensity"])
+    assert "evaluation.models_verified" not in event_actions(session)
+    assert "evaluation.fake_provider" in event_actions(session)

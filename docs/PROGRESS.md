@@ -4,6 +4,58 @@ Newest entries first. Every agent session appends an entry: what changed, decisi
 
 ---
 
+## 2026-11-05 09:00–09:30 — R4 audit (Argon) J1–J3 fixed (Claude Code)
+
+Argon's independent audit of PR #3 was a **conditional pass: fix J1 and J2, then merge**. The PM decided J1–J3 under sprint autonomy (the CFO is busy). J4/J5 are informational, so no change. Not merged; the PM merges.
+
+- **J1 [HIGH] (3e2c5b0):** a rejected split now goes `awaiting_confirmation → held` with the reason (D8 row 61).
+  - Removed the user `awaiting_confirmation → ready` row from `transitions.py`, the regenerated baseline (so the DB trigger rejects it too) and ARCHITECTURE §7.
+  - `confirmations.reject` refuses a blank reason (D8: "reason required").
+  - The kernel `ready → awaiting_confirmation` split-confirmation row is kept and documented in deviation **P1** as a D8 gap-fill alongside the failure-budget one.
+  - Removed the stale §7.3 row saying a confirmed split is recorded as `system:brancher`; since MR5 it is the approving user's move (D8 row 60).
+  - The branching test asserts `held`, the user actor and reason, the blank-reason refusal, and that release + readiness still never re-proposes the split.
+- **J2 [MEDIUM] (56c7994):** in `stale_run`'s keep-state branch, the ownership release changes the ORM object and records `packet.run_released` only when its UPDATE matched one row.
+  - **Choice on 0 rows:** re-read the packet. If this run no longer owns it, record nothing (logged at info), because the release's goal is already met. If it somehow still does, raise `LostRace`.
+  - **Why not always raise `LostRace`:** it would roll back the run's own audited stale disposition (MR9), which is still correct.
+  - The test injects the concurrent release between the read and the UPDATE, and fails without the fix.
+  - The residual `LostRace` branch is untested; it is unreachable without a concurrent writer restoring the same ownership.
+- **J3 [LOW] (c2a6499):** both `reconcile_runs` scans are ordered by `(packet_id, id)`.
+
+**Tests:** 599 passed, 4 skipped locally on SQLite + PostgreSQL 16; ruff clean. CI: see the PR.
+
+**Next:** the PM merges PR #3; then the M3a spec once the CFO signs off T1-C v2.
+
+---
+
+## 2026-11-05 08:20–09:00 — R4 verification on PostgreSQL, fixes and review (Claude Code)
+
+Fresh session on PR [redtongues/PythonPlanner#3](https://github.com/redtongues/PythonPlanner/pull/3) (`claude/elegant-davinci-hcny5t`). It covers the Copilot agent's groups 3–11 (d205356, 66076d0). No new features, no T1-C/M3a work; not merged.
+
+**What changed**
+- **Why CI never ran for 66076d0:** PR #3 conflicted with the force-updated `main` (PROGRESS.md only), so GitHub built no merge ref and ran no `pull_request` workflow. Merged `origin/main` (docs only) in fa203b8.
+- **PostgreSQL 16 (local):** 4 failures; SQLite had 1 of them.
+  - **One real bug, fixed (75e801e, MR9).** A torn read under READ COMMITTED let a late approval stale a parked run that a concurrent rejection had just kept parked. The stale disposition now retires its own confirmation with the once-only CAS first, so a decided confirmation makes the approval lose. A deterministic regression test injects the torn read.
+  - **Three agent test bugs, fixed (95cb2f1):** `"duplicate"` outcome rejected; a pause test that deadlocks on PG; savepoint/`pytest.raises` order.
+- **PM observations:**
+  - (b) the `input_hash` rewrite is now in the failure-budget event's before/after (ad66ca3).
+  - (c) `budget.reserved` is now recorded only after every demand succeeds (39f5385). The old order was safe, because no `src/` code catches `BudgetExhausted`, but it relied on the caller rolling back.
+  - MR5 now has an actor assertion (c8f444a).
+- **PR description:** a 16-row R4 table (code → test → panel / code / test status). 15 of 16 are test-proven. GA-R1 is code-verified only: its guard is unreachable behind `_bump_pair`'s full-binding CAS in the same transaction.
+
+**Decisions / deviations**
+- **D8 deviation flagged, not changed:** split rejection `awaiting_confirmation → ready` (user).
+  - Recommend removing it: D8 row 61 sends every rejection to `held`, and a user `→ ready` skips the kernel's readiness decision.
+  - If the CFO wants no extra owner step, use the review pattern instead (user → `evaluating_pre`, readiness admits).
+- **Kept (recommend):** kernel `ready → awaiting_confirmation` for a split request. D8 row 60 needs the packet there; it is the same kind of gap-fill as P1.
+
+**Tests:** 597 passed, 4 skipped on SQLite + PostgreSQL 16 locally; the concurrency suite was green on 5/5 repeat runs. Ruff clean. CI: see the PR.
+
+**Known issues:** `main`'s own CI runs have been failing since the 5 Nov 02:15 PM pushes (not investigated; outside this PR's scope).
+
+**Next:** the CFO decides the split-rejection target; Argon (or the GitHub Copilot auditor) audits the R4 diff and the 16-item map.
+
+---
+
 ## 2026-11-05 02:10–03:00 — Sprint: T1-C v2 and R4 status (PM)
 
 - **R4 groups 3–11:** done by the GitHub Copilot cloud agent (SQLite 361 passed / 234 skipped; PostgreSQL not run). **Not pushed.** Waiting for the CFO to press *Create pull request*.
@@ -17,6 +69,156 @@ Newest entries first. Every agent session appends an entry: what changed, decisi
   2. A fresh Claude Code session merges it into PR #3, runs the PostgreSQL suite and maps all 16 items (handover in `docs/notes/2026-11-05_sprint_plan.md`).
   3. The CFO answers T1-C v2's 7 questions.
   4. Then the M3a spec.
+
+---
+
+## 2026-11-04 (late) — R4 fixes completed (Copilot)
+
+Continued the approved fix list on PR #3 from Claude Code's checkpoint (groups 1–2 already done). Completed groups 3–11; no M3a/Stage B feature work.
+
+- **Run lifecycle:** approved resumes atomically renew the packet and run leases; retries require a failed/invalid/timed-out outcome or recorded deadline expiry; dispatch sequence numbers are separate from chargeable attempts, so exit-3 resume consumes no attempt budget.
+- **Branching:** a confirm-scope split moves the packet into `awaiting_confirmation`; approval keeps the owner actor for the permitted transition, and rejection returns the packet to `ready`.
+- **Recovery and confirmations:** stale restricted runs retain an explicit deferred-recovery marker and are reconciled after restrictions clear; legacy `claimed` runs are reconciled; stale parked runs retire their pending confirmation and recover the packet instead of rolling the disposition back.
+- **Guarded decisions:** `cancel_run` and `reject_run` guard packet ownership and fencing token; failure-budget approval binds the confirmation to the current packet version and applies the status/gate change in one guarded transaction; trunk packets include their own branch scope.
+- **Budgets and races:** demands, usage and database rows reject negative values; reservation events are kept with multi-demand inserts under `no_autoflush`; race helpers propagate unexpected worker failures and enforce timeouts; an effect-counting adapter test covers dispatch budget and stale acceptance.
+- Updated the generated baseline and architecture transition tables for the recovery marker, retired confirmation status, budget CHECK constraints and branch-confirmation transitions.
+
+**Verification:** full SQLite suite `361 passed, 234 skipped`; Ruff check/format and `git diff --check` clean. PostgreSQL cases were skipped because `ORCH_TEST_POSTGRES_URL` is not configured in this environment.
+
+**Next:** run the opt-in PostgreSQL suite in CI; no known SQLite failures. No commits or pushes made.
+
+---
+
+## 2026-11-04 (late) — R4 fixes: PAUSED at the CFO's request (Claude Code)
+
+Working from `docs/reviews/R4_consensus.md` (16 items) on PR [redtongues/PythonPlanner#3](https://github.com/redtongues/PythonPlanner/pull/3), one commit per fix group. The CFO paused the sprint until 23:59; I stopped at a clean point.
+
+**Done (committed, full suite green on SQLite and PostgreSQL 16: 573 passed, 4 skipped):**
+- **Group 1, MR1** (6dae604): every binding-dependent run write (dispatch, accept, publish, park, the run-targeted gate bump) re-checks the packet row in one compare-and-set (`runs.guard_bindings`). A two-session barrier test at the `before_scopes` seam fails on PostgreSQL without the guard.
+- **Group 2, MR2 + MR3** (c83d407):
+  - kernel dispatch, accept, publish and park need a fenced `KernelLock`;
+  - a user dispatch is only `approve_run`'s resume with the run-bound, just-approved confirmation, while the packet is running with no HOLD/BLOCK;
+  - tests take the lock through `runfixtures.held()`;
+  - on SQLite the fence serialises a concurrent governance write behind the dispatch, and the barrier test asserts whichever serialisation happened.
+
+**Next, in order (not started):**
+- group 3: MR4 lease renewal on resume, MR6 retry eligibility, MR7 dispatch sequence separate from chargeable attempts;
+- group 4: MR5 split continuation;
+- group 5: MR8 deferred recovery, MR10 legacy reconciliation;
+- group 6: MR9 stale-approval disposition (a `retired` confirmation status);
+- group 7: GR1, GA-R1 guarded `cancel_run` / `reject_run`;
+- group 8: GA-R2 failure-budget atomicity;
+- group 9: GA-R3 trunk branch scope;
+- group 10: MR11, GA-R5 budget validation, CHECKs and audit ordering (`reserve` with two demands currently autoflushes before its event);
+- group 11: MR12, MR13 race-test hardening with an effect-counting fake adapter.
+
+Then PROGRESS, the PR checklist and the report.
+
+---
+
+## 2026-11-04 (evening) — Build-process tidy (CFO decision Q4) (Claude Code)
+
+On PR [redtongues/PythonPlanner#3](https://github.com/redtongues/PythonPlanner/pull/3), as five focused commits, after merging `main` at e4234bb (the CFO–Argon clarification). The PM asked for no R4 fixes and no M3a work until the data model is settled, so this is a **build process** change only. The **product** rule is unchanged: immutability, append-only and transition triggers stay, are never disabled, and keep their tests on both dialects.
+
+**Tests:** 564 items before (560 passed, 4 skipped) → **571 after (567 passed, 4 skipped)** on SQLite plus PostgreSQL 16. No test was dropped. The frozen-migration tests were replaced by baseline drift and schema checks (+7 items), and the test move kept all 571 items, with the same names and parameters apart from the dropped `fixN_` prefixes. Ruff is clean.
+
+### What changed
+| # | Change | Where |
+|---|---|---|
+| 1 | **One contracts location**: `evaluation/contracts.py` → `contracts/evaluation.py` | `contracts/` |
+| 2 | **One master schema**: tables in `db/models.py` (now also holding the 4 CHECK constraints and 7 server defaults that existed only in migrations); **every** trigger in `db/ddl.py` (including the lineage and evaPacket/run triggers that existed only inside 0004 and 0005); every view in `sql/views.py`; `db/schema.py` assembles them per dialect | `db/`, `sql/views.py` |
+| 3 | **Squashed migrations**: 0001–0007 → one generated `0001_baseline` (literal DDL, written by `scripts/generate_baseline.py`). The frozen manifest, its test and `scripts/freeze_views.py` are gone. `tests/test_schema.py` is the drift check: baseline = master schema (both dialects); installed triggers/views/functions = master; models vs DB (`compare_metadata`); downgrade round trip | `migrations/versions/`, `scripts/`, `tests/test_schema.py` |
+| 4 | **Tests by capability**: `test_r1_fixes`, `test_m21_fixes`, `test_m3_races`, `test_m3_schema` → `test_immutability`, `test_versioning`, `test_schema`, `test_refs`, `test_audit`, `test_ingest`, `test_actors`, `test_fields`, `test_gates`, `test_concurrency`, `test_evaluator`, `test_providers`, `test_queue`, `test_db_guards`. Shared helpers → `tests/dbhelpers.py`, `tests/govfixtures.py`; the `superseded` fixture → `conftest.py` | `tests/` |
+| 5 | CLAUDE.md golden rule 7 now states the master-schema rule and the regenerate command; README and ARCHITECTURE §6 updated | docs |
+
+### Equivalence check (done before deleting 0001–0007)
+I snapshotted the old head schema on both dialects: every table, column, type, nullability, default, PK, FK, unique, index, CHECK, trigger, function and view. I then compared it with the database the baseline builds.
+- **SQLite:** identical.
+- **PostgreSQL:** identical except:
+  1. `control_state.id` no longer has a sequence (it is a single-row table and the id is always written explicitly);
+  2. a status CHECK lists its values in a different order;
+  3. `v_ready_candidates` now includes `fencing_token` and `active_run_id`. Its `p.*` had been expanded when 0006 created the view, before those columns existed, so the old view silently lacked them.
+
+### Decisions (please check)
+1. **The baseline is literal, generated text, not a migration that imports the models at runtime.** A new column is still written once (in `models.py`), and you regenerate. I chose this so the baseline can simply be frozen as it stands the day a database must be kept.
+2. **Seeds are no longer in a migration.** `init-db` (`ensure_defaults`) is the only seeding path, as it already was for re-seeding (GE6). `migrate.upgrade()` on its own now builds an empty schema; the CLI always goes through `init-db`. The fresh-database seed events are now one batch per table (five, not six).
+3. **A database with history refuses to downgrade.** Downgrading to empty would drop the append-only `events` table in one statement, bypassing its row triggers.
+4. **New revision id `0001_baseline`.** Any local database at the old `0007` must be recreated (`orchestrator init-db` on a fresh file). There is no live data, so I treated this as acceptable.
+5. **Replaced revision-specific tests.**
+   - The populated "0004 → 0005" and "0006 → 0007" upgrade tests have no upgrade path left. They became "a populated database survives `init-db`" and "legacy M1 statuses stay valid and only re-enter evaluation" (deviation P3).
+   - The manifest round trip became a baseline downgrade round trip plus "re-init keeps the schema and ref numbering".
+6. **Two SQLAlchemy pitfalls are handled in `db/schema.py`.**
+   - The one FK cycle (`generation_runs.channel_run_id`, marked `use_alter`) is kept inline on SQLite. `create_all` would silently drop it there.
+   - `AddConstraint` permanently marks that FK as not inline, so its effect is undone after the PostgreSQL `ALTER` is compiled.
+   - The output is checked to be identical across hash seeds and dialect order.
+7. **This supersedes my Stage A note that "0007 stays amendable until merge".** The 0007 schema now lives in the master schema and the baseline.
+
+### Not done (as instructed)
+- `docs/reviews`, `docs/notes`, `docs/milestones` untouched. Older PROGRESS entries still name the old migrations and test files; they are history and were not rewritten.
+- No R4 fixes, no M3a/Stage B features.
+
+---
+
+## 2026-11-04 — M3 Stage A: transition tables, migration 0007, governance atomicity, fencing (Claude Code)
+
+Branch `claude/elegant-davinci-hcny5t`, draft PR [redtongues/PythonPlanner#3](https://github.com/redtongues/PythonPlanner/pull/3). `main` was merged in three times during the session (D8 errata E1–E11; D9 with ruling D9-R1; D10 with rulings Q1–Q16), all docs only. PM-owned docs were not edited (see the ruff note below). Stage A stops here for the PM checkpoint; no channels, kernel loop, GUI or integrations yet.
+
+**Suite:** 560 passed and 4 skipped (564 items: 346 SQLite, 218 PostgreSQL) on SQLite plus PostgreSQL 16 locally (Python 3.13), up from 410 + 4 at the start of the session. The 4 skips are the existing dialect-specific tests. The race tests passed 3× on PostgreSQL and 5× on SQLite. Ruff check and format are clean; the CI CLI smoke chain runs.
+
+### What was built
+| Piece | Where | Tests |
+|---|---|---|
+| Packet and run transition tables (C23), from D8 + errata E1–E11 + D9-R1 + D10 Q14, with actor kinds per row | `orchestrator/transitions.py` (single guard); `lifecycle.transition` applies it | `tests/test_transitions.py`: every unlisted pair × every actor kind rejected; D8 §4 list; errata rows |
+| Published tables + deviations | `docs/ARCHITECTURE.md` §7 (generated by `scripts/transition_tables.py`; a test fails on drift), §8 (C25/C26 mechanisms) | `test_architecture_doc_publishes_the_tables` |
+| Migration **0007** (frozen literal DDL, `orchestrator.db.ddl.m3_statements` is the authoring source) | `db/migrations/versions/0007_m3_runs_and_control.py`, `db/models.py` | `tests/test_m3_schema.py`; manifest regenerated (0001–0006 entries unchanged) |
+| C25 scope-wide gate bumps | `gates.bump_scope`, wired into autonomy scopes, settings, project/objective supersession, confirmation decisions | `tests/test_runs.py` |
+| C26 fencing, dispatch guard (E3), pause serialisation, kernel lock | `queue.claim`, `runs.py`, `control.py`, `budgets.py` (minimal C36 reservation primitive used by E3) | `tests/test_runs.py`, `tests/test_m3_races.py` |
+| R1 / E2 / Q5 parked-run decisions; cancellation | `runs.park_run`, `approve_run`, `reject_run`, `cancel_run` | both files |
+| Rulings 4–5 kernel claim handling | `runs.try_claim` | `tests/test_runs.py` |
+
+### 0007 contents
+- `generation_runs`: state set widened to the C24 machine (`planned`, `dispatched`, `awaiting_result`, `validating`, `accepted`, `failed`, `stale`, `awaiting_confirmation`; legacy `claimed`/`succeeded`/`abandoned` kept). New columns: channel, fencing token, live gate revision, lease and heartbeat, attempts, max attempts, deadline, resume key, model identity and `model_verified` (C29), manifest hash, commit SHA, expected HEAD, failure kind, `charged`, stale reason, finished at.
+- `channel_runs`: append-only (D10 Q3). New columns `generation_run_id`, `eva_packet_id`, `operation_id` (unique index), `fencing_token`. Outcomes go to the new append-only `channel_run_outcomes` (unique per attempt). View `v_run_attempts` shows each run's latest attempt and outcome for the console.
+- `packets`: `fencing_token`, `active_run_id` (E7).
+- New: `kernel_leases`, `governor_states`, append-only `governor_events` (with a unique `observation_key`: each observation counts once), `budget_counters`, append-only `budget_reservations`, `budget_reconciliations`, `budget_topups`.
+- Triggers (both dialects): **the packet and run transition tables are enforced in the database** (any status change not in `orchestrator.transitions` is rejected, marker `orchestrator-transition`); a finished run, or an accepted run whose commit is recorded, never changes; run bindings are frozen (channel, F, claimed_by, created_at), the run's G moves only by +1, manifest hash and commit SHA are write-once; the new append-only tables reject UPDATE/DELETE (PostgreSQL also TRUNCATE); control rows are never deleted, the lease epoch never decreases and a governor state change must raise its revision.
+- C22 test: a populated 0006 database (running and completed packets, a superseded version, an M2 `claimed` run, a QE attempt row) upgrades with ids, hashes, lineage, statuses and gate revisions unchanged; locked rows stay immutable; new `content_eval` rows are still rejected; the M2 run can only go stale; down to 0006 and back up works, and the downgrade refuses while M3 run states are in use.
+
+### Judgement calls (please check)
+1. **The DB enforces the transition tables**, not only the application (C23 asks for tests that unlisted transitions are rejected; the DB is the guarantee, as for immutability). Raw-SQL tests in `test_immutability.py` now walk the table before testing the lock invariant.
+2. **Deviations from D8** are P1–P6 and R1 in ARCHITECTURE §7.3 (each with its reason): P1 `ready → awaiting_confirmation` kept for the M2.1 #12 sweep; P2 users may complete from `evaluating_post`/`waiting_for_children` (same gate; keeps `packet complete`); P3 legacy M1 statuses only re-enter at `evaluating_pre`; P4 `archived` has no entries (replaced by `closed_unverified`); P5 new versions start in `draft`; P6 `blocked → evaluating_post` (D10 Q14); R1 legacy `claimed` runs may only go stale.
+3. **M2 behaviour changed to follow the table** (tests updated, not weakened): a review approval goes `needs_review → evaluating_pre` (owner) and then readiness `→ ready` as the kernel actor `system:readiness` in the same transaction; failure-budget approval → `queued` (or `evaluating_pre` if H changed); failure-budget rejection → `held` (C27 supersedes M2.1 #12's `failed`); a context change no longer sends `needs_review` back to evaluation (only the owner does, so a dispute never loops); completing straight from `draft` is rejected even with evidence; closing unverified requires a reason in the API too.
+4. **Settings changes bump every open packet's gate** (global scope). C25 does not list settings, but they hold thresholds, budgets and weights that readiness and eligibility read; this is the fail-closed reading. Autonomy-scope changes, project/objective supersession and the ingestion confirmation's decision bump their scopes as C25 lists.
+5. **Scope ids are refs** (stable across versions): `*`, `P-…`, `O-…`, `PP-…`; a branch is its trunk's ref plus every packet whose `root_id` is a version of it. Scope rows in `governor_states` are created lazily (insert-if-absent).
+6. **Pause serialisation:** a dispatch touches every governing scope row with `UPDATE … SET revision = revision + 1 WHERE status = 'normal'` in a fixed order (deadlock-free). That bumps `governor_states.revision` on each dispatch without an event of its own; the dispatch's attempt event records it. Pause/resume are evented and never bump packet gates (D10 Q4).
+7. **Kernel lock heartbeats write no event** (liveness, not a state change); acquisition, takeover and release do. `fence` doubles as the heartbeat inside each guarded transaction.
+8. **Parking a run bumps packet G and run G together.** Creating a confirmation is a governance write (M2.1 bumps on creation), which would otherwise stale the very run it parks. R1 covers approval and D10 Q5 rejection; creation is my extension of the same rule.
+9. **Approving a parked run fails closed** if any dispatch gate refuses (paused scope, budget, stale binding): the whole approval rolls back and the confirmation stays pending, rather than recording an approval that cannot resume (C27: approval revalidates the dispatch gates).
+10. **Cancelling a parked run requires its confirmation to be decided first** (cancellation follows rejection, C27/E2).
+11. **Every confirmation decision is now a compare-and-set** (`WHERE status = 'pending'`), not only parked-run ones. This closes a latent M2 race where two concurrent decisions could both apply.
+12. **`channel_runs.operation_id` is a unique index**, not a unique constraint, so 0007 can add it to the existing SQLite table without a rebuild. A unique index on the model keeps the drift check exact.
+13. **Budget columns are `period` / `period_start`**, not `window`, which is reserved in PostgreSQL.
+14. **Budget limits are passed by the caller** in Stage A (`budgets.Demand.limit`). Wiring them to settings, windows and top-ups is the Stage B governor.
+15. **The legacy `generation_runs.channel_run_id` FK is marked `use_alter`** in the model, to break the FK cycle with `channel_runs.generation_run_id`; otherwise the schema drift check silently skipped both tables' foreign keys.
+16. **0007 stays amendable until the M3 PR merges,** as 0002/0003 did during M1.1: nobody applies an unmerged revision, and C22 asks for one M3 migration. Stage B will extend 0007 (operation journal per D10 §1/§4, artifacts/manifests, scoped overrides C35) rather than add 0008. It is frozen at merge.
+17. **ruff excludes `docs/`** (`pyproject.toml`). ruff 0.16 formats Python snippets inside Markdown: `ruff format .` rewrote the PM's D10 doc, and CI's unpinned ruff would have failed `ruff format --check .` on main's docs. I restored D10 to main's version.
+
+### Spec points that look ambiguous or wrong (for the PM)
+- **Failure budget semantics vs `v_queue`.** C27 says approval grants a *bounded* allowance (`failure_budget_topup`, default 1) and counts failed *runs*; `v_queue` (0006) still implements M2.1 #12 (a fresh budget, counting failed LG/WP `channel_runs` *attempts*). With one row per attempt from M3, the view would count retries as failures. Stage B must change the view, which means a view change in 0007.
+- **C23's state set omits `archived`** and the M1 legacy statuses, but existing rows use them. Handled as P3/P4.
+- **D8 has no `ready → awaiting_confirmation`,** but the M2.1 #12 sweep needs it (P1). Otherwise a packet that reaches `ready` with an exhausted budget is stranded.
+- **Exit-3 confirmation creation vs R1.** R1 covers approval and Q5 covers rejection, but not the creation, which is also a gate write (judgement 8).
+- **Approval while paused.** C27 says approval revalidates the dispatch gates, but not whether a refused approval should stay pending or be recorded for a later resume. I chose pending (judgement 9).
+- **C22 "more only if unavoidable" vs staged delivery** (judgement 16).
+
+### Known issues / not in Stage A
+- C38 "crash after git commit, before the DB acknowledgement" needs the repository writer (Stage B).
+- E11 deadline handling, E4/E5/E6 guards, budget settings/windows and the governor ladder are in the tables and guard text only; they are wired in Stage B.
+- `generation_runs.channel` is taken from `packets.channel` at claim and may be NULL for an unrouted packet; the dispatch guard then refuses (fail closed). Stage B routing should make the claim itself refuse unrouted packets.
+- Rows with the legacy `claimed` state cannot be dispatched; `runs.reconcile_runs` stales them.
+
+### Next steps
+- PM checkpoint review of Stage A; then Stage B (kernel loop, channels, adapters, repo writer) per D10.
 
 ---
 

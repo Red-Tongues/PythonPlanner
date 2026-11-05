@@ -8,7 +8,12 @@ import pytest
 from sqlalchemy import Engine, func, select, text
 from sqlalchemy.orm import Session
 
-from orchestrator.contracts import EvaState, PacketStatus, RunStatus
+from orchestrator.contracts import (
+    EvaPhase,
+    EvaState,
+    PacketStatus,
+    RunStatus,
+)
 from orchestrator.db.ddl import is_immutability_violation
 from orchestrator.db.models import (
     ChannelRun,
@@ -16,14 +21,34 @@ from orchestrator.db.models import (
     EvaluationPass,
     EvaluationPassItem,
     EvaPacket,
+    EvaPreset,
+    Exemplar,
     Packet,
+    new_id,
 )
+from orchestrator.errors import ImmutableRecordError
 from orchestrator.evaluation import evaluate_packet, evaluate_pending, pending_packets
+from orchestrator.evaluation.evaluator import EvaluationError
 from orchestrator.evaluation.normalise import extract_json, normalise_quote, verify_quote
+from orchestrator.events import record_event
+from orchestrator.lifecycle import transition
 from orchestrator.llm import FakeProvider, ModelSpec
-from orchestrator.repository import get_packet, supersede_packet, update_packet
-from tests.conftest import USER
-from tests.evafixtures import TEXT_FIELD, ensure_text_field
+from orchestrator.repository import (
+    get_packet,
+    supersede_packet,
+    update_packet,
+)
+from tests.conftest import KERNEL, USER
+from tests.evafixtures import (
+    TEXT_FIELD,
+    add_artifact,
+    ensure_text_field,
+)
+from tests.govfixtures import (
+    bump_definition,
+    field_status,
+    ready_packet,
+)
 
 PRE_FIELDS = 15  # task-level fields with pre-phase presets
 
@@ -222,7 +247,6 @@ def test_pass_items_are_append_only(engine: Engine, session: Session, tree) -> N
 
 
 def test_core_edit_after_evaluation_needs_a_new_version(session: Session, tree) -> None:
-    from orchestrator.errors import ImmutableRecordError
 
     packet = tree.packets[0]
     _evaluate(session, packet.ref, FakeProvider())
@@ -267,3 +291,89 @@ def test_quote_normalisation_is_conservative() -> None:
     assert verify_quote("phone_camera", source)  # identifiers keep their underscores
     assert not verify_quote("the users barcode", source)  # no fuzzy matching
     assert normalise_quote("  a \n *b*  ") == "a b"
+
+
+# ---------------------------- currency of results, escalation, post-evaluation (M2.1 fixes 3, 4, 9)
+
+
+def test_definition_change_makes_results_pending_and_unreusable(session, tree) -> None:  # type: ignore[no-untyped-def]
+    packet = tree.packets[0]
+    evaluate_packet(session, packet, FakeProvider(), fields=["coding_intensity"])
+    assert field_status(session, packet, "coding_intensity") == "accepted"
+    old = session.scalar(select(EvaPacket.content_address))
+    bump_definition(session, "coding_intensity")
+    assert field_status(session, packet, "coding_intensity") == "pending"
+    report = evaluate_packet(session, packet, FakeProvider(), fields=["coding_intensity"])
+    assert report.reused == [] and report.calls == 6
+    assert (
+        old
+        not in session.scalars(
+            select(EvaPacket.content_address).where(EvaPacket.id != EvaPacket.id)
+        ).all()
+    )
+    assert field_status(session, packet, "coding_intensity") == "accepted"
+
+
+def test_exemplar_change_changes_the_content_address(session, tree) -> None:  # type: ignore[no-untyped-def]
+    from orchestrator.repository import supersede_packet
+
+    packet = tree.packets[0]
+    evaluate_packet(session, packet, FakeProvider(), fields=["coding_intensity"])
+    session.add(
+        Exemplar(field_name="coding_intensity", input_text="Write a parser.", expected_value=8)
+    )
+    record_event(session, actor=USER, action="t", entity_type="exemplar")
+    session.flush()
+    transition(packet, PacketStatus.NEEDS_REVIEW, KERNEL)
+    v2 = supersede_packet(session, packet.ref, {"repo_target_path": "x.md"}, actor=USER)
+    report = evaluate_packet(session, v2, FakeProvider(), fields=["coding_intensity"])
+    assert report.reused == [] and report.calls == 6  # same text, new exemplars: no reuse
+
+
+def test_new_preset_revision_makes_results_pending(session, tree) -> None:  # type: ignore[no-untyped-def]
+    packet = tree.packets[0]
+    evaluate_packet(session, packet, FakeProvider(), fields=["coding_intensity"])
+    session.add(
+        EvaPreset(
+            id=new_id(),
+            field_name="coding_intensity",
+            phase="pre",
+            revision=2,
+            tier=2,
+            required=True,
+            hard=False,
+            plan="combined",
+            prompt_template="quickfire.v1",
+            schema_version="1.0",
+            policy_version="1.1",
+            enabled=True,
+        )
+    )
+    record_event(session, actor=USER, action="t", entity_type="eva_preset")
+    session.flush()
+    assert field_status(session, packet, "coding_intensity") == "pending"
+
+
+def test_unresolved_escalation_sends_any_tier_to_needs_review(session, tree) -> None:  # type: ignore[no-untyped-def]
+    provider = FakeProvider().script(
+        None, r"### TASK: extract\n### FIELD: web_independence", "no idea, sorry"
+    )
+    report = evaluate_packet(session, tree.packets[0], provider)
+    assert report.unresolved == ["web_independence"]  # a tier-3 field
+    assert report.status == "needs_review"
+
+
+def test_post_evaluation_reads_the_newest_artifact(session: Session) -> None:
+    packet = ready_packet(session)
+    for status in (PacketStatus.QUEUED, PacketStatus.RUNNING, PacketStatus.EVALUATING_POST):
+        transition(packet, status, KERNEL)
+    with pytest.raises(EvaluationError, match="no artifact"):
+        evaluate_packet(session, packet, FakeProvider(), phase=EvaPhase.POST)
+    artifact = add_artifact(session, packet, "TASK: the generated output, short and correct.")
+    report = evaluate_packet(
+        session, packet, FakeProvider(), phase=EvaPhase.POST, fields=["correctness"]
+    )
+    targets = set(
+        session.scalars(select(EvaPacket.target_hash).where(EvaPacket.phase == EvaPhase.POST))
+    )
+    assert report.fields and targets == {artifact.sha256}

@@ -19,6 +19,11 @@ from orchestrator.actors import Actor
 from orchestrator.contracts import ProjectTree
 from orchestrator.db import init_db, make_engine, make_session_factory
 from orchestrator.ingest import persist_tree
+from orchestrator.repository import (
+    supersede_objective,
+    supersede_packet,
+    supersede_project,
+)
 
 POSTGRES_URL = os.environ.get("ORCH_TEST_POSTGRES_URL")
 USER = Actor.user("test")
@@ -130,3 +135,17 @@ def make_cycle(session: Session, packet_id: str, cycle_id: str | None = None) ->
     )
     session.flush()
     return cycle.id
+
+
+@pytest.fixture
+def superseded(session: Session, tree):  # type: ignore[no-untyped-def]
+    """v1 of a packet, objective and project, each superseded but NOT locked."""
+    supersede_packet(session, tree.packets[1].ref, {"title": "v2"}, actor=USER)
+    supersede_objective(session, tree.objectives[1].ref, {"name": "Ship v2"}, actor=USER)
+    supersede_project(session, tree.project.ref, {"brief": "v2"}, actor=USER)
+    session.commit()
+    return {
+        "packets": tree.packets[1].id,
+        "objectives": tree.objectives[1].id,
+        "projects": tree.project.id,
+    }

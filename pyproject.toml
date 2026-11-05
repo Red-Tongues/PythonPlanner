@@ -45,6 +45,8 @@ markers = [
 line-length = 100
 target-version = "py311"
 src = ["src", "tests"]
+# Markdown docs are PM-owned prose; ruff (0.16+) would otherwise reformat their code snippets.
+extend-exclude = ["docs"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM"]

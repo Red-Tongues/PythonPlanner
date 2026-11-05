@@ -429,6 +429,10 @@ def supersede_project(
         reason=reason,
     )
     session.flush()
+    from orchestrator.gates import bump_scope
+
+    # C25: interrupt / core supersession is a governance write for its whole scope
+    bump_scope(session, "project", new.ref, actor=actor, cause="project superseded")
     return new
 
 
@@ -474,6 +478,10 @@ def supersede_objective(
         reason=reason,
     )
     session.flush()
+    from orchestrator.gates import bump_scope
+
+    # C25: interrupt / core supersession is a governance write for its whole scope
+    bump_scope(session, "objective", new.ref, actor=actor, cause="objective superseded")
     return new
 
 
@@ -499,6 +507,11 @@ def set_setting(
         reason=reason,
     )
     session.flush()
+    from orchestrator.gates import bump_scope
+
+    # C25 (conservative reading): settings carry thresholds, budgets and weights that readiness
+    # and eligibility read, so a change is a global governance write
+    bump_scope(session, "global", "*", actor=actor, cause=f"setting {key}")
     return row
 
 
@@ -531,4 +544,7 @@ def set_autonomy_mode(
         reason=reason,
     )
     session.flush()
+    from orchestrator.gates import bump_scope
+
+    bump_scope(session, "global", "*", actor=actor, cause=f"autonomy scope {scope.stage.value}")
     return scope

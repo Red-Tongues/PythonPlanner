@@ -119,6 +119,7 @@ class ConfirmationStatus(StrEnum):
     PENDING = "pending"
     APPROVED = "approved"
     REJECTED = "rejected"
+    RETIRED = "retired"
 
 
 class EvaPhase(StrEnum):
@@ -186,7 +187,51 @@ class DependencyKind(StrEnum):
 
 
 class GenerationRunState(StrEnum):
+    """The durable run state machine (C1, C24, C27; transitions in ``orchestrator.transitions``).
+
+    ``claimed``, ``succeeded`` and ``abandoned`` are M2 values kept so old rows stay valid;
+    ``claimed`` may only go ``stale`` (it has no fencing token)."""
+
+    PLANNED = "planned"
+    DISPATCHED = "dispatched"
+    AWAITING_RESULT = "awaiting_result"
+    VALIDATING = "validating"
+    ACCEPTED = "accepted"
+    FAILED = "failed"
+    STALE = "stale"
+    AWAITING_CONFIRMATION = "awaiting_confirmation"
+    # legacy (M2)
     CLAIMED = "claimed"
     SUCCEEDED = "succeeded"
-    FAILED = "failed"
     ABANDONED = "abandoned"
+
+
+class ScopeType(StrEnum):
+    """Governance scopes (C25, C26, C33): what a pause, a budget or a gate bump applies to."""
+
+    GLOBAL = "global"
+    CHANNEL = "channel"
+    PROJECT = "project"
+    OBJECTIVE = "objective"
+    BRANCH = "branch"  # a trunk lineage (root ref) and all its descendants
+    PACKET = "packet"
+
+
+class ScopeStatus(StrEnum):
+    """C33: a scope is ``normal`` or ``paused``; a pause clears only on explicit owner resume."""
+
+    NORMAL = "normal"
+    PAUSED = "paused"
+
+
+class AttemptOutcome(StrEnum):
+    """How one channel attempt ended (C27 exit codes; recorded once per attempt)."""
+
+    SUCCEEDED = "succeeded"  # exit 0, output passed to validation
+    INVALID = "invalid"  # validation failed
+    FAILED = "failed"  # exit 1
+    TIMEOUT = "timeout"  # exit 4 / deadline
+    PARKED = "parked"  # exit 3
+    CONFIG_ERROR = "config_error"  # exit 2
+    STALE = "stale"  # result arrived for an obsolete fencing token / lease
+    UNKNOWN = "unknown"  # usage or outcome could not be established (keeps its reservation)

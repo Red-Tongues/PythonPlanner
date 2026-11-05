@@ -7,12 +7,31 @@ from docx import Document
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from orchestrator.contracts import AutonomyMode, PacketStatus, Stage
-from orchestrator.db.models import Confirmation, Event, Packet
-from orchestrator.errors import IngestionError
+from orchestrator.contracts import (
+    AutonomyMode,
+    PacketStatus,
+    Stage,
+)
+from orchestrator.db.models import (
+    Confirmation,
+    Event,
+    Packet,
+)
+from orchestrator.errors import (
+    IngestionError,
+)
 from orchestrator.ingest import ingest_file, parse_text, read_document
-from orchestrator.ingest.parser import clean_inline, make_title, name_from_path
-from orchestrator.repository import set_autonomy_mode
+from orchestrator.ingest.parser import (
+    DESCRIPTION_MAX,
+    UNTITLED_TASK,
+    clean_inline,
+    make_title,
+    name_from_path,
+    split_text,
+)
+from orchestrator.repository import (
+    set_autonomy_mode,
+)
 from tests.conftest import USER
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -229,3 +248,30 @@ def test_auto_ingestion_scope_skips_confirmation(session: Session) -> None:
 def test_ingest_archived_draft_persists(session: Session) -> None:
     result = ingest_file(session, DRAFT, actor=USER)
     assert result.packets
+
+
+# ------------------------------------------------------------------ graceful degradation (R1 fix 9)
+
+
+def test_untitled_fallback() -> None:
+    tree = parse_text("# P\n## O\n- [ ]\n- real task\n", fallback_name="x")
+    titles = [t.title for t in tree.objectives[0].tasks]
+    assert titles == [UNTITLED_TASK, "real task"]
+
+
+def test_long_descriptions_are_split_not_lost(tmp_path, session: Session) -> None:  # type: ignore[no-untyped-def]
+    paragraphs = [f"Paragraph {i}: " + "word " * 900 for i in range(12)]
+    doc = tmp_path / "long.md"
+    doc.write_text("# Big\n## Spec\n### Everything\n" + "\n\n".join(paragraphs) + "\n")
+    result = ingest_file(session, doc, actor=USER)
+    parts = [p for p in result.packets if p.title.startswith("Everything (part")]
+    assert len(parts) >= 2
+    assert all(len(p.prompt_description) <= DESCRIPTION_MAX for p in parts)
+    joined = "\n\n".join(p.prompt_description.split("\n\n", 1)[1] for p in parts)
+    assert all(para.strip() in joined for para in paragraphs)
+    assert parts[0].title.endswith(f"(part 1/{len(parts)})")
+
+
+def test_split_text_hard_cuts_only_inside_one_huge_line() -> None:
+    chunks = split_text("a" * 50_000, budget=20_000)
+    assert [len(c) for c in chunks] == [20_000, 20_000, 10_000]

@@ -327,6 +327,7 @@ def claim(
     packet = get_packet(session, packet_ref)
     session.refresh(packet)
     observed = packet.gate_revision
+    fence = packet.fencing_token
     if PacketStatus(packet.status) is not PacketStatus.QUEUED:
         raise ClaimError(f"{packet.ref} is {PacketStatus(packet.status).value}, not queued")
     if not require_current_context(session, packet, actor=actor):
@@ -343,6 +344,7 @@ def claim(
         raise ClaimError(f"{packet.ref} is no longer ready: " + "; ".join(report.blockers))
     lease = now + timedelta(minutes=get_int(session, "queue.lease_minutes", 30))
     snapshot = evaluation_snapshot(session, packet)
+    run_id = new_id()
     if before_cas is not None:
         before_cas()
     won = guarded_status_update(
@@ -350,26 +352,36 @@ def claim(
         packet,
         expected=PacketStatus.QUEUED,
         observed_gate=observed,
+        observed_fence=fence,
         values={
             "status": PacketStatus.RUNNING,
             "claimed_by": worker,
             "lease_expires_at": lease,
             "heartbeat_at": now,
             "updated_at": now,
+            "fencing_token": fence + 1,  # C26: every claim carries a new, higher token
+            "active_run_id": run_id,  # E7: the run that owns this packet version
         },
     )
     if not won:
         raise ClaimError(
             f"{packet.ref}: claim lost (gates, context or version changed, or claimed by another)"
         )
+    channel = packet.channel
     run = GenerationRun(
-        id=new_id(),
+        id=run_id,
         packet_id=packet.id,
         packet_version=packet.version,
         input_hash=packet.input_hash or "",
         claimed_by=worker,
-        state=GenerationRunState.CLAIMED,
+        state=GenerationRunState.PLANNED,  # C24: the run state machine starts here
         evaluation_snapshot=snapshot,
+        channel=channel,
+        fencing_token=fence + 1,
+        gate_revision=observed,
+        lease_expires_at=lease,
+        heartbeat_at=now,
+        max_attempts=get_int(session, f"attempts.{channel.value}", 1) if channel else None,
     )
     session.add(run)
     record_event(
@@ -386,6 +398,7 @@ def claim(
             "worker": worker,
             "lease_expires_at": lease.isoformat(),
             "gate_revision": observed,
+            "fencing_token": fence + 1,
         },
         reason="atomic claim after readiness re-check",
     )

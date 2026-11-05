@@ -347,5 +347,36 @@ def complete_with_evidence(session: Session, packet: Packet, actor) -> None:  # 
     from orchestrator.contracts import PacketStatus
     from orchestrator.lifecycle import transition
 
+    drive_to(packet, PacketStatus.EVALUATING_POST)
     accept_post(session, packet, add_artifact(session, packet))
     transition(packet, PacketStatus.COMPLETED, actor, "accepted with post-evaluation evidence")
+
+
+def drive_to(packet: Packet, target) -> None:  # type: ignore[no-untyped-def]
+    """Move ``packet`` to ``target`` along the shortest path of kernel moves in the M3 table
+    (a test shortcut past the claim and the write; the table and the DB trigger still apply)."""
+    from collections import deque
+
+    from orchestrator.contracts import PacketStatus
+    from orchestrator.lifecycle import transition
+    from orchestrator.transitions import PACKET_TRANSITIONS
+
+    start = PacketStatus(packet.status).value
+    target = PacketStatus(target).value
+    previous: dict[str, str | None] = {start: None}
+    todo = deque([start])
+    while todo:
+        node = todo.popleft()
+        for (a, b), rule in sorted(PACKET_TRANSITIONS.items()):
+            if a == node and b not in previous and "system" in rule.actors:
+                previous[b] = node
+                todo.append(b)
+    if target not in previous:
+        raise AssertionError(f"no kernel path {start} → {target}")
+    path: list[str] = []
+    node: str | None = target
+    while node != start:
+        path.append(node)  # type: ignore[arg-type]
+        node = previous[node]  # type: ignore[index]
+    for status in reversed(path):
+        transition(packet, PacketStatus(status), FIXTURE, "test fixture path")

@@ -26,7 +26,7 @@ def extract_tree_with_llm(
     model: str | None = None,
     max_attempts: int = 4,
 ) -> ProjectTree:
-    from orchestrator.evaluation.contracts import concise_error, json_schema
+    from orchestrator.contracts.evaluation import concise_error, json_schema
     from orchestrator.evaluation.normalise import OutputFormatError, extract_json
     from orchestrator.evaluation.prompts import correction_suffix, tree_prompt
 

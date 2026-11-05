@@ -51,7 +51,7 @@ def test_end_to_end(db_url: str) -> None:
 
     # M2.1 fix 5: completing needs evidence; closing without it is closed_unverified
     result = cli(db_url, "packet", "complete", "PP-000001")
-    assert result.exit_code == 1 and "cannot complete yet" in result.output
+    assert result.exit_code == 1 and "draft → completed is not in the packet table" in result.output
     result = cli(db_url, "packet", "close", "PP-000001", "--reason", "done by hand")
     assert result.exit_code == 0, result.output
     assert "closed (unverified) and locked" in result.output
