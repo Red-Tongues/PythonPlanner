@@ -9,11 +9,11 @@ Newest entries first. Every agent session appends an entry: what changed, decisi
 Handover from the PM after the CFO's directive (`docs/notes/2026-11-05_CFO_T1C_v2_Directive_and_Review.docx`). The work is **docs only**: no `src/` changes and no M3a code. Branch `docs/t1c-v3-m3a-spec`, one commit per task, draft PR into `main` (not merged). PR #3 was already merged (6b89a18), so the directive's Step 1 is done.
 
 **What changed**
-- **Directive .md** (9e7a147): the committed Markdown is now a verbatim pandoc-checked conversion of the .docx.
+- **Directive .md** (1813d4d): the committed Markdown is now a verbatim pandoc-checked conversion of the .docx.
   - The earlier conversion had added a "Subject:" line, dropped the C.ii intro sentence, shortened Sketch 2's heading and changed `sonar_Hotspot_alignment`.
   - A conversion note says the .docx is authoritative.
-- **PROJECT_PLAN §21** (e231aa9): dated entries for the directive, decisions Q1–Q7 and the PM note that Step 1 is satisfied.
-- **T1-C v3 (Final)** (`docs/notes/2026-11-05_T1C_v3_final.md`, dcf2e3e).
+- **PROJECT_PLAN §21** (06b0be4): dated entries for the directive, decisions Q1–Q7 and the PM note that Step 1 is satisfied.
+- **T1-C v3 (Final)** (`docs/notes/2026-11-05_T1C_v3_final.md`, 4b25ea1).
   - **Kept:** the outbox, `field_revisions`, `content_blobs`, `sealed_bundles`, the trigger proof (T1–T6) and fencing.
   - **Retired:**
     - `supersedes_id` cloning of genPackets;
@@ -21,7 +21,7 @@ Handover from the PM after the CFO's directive (`docs/notes/2026-11-05_CFO_T1C_v
     - `enforce_failure_budgets` and the K = 3 breaker (plus the lineage retry budget and the 10% prior);
     - `binding_mismatch` staling on `gate_revision` / upstream `input_hash`;
     - v2's "re-opening" and episode numbers. A genPacket now seals once and continues as a child.
-- **Q1 v2** (`docs/notes/2026-11-04_Q1_queue_maths_brainstorm.md`, fe6cbee):
+- **Q1 v2** (`docs/notes/2026-11-04_Q1_queue_maths_brainstorm.md`, 1fd3f2d):
   - genQueue with evaQueue as a subset;
   - continuous Ready/Queued enrichment;
   - the 0–2 lockout;
@@ -29,7 +29,7 @@ Handover from the PM after the CFO's directive (`docs/notes/2026-11-05_CFO_T1C_v
   - feedback as a weight;
   - crashes counted apart from grades.
   - Steps 1–3 are kept as history, each mapped to what Q1 v2 does with it.
-- **M3a spec draft** (`docs/milestones/M3a_genpacket_loop.md`, b56375d):
+- **M3a spec draft** (`docs/milestones/M3a_genpacket_loop.md`, 15aff22):
   - scope = Step 3 (a)–(e);
   - module/view change table (directive C.i, re-located to current line numbers);
   - 35 acceptance criteria for SQLite + PostgreSQL 16;
@@ -46,7 +46,9 @@ Handover from the PM after the CFO's directive (`docs/notes/2026-11-05_CFO_T1C_v
   - **OQ15:** today's repo write happens before post-evaluation.
 - Not edited: CLAUDE.md Golden Rule 1 and Requirement F. Their rewording waits for the CFO (OQ26).
 
-**Known issues:** the directive's C.i line numbers predate PR #3's final tree; the M3a table uses current approximate locations.
+**Known issues**
+- The directive's C.i line numbers predate PR #3's final tree; the M3a table uses current approximate locations.
+- **`git push` from this session was rejected by GitHub** (`fatal error in commit_refs`) for every ref, including pushing an existing commit to a new branch. The commits were recreated one by one through the GitHub API with the same messages and content. After each one, a fetch and `git diff` showed the remote tree identical to the local commit. Their SHAs differ from the local ones; the SHAs above are the pushed ones.
 
 **Next:**
 1. The CFO reviews the draft PR and answers or delegates OQ1–OQ28.
