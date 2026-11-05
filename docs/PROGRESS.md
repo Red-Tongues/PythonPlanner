@@ -4,6 +4,35 @@ Newest entries first. Every agent session appends an entry: what changed, decisi
 
 ---
 
+## 2026-11-05 08:20–09:00 — R4 verification on PostgreSQL, fixes and review (Claude Code)
+
+Fresh session on PR [redtongues/PythonPlanner#3](https://github.com/redtongues/PythonPlanner/pull/3) (`claude/elegant-davinci-hcny5t`). It covers the Copilot agent's groups 3–11 (d205356, 66076d0). No new features, no T1-C/M3a work; not merged.
+
+**What changed**
+- **Why CI never ran for 66076d0:** PR #3 conflicted with the force-updated `main` (PROGRESS.md only), so GitHub built no merge ref and ran no `pull_request` workflow. Merged `origin/main` (docs only) in fa203b8.
+- **PostgreSQL 16 (local):** 4 failures; SQLite had 1 of them.
+  - **One real bug, fixed (75e801e, MR9).** A torn read under READ COMMITTED let a late approval stale a parked run that a concurrent rejection had just kept parked. The stale disposition now retires its own confirmation with the once-only CAS first, so a decided confirmation makes the approval lose. A deterministic regression test injects the torn read.
+  - **Three agent test bugs, fixed (95cb2f1):** `"duplicate"` outcome rejected; a pause test that deadlocks on PG; savepoint/`pytest.raises` order.
+- **PM observations:**
+  - (b) the `input_hash` rewrite is now in the failure-budget event's before/after (ad66ca3).
+  - (c) `budget.reserved` is now recorded only after every demand succeeds (39f5385). The old order was safe, because no `src/` code catches `BudgetExhausted`, but it relied on the caller rolling back.
+  - MR5 now has an actor assertion (c8f444a).
+- **PR description:** a 16-row R4 table (code → test → panel / code / test status). 15 of 16 are test-proven. GA-R1 is code-verified only: its guard is unreachable behind `_bump_pair`'s full-binding CAS in the same transaction.
+
+**Decisions / deviations**
+- **D8 deviation flagged, not changed:** split rejection `awaiting_confirmation → ready` (user).
+  - Recommend removing it: D8 row 61 sends every rejection to `held`, and a user `→ ready` skips the kernel's readiness decision.
+  - If the CFO wants no extra owner step, use the review pattern instead (user → `evaluating_pre`, readiness admits).
+- **Kept (recommend):** kernel `ready → awaiting_confirmation` for a split request. D8 row 60 needs the packet there; it is the same kind of gap-fill as P1.
+
+**Tests:** 597 passed, 4 skipped on SQLite + PostgreSQL 16 locally; the concurrency suite was green on 5/5 repeat runs. Ruff clean. CI: see the PR.
+
+**Known issues:** `main`'s own CI runs have been failing since the 5 Nov 02:15 PM pushes (not investigated; outside this PR's scope).
+
+**Next:** the CFO decides the split-rejection target; Argon (or the GitHub Copilot auditor) audits the R4 diff and the 16-item map.
+
+---
+
 ## 2026-11-05 02:10–03:00 — Sprint: T1-C v2 and R4 status (PM)
 
 - **R4 groups 3–11:** done by the GitHub Copilot cloud agent (SQLite 361 passed / 234 skipped; PostgreSQL not run). **Not pushed.** Waiting for the CFO to press *Create pull request*.
