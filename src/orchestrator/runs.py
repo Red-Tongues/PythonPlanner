@@ -475,8 +475,11 @@ def reconcile_runs(session: Session, *, now: datetime | None = None) -> list[str
     run has no lease to expire: it waits for its owner, but any other governance change still
     stales it (E2)."""
     staled: list[str] = []
+    # R4 audit J3: a fixed (packet_id, id) order, so two kernels lock rows in the same order
     for run in session.scalars(
-        select(GenerationRun).where(GenerationRun.state.in_([s.value for s in RUN_ACTIVE]))
+        select(GenerationRun)
+        .where(GenerationRun.state.in_([s.value for s in RUN_ACTIVE]))
+        .order_by(GenerationRun.packet_id, GenerationRun.id)
     ).all():
         if run.state == R.ACCEPTED and run.commit_sha is not None:
             continue
@@ -492,6 +495,7 @@ def reconcile_runs(session: Session, *, now: datetime | None = None) -> list[str
             GenerationRun.state == R.STALE.value,
             Packet.recovery_pending.is_(True),
         )
+        .order_by(GenerationRun.packet_id, GenerationRun.id)
     ).all()
     for run in deferred:
         packet = session.get(Packet, run.packet_id)
