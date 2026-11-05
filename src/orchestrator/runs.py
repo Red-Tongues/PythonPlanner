@@ -376,11 +376,22 @@ def stale_run(session: Session, run: GenerationRun, reason: str, *, actor: Actor
         )
         session.flush()
     else:  # keep state and restrictions; only release the ownership (evented)
-        session.connection().execute(
+        result = session.connection().execute(
             update(table)
             .where(table.c.id == packet.id, *owner)
             .values(active_run_id=None, recovery_pending=False)
         )
+        if result.rowcount != 1:
+            # R4 audit J2: a concurrent writer released or replaced the ownership after we read
+            # it. The release is idempotent: its goal (no packet pointing at this stale run) is
+            # already met, so record nothing rather than an event for a change we did not make.
+            # We do not raise LostRace: that would roll back the run's own audited stale
+            # disposition (MR9), which is still correct. Raise only if this run still owns it.
+            session.refresh(packet)
+            if packet.active_run_id == run.id and packet.fencing_token == run.fencing_token:
+                raise LostRace(f"{packet.ref}: ownership release matched no row")
+            log.info("%s: run %s already released by another writer", packet.ref, run.id)
+            return
         set_committed_value(packet, "active_run_id", None)
         set_committed_value(packet, "recovery_pending", False)
         record_event(

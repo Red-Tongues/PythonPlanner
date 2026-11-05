@@ -402,6 +402,44 @@ def test_rejection_holds_the_packet_and_leaves_the_run_parked(session: Session) 
     assert packet.status is S.HELD and packet.active_run_id is None
 
 
+def test_stale_release_records_nothing_when_ownership_already_moved(session: Session) -> None:
+    """R4 audit J2: the packet's ownership changes between stale_run's read and its release
+    UPDATE (as a concurrent commit does under READ COMMITTED). The run still goes stale, but no
+    release is applied to the ORM object and no ``packet.run_released`` event is recorded."""
+    from sqlalchemy import update
+
+    from orchestrator.db.models import Event
+    from orchestrator.runs import stale_run
+
+    packet, run, confirmation = _parked(session)
+    reject_run(session, confirmation.id, actor=USER, reason="not like this")
+    assert packet.status is S.HELD and packet.active_run_id == run.id
+    real_refresh = session.refresh
+    armed: list[bool] = [True]
+
+    def refresh(instance: object, *args: object, **kwargs: object) -> None:
+        real_refresh(instance, *args, **kwargs)  # type: ignore[arg-type]
+        if armed and isinstance(instance, Packet):  # stale_run's ownership read
+            armed.clear()
+            table = Packet.__table__
+            session.connection().execute(  # "another writer" releases it in between
+                update(table).where(table.c.id == packet.id).values(active_run_id=None)
+            )
+
+    session.refresh = refresh  # type: ignore[method-assign]
+    stale_run(session, run, "test: unrelated governance change")
+    session.refresh = real_refresh  # type: ignore[method-assign]
+    assert run.state is R.STALE
+    session.expire(packet)
+    assert packet.active_run_id is None and packet.status is S.HELD
+    released = session.scalar(
+        select(func.count())
+        .select_from(Event)
+        .where(Event.entity_id == packet.id, Event.action == "packet.run_released")
+    )
+    assert released == 0
+
+
 def test_trunk_dispatch_includes_its_own_branch_scope(session: Session) -> None:
     packet, run = claimed_run(session)
     assert packet.parent_id is None
