@@ -1,35 +1,33 @@
 # Architectural Directive & Alignment Review: T1-C v2, Queue Maths, and M3a Re-alignment
 
-**From:** The CFO  
-**To:** Project Manager (Claude) & Engineering Team (Claude Code / Review Panel)  
-**Date:** 5 November 2026  
-**Subject:** Authoritative Responses to T1-C v2 Questions (1–7), Project Alignment Audit, and Required Course Corrections Before M3a  
-**Scope Label:** **PRODUCT** (Sections A–C) & **BUILD PROCESS** (Sections D–E)
+From: The CFO  |  To: PM (Claude) & Engineering Team  |  Date: 5 November 2026  |  Scope: PRODUCT & BUILD PROCESS
+
+> **Conversion note (engineer, 2026-11-05):** Markdown rendering of `2026-11-05_CFO_T1C_v2_Directive_and_Review.docx`, which is authoritative where they differ. Checked word by word against `pandoc -t gfm` output of the .docx. Only formatting was added: headings, code fences, inline code marks, list numbering. The text is the CFO's own, including the code sketches, which the directive labels non-production references.
 
 ---
 
 ## Section A — Introductory Page: Sharpened CFO Responses to the Seven T1-C v2 Questions
 
-This introductory section provides the authoritative CFO decisions on the seven sign-off questions in `docs/notes/2026-11-05_T1C_v2.md`, followed by a traceability matrix connecting these answers to prior CFO guidance (`docs/notes/2026-11-04_CFO_Argon_clarification.md`, `docs/notes/2026-11-04_T1_genpacket_history_and_failure_theory.md`, `docs/PROJECT_PLAN.md` §20.1 & §21, and `docs/PROGRESS.md`).
+This introductory section provides the authoritative CFO decisions on the seven sign-off questions in `docs/notes/2026-11-05_T1C_v2.md`, followed by a traceability matrix connecting these answers to prior CFO guidance (`2026-11-04_CFO_Argon_clarification.md`, `2026-11-04_T1_genpacket_history_and_failure_theory.md`, `docs/PROJECT_PLAN.md` §20.1 & §21, and `docs/PROGRESS.md`).
 
-### 1. What "completed work is immutable" means (Mutable Developing Packet + Sealed Snapshot + Child Lineage)
+### 1. What 'completed work is immutable' means (Mutable Developing Packet + Sealed Snapshot + Child Lineage)
 **Decision: Approved (`packets` editable while developing, sealed as a permanent snapshot once `gen_eva` completes; further iterations spawn child `genPackets`).**  
-"Snapshots" is the right model. While a `genPacket` is developing (before it completes generation and post-generation grading), its fields are built up by `evaPackets` and may be edited directly in SQL, with every edit copied automatically into an append-only history table (`raw_revision_outbox` → `field_revisions` + `content_blobs`). When a `genPacket` completes generation and passes through post-generation grading (`gen_eva`), **a permanent snapshot of it is frozen (`sealed_bundles`)**. Rather than re-opening and mutating that completed packet in place, any re-imagined prompt born from its grading is created as a **child `genPacket`** (`parent_id` → sealed parent).
+'Snapshots' is the right model. While a `genPacket` is developing (before it completes generation and post-generation grading), its fields are built up by `evaPackets` and may be edited directly in SQL, with every edit copied automatically into an append-only history table (`raw_revision_outbox` → `field_revisions` + `content_blobs`). When a `genPacket` completes generation and passes through post-generation grading (`gen_eva`), **a permanent snapshot of it is frozen (`sealed_bundles`)**. Rather than re-opening and mutating that completed packet in place, any re-imagined prompt born from its grading is created as a **child `genPacket`** (`parent_id` → sealed parent).
 
 ---
 
 ### 2. When something upstream changes (`question_context` & Objective Evidence Linking)
-**Decision: Upstream and linked changes must NEVER render downstream evaluations "unusable" or stall generation. Replace hard context invalidation with a per-field `question_context` toggle/counter and objective evidence-based linking.**
-- **No cascade stalling:** If an upstream change (to a Project brief, Objective brief, or another packet) rendered downstream evaluations "unusable and in need of reassessment", generation would permanently stall. When evaluations or generations are produced against upstream or downstream context, they **remain tied to that context snapshot for processing and remain usable**.
+**Decision: Upstream and linked changes must NEVER render downstream evaluations 'unusable' or stall generation. Replace hard context invalidation with a per-field `question_context` toggle/counter and objective evidence-based linking.**
+- **No cascade stalling:** If an upstream change (to a Project brief, Objective brief, or another packet) rendered downstream evaluations 'unusable and in need of reassessment', generation would permanently stall. When evaluations or generations are produced against upstream or downstream context, they **remain tied to that context snapshot for processing and remain usable**.
 - **The `question_context` indicator:** Each evaluative field is tagged with a deterministic boolean `question_context` toggle (and integer `question_context_count`) that automatically switches on if context that contributed to that specific evaluation has since changed. **This does not apply to tasks that have already been parsed/federated into children (`waiting_for_children` / `archived`)**—only to active tasks requiring processing or remediation. The presence of `question_context` tags feeds directly into the `genQueue` / `evaQueue` mathematical calculation.
 - **Objective registering of linked context by `evaPackets` (Direct vs. Peripheral):** We must distinguish between *directly linked context* and *peripheral context*. Structural hierarchy (`Project \ Objective \ Task {+parsing}`) gives baseline structure, but structural tagging alone is not sufficient to highlight which context actually drove an evaluation. **The verified `SUPPORT` / `CONTRADICTION` evidence quotes produced by `evaPackets` (passes 3–6) are the key mechanism here.** Crucially, detecting whether linked context has changed must **not** depend on LLM calls—it must rely on objective, measurable SQL comparisons against the registered evidence-linked sources.
 
 ---
 
-### 3. "Failure maths", Re-imagined Child `genPackets`, `evaQueue ⊂ genQueue`, Continuous Enrichment, and `gen_eva`
-**Decision: Reject the "3 failures in a row on the same prompt" assumption. Re-imagined prompts after `gen_eva` appear back as child `genPackets` inside `genQueue` (with `evaQueue` as a subset of `genQueue`), `Ready` / `Queued` packets are NOT immune from further `evaQueue` enrichment outside positions 0–2, and achieving `Queued` status depends purely on relational mathematical context.**
+### 3. 'Failure maths', Re-imagined Child `genPackets`, `evaQueue ⊂ genQueue`, Continuous Enrichment, and `gen_eva`
+**Decision: Reject the '3 failures in a row on the same prompt' assumption. Re-imagined prompts after `gen_eva` appear back as child `genPackets` inside `genQueue` (with `evaQueue` as a subset of `genQueue`), `Ready` / `Queued` packets are NOT immune from further `evaQueue` enrichment outside positions 0–2, and achieving `Queued` status depends purely on relational mathematical context.**
 
-- **(i) User feedback as a mathematical input:** While "failure maths is still learning" read partly as a figure of speech, one of the core drivers making the queue mathematics sophisticated **should** be formal feedback from the user as the project progresses (confirmations, waivers, manual SQL edits, overrides, and grade adjustments fed back as mathematical weights).
+- **(i) User feedback as a mathematical input:** While 'failure maths is still learning' read partly as a figure of speech, one of the core drivers making the queue mathematics sophisticated **should** be formal feedback from the user as the project progresses (confirmations, waivers, manual SQL edits, overrides, and grade adjustments fed back as mathematical weights).
 - **(ii) A `genPacket` is never rerun identically; post-`gen_eva` re-imagination creates a child `genPacket`:** Failure and success scores/tags (grading) apply to *all* generated content after a `genPacket` is processed through `gen_eva`. Once a `genPacket` has been fully processed and graded, **it is impossible for it to be rerun identically**. Regardless of the grade it receives—even a nearly perfect score—the task is rewritten accordingly and **returns as a child `genPacket`** carrying additional context and a prompt re-imagined on the basis of its grade.
 - **(iii) `evaQueue` is a subset of `genQueue` (`evaQueue ⊂ genQueue`), and `Ready` / `Queued` `genPackets` remain open to `evaQueue` enrichment:** All active tasks live as `genPackets` in `genQueue`, and `evaQueue` is the subset of `genQueue` that requires `evaPacket` processing. Re-imagined prompts appear back as child `genPackets`, which are **typically (though not necessarily) first fed by `evaPackets` in `evaQueue` before achieving a `Ready` status in `genQueue`**. Crucially, **achieving `Ready` or `Queued` status does NOT make a `genPacket` immune from further `evaQueue` enrichment**: while a `Ready` or `Queued` `genPacket` waits in `genQueue` (outside the position 0–2 lockout zone), `evaPackets` continue enriching its optional/secondary evaluative fields, `locally_drafted_examples`, and `question_context` refreshes.
 - **(iv) Mandatory `eva` fields (`Ready`) vs. Relational Mathematical Context (`Queued`):** Achieving `Ready` requires specific mandatory `eva` fields to be filled—some fields are **universally mandatory** for all `genPackets`, and others become **relationally mandatory** based on the packet's relationships (dependencies, dependents, chartedness, or task family). **Whether a child `genPacket` achieves a `Queued` status or not depends purely on the relational mathematical context:** a well-graded, non-relational generation's child starts at the bottom of `genQueue` / `evaQueue` and may never become `Queued`, whereas a poorly-graded, pivotal (highly relational) generation's child goes right to the top and is reprocessed nearly immediately.
@@ -45,11 +43,11 @@ A **Crash** occurs when the channel/adapter times out, disconnects, or fails to 
 
 ### 5. Failure history after a split or clarification (Linked Lineage History)
 **Decision: Preserve full linked lineage history via the `parent_id` / `root_id` tree instead of an arbitrary 10% scalar penalty carry-over.**  
-Because every re-imagination, split, or clarification creates child `genPackets` linked to their parent (`parent_id`, `root_id`), the parent's exact `gen_eva` grade bundle, evidence tags, and crash telemetry remain directly queryable across the ancestor chain in SQL without requiring a synthetic "10% penalty" or manual per-cause confirmation.
+Because every re-imagination, split, or clarification creates child `genPackets` linked to their parent (`parent_id`, `root_id`), the parent's exact `gen_eva` grade bundle, evidence tags, and crash telemetry remain directly queryable across the ancestor chain in SQL without requiring a synthetic '10% penalty' or manual per-cause confirmation.
 
 ---
 
-### 6. Extending the "based-on" rule intra-packet
+### 6. Extending the 'based-on' rule intra-packet
 **Decision: Approved (`prompt_description` → pre-`eva` / `locally_drafted_examples` → `generation_output` + thinking → `gen_eva` → sealed snapshot → child `genPacket`).**  
 Within a single `genPacket`, each stage records the hash of the earlier intra-packet stage it was derived from, and the re-imagined child `genPacket` records the sealed `gen_eva` bundle ID/hash of the parent that spawned it.
 
@@ -111,7 +109,7 @@ Within a single `genPacket`, each stage records the hash of the earlier intra-pa
 
 #### 1. Whole-Row `supersedes_id` Cloning vs. Mutable Developing Packet + Sealed Snapshot + Re-imagined Child `genPacket`
 - **Current code & spec references:** `src/orchestrator/repository.py:217–245` (`update_packet` raises `ImmutableRecordError` when editing core fields outside `DRAFT`, forcing `supersede_packet` to clone the row via `supersedes_id`); `src/orchestrator/db/ddl.py:45–95` (`trg_packets_immutable_when_locked`); `docs/notes/2026-11-05_T1C_v2.md` §1 (`raw_revision_outbox`, `field_revisions`, `content_blobs`, `sealed_bundles`).
-- **Required change / rollback:** Adopt `T1-C v2` §1's `raw_revision_outbox` + `field_revisions` + `content_blobs` so developing `genPackets` (`draft`, `evaluating_pre`, `ready`, `queued`) can be updated in place (including directly in SQL) with automatic append-only history capture. When `gen_eva` completes, freeze the completed `genPacket` into `sealed_bundles` (`locked = True`, `status = 'completed'`) and **spawn the re-imagined prompt as a child `genPacket`** (`parent_id = parent.id`, `root_id = parent.root_id or parent.id`, `depth = parent.depth + 1`) rather than re-opening the same row across "episodes" or cloning via `supersedes_id`.
+- **Required change / rollback:** Adopt `T1-C v2` §1's `raw_revision_outbox` + `field_revisions` + `content_blobs` so developing `genPackets` (`draft`, `evaluating_pre`, `ready`, `queued`) can be updated in place (including directly in SQL) with automatic append-only history capture. When `gen_eva` completes, freeze the completed `genPacket` into `sealed_bundles` (`locked = True`, `status = 'completed'`) and **spawn the re-imagined prompt as a child `genPacket`** (`parent_id = parent.id`, `root_id = parent.root_id or parent.id`, `depth = parent.depth + 1`) rather than re-opening the same row across 'episodes' or cloning via `supersedes_id`.
 
 #### 2. Hard Upstream Context Invalidation vs. `question_context` & Objective `evaPacket` Evidence Linking
 - **Current code & spec references:** `src/orchestrator/evaluation/evaluator.py:137–168` (`packet_document` hashes `project.brief` and `objective.brief` into `packets.input_hash`); `src/orchestrator/gates.py:88–118` & `180–215` (`require_current_context` and `bump_scope` kick `ready`/`queued` packets back to `evaluating_pre` on any Project/Objective edit); `src/orchestrator/sql/views.py:252–290` (`v_field_consensus` sets `is_current = 0`, `status = 'pending'`, and `final_value = NULL` when `e.target_hash != p.input_hash`).
@@ -133,12 +131,14 @@ Within a single `genPacket`, each stage records the hash of the earlier intra-pa
 - **Required change / rollback:** Remove `enforce_failure_budgets` from `queue.py` and drop the `K=3` same-prompt circuit breaker from `T1-C v2` §3. Distinguish between **Crashes** (`generation_output IS NULL` due to timeout/adapter fault → increment `crash_count`, keep `genPacket` unsealed, nudge route health) and **Completed Generations** (`generation_output IS NOT NULL` → immediately run `gen_eva` gate without queue maths, seal parent `genPacket` with its `gen_eva` grade, and spawn the re-imagined child `genPacket`).
 
 #### 5. Protecting Active Generations & Enforcing the `genQueue` Position 0 / 1 / 2 Lockout Rule
-- **Current code & spec references:** `src/orchestrator/runs.py:169–215` (`binding_mismatch` stales active/accepted runs if `gate_revision` or `input_hash` changes); `docs/notes/2026-11-05_T1C_v2.md` §6.1 & Q7 ("cancel the run, so your edit wins").
+- **Current code & spec references:** `src/orchestrator/runs.py:169–215` (`binding_mismatch` stales active/accepted runs if `gate_revision` or `input_hash` changes); `docs/notes/2026-11-05_T1C_v2.md` §6.1 & Q7 ('cancel the run, so your edit wins').
 - **Required change / rollback:** Remove `gate_revision` and upstream `input_hash` checks from `binding_mismatch` in `runs.py` so background calculations, `evaPackets`, and context edits never cancel or stale an active generation. Enforce the `genQueue` Position 0 / 1 / 2 Lockout Rule in `v_eva_queue` and `evaluator.py` so `evaPackets` are never scheduled on, or on direct links of, `genPackets` in `genQueue` positions `0`, `1`, or `2`.
 
 ---
 
 ### C.ii — Quick Draft Rewrites (Non-Production Reference Sketches for the Engineering Team)
+
+The following five non-production reference sketches illustrate the exact SQL and Python shapes required to implement the corrections in Section C.i.
 
 #### Sketch 1: `v_gen_queue` and Subset `v_eva_queue` with Continuous `Ready`/`Queued` Enrichment & Position 0–2 Lockout (`sql/views.py`)
 
@@ -242,7 +242,7 @@ WHERE gq.status IN ('draft', 'evaluating_pre', 'ready', 'queued')
 ORDER BY gq.relational_score_e4 DESC, gq.created_at ASC;
 ```
 
-#### Sketch 2: Objective Evidence-Link Registration & `question_context` (`evaluation/evaluator.py`)
+#### Sketch 2: Objective Evidence-Link Registration & `question_context` (`evaluation/evaluator.py` & `sql/views.py`)
 
 ```python
 # Reference sketch: src/orchestrator/evaluation/evaluator.py
@@ -318,7 +318,7 @@ UNIVERSALLY_MANDATORY_FIELDS: tuple[str, ...] = (
 RELATIONALLY_MANDATORY_FIELDS: dict[str, tuple[str, ...]] = {
     "has_dependencies": ("dependency_clarity", "interface_stability"),
     "has_dependents": ("downstream_contract_clarity", "blast_radius"),
-    "charted_repo_target": ("regression_risk", "sonar_hotspot_alignment"),
+    "charted_repo_target": ("regression_risk", "sonar_Hotspot_alignment"),
 }
 
 
