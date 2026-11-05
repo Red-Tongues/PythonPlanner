@@ -50,3 +50,23 @@ How the hybrid works:
 - **Missed ideas:**
   1. **VRAM / model-residency contention:** switching costs between local evaluation, local drafting and Juggler runs.
   2. **Objective health:** boost work that targets or unblocks objectives with rising failure/review indicators, so blocked areas don't silently rot while the loop does easy peripheral tasks.
+
+## Step 3 — GPT-6.1 Sol (5 Nov, 02:25): integer ranking policy
+D = 10000. G = conjunction of hard gates. B, U, C, R ∈ [0, D] = benefit, expected uncertainty reduction, normalised cost, risk. Integer weights w_B + w_U = D.
+
+- `V = (w_B·B + w_U·U) // D`
+- `S = (V·(D − R)) // (D + C)`, so S ∈ [0, D].
+- If G = 0 the item is **excluded**, not scored zero.
+- Cost uses a versioned normalisation scale.
+- Unknown-cause failures may raise U (investigation value); they never alter gates.
+
+**Oscillation:**
+- freeze inputs per scheduling epoch;
+- never preempt running work;
+- change a queued preference only when it beats the incumbent by a configured margin.
+
+**Starvation:** every m-th dispatch is reserved for the oldest continuously eligible item, with deterministic ties. This guarantees eventual dispatch given finite predecessors, continuing capacity and terminating jobs.
+
+**Principle:** separate eligibility (gates) from preference (score).
+
+*PM: adopt as the M3a draft. Weights, m and the margin are versioned config. B, U and R still need concrete feature definitions; that is the next brainstorm step.*
