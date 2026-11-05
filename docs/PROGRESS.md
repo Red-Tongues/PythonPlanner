@@ -4,6 +4,23 @@ Newest entries first. Every agent session appends an entry: what changed, decisi
 
 ---
 
+## 2026-11-04 (late) — R4 fixes completed (Copilot)
+
+Continued the approved fix list on PR #3 from Claude Code's checkpoint (groups 1–2 already done). Completed groups 3–11; no M3a/Stage B feature work.
+
+- **Run lifecycle:** approved resumes atomically renew the packet and run leases; retries require a failed/invalid/timed-out outcome or recorded deadline expiry; dispatch sequence numbers are separate from chargeable attempts, so exit-3 resume consumes no attempt budget.
+- **Branching:** a confirm-scope split moves the packet into `awaiting_confirmation`; approval keeps the owner actor for the permitted transition, and rejection returns the packet to `ready`.
+- **Recovery and confirmations:** stale restricted runs retain an explicit deferred-recovery marker and are reconciled after restrictions clear; legacy `claimed` runs are reconciled; stale parked runs retire their pending confirmation and recover the packet instead of rolling the disposition back.
+- **Guarded decisions:** `cancel_run` and `reject_run` guard packet ownership and fencing token; failure-budget approval binds the confirmation to the current packet version and applies the status/gate change in one guarded transaction; trunk packets include their own branch scope.
+- **Budgets and races:** demands, usage and database rows reject negative values; reservation events are kept with multi-demand inserts under `no_autoflush`; race helpers propagate unexpected worker failures and enforce timeouts; an effect-counting adapter test covers dispatch budget and stale acceptance.
+- Updated the generated baseline and architecture transition tables for the recovery marker, retired confirmation status, budget CHECK constraints and branch-confirmation transitions.
+
+**Verification:** full SQLite suite `361 passed, 234 skipped`; Ruff check/format and `git diff --check` clean. PostgreSQL cases were skipped because `ORCH_TEST_POSTGRES_URL` is not configured in this environment.
+
+**Next:** run the opt-in PostgreSQL suite in CI; no known SQLite failures. No commits or pushes made.
+
+---
+
 ## 2026-11-04 (late) — R4 fixes: PAUSED at the CFO's request (Claude Code)
 
 Working from `docs/reviews/R4_consensus.md` (16 items) on PR [redtongues/PythonPlanner#3](https://github.com/redtongues/PythonPlanner/pull/3), one commit per fix group. The CFO paused the sprint until 23:59; I stopped at a clean point.

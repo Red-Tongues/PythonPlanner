@@ -22,10 +22,11 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
-from orchestrator.budgets import Demand, reserve
+from orchestrator.budgets import BudgetExhausted, Demand, reserve
+from orchestrator.confirmations import ConfirmationError
 from orchestrator.contracts import (
     AttemptOutcome,
     GenerationRunState,
@@ -33,7 +34,7 @@ from orchestrator.contracts import (
     PacketStatus,
     ScopeStatus,
 )
-from orchestrator.control import KernelLock, pause, scope_status
+from orchestrator.control import DispatchRefused, KernelLock, LockHeld, pause, scope_status
 from orchestrator.db.models import (
     BudgetReservation,
     ChannelRun,
@@ -48,9 +49,12 @@ from orchestrator.events import record_event
 from orchestrator.gates import note_confirmation
 from orchestrator.governance import add_override, grant_waiver, revoke
 from orchestrator.lifecycle import transition
-from orchestrator.queue import admit_next, claim
+from orchestrator.queue import ClaimError, admit_next, claim
 from orchestrator.repository import get_packet, supersede_objective
 from orchestrator.runs import (
+    LostRace,
+    StaleRun,
+    accept_run,
     approve_run,
     authorise_dispatch,
     move_run,
@@ -69,34 +73,55 @@ from tests.runfixtures import attempts, claimed_run, held, queued_packet
 R, S = GenerationRunState, PacketStatus
 
 
-def _both(*workers: Callable[[], str]) -> list[str]:
+def _both(
+    *workers: Callable[[], str],
+    allowed_exceptions: tuple[type[BaseException], ...] = (),
+) -> list[str]:
     """Run workers on threads, released together by a barrier; return their outcomes."""
     barrier = threading.Barrier(len(workers))
     results: list[str] = [""] * len(workers)
+    failures: list[BaseException | None] = [None] * len(workers)
 
     def wrap(i: int, fn: Callable[[], str]) -> None:
-        barrier.wait(10)
         try:
+            barrier.wait(10)
             results[i] = fn()
         except Exception as exc:  # the loser of a race
-            results[i] = type(exc).__name__
+            if isinstance(exc, allowed_exceptions):
+                results[i] = type(exc).__name__
+            else:
+                failures[i] = exc
 
     threads = [threading.Thread(target=wrap, args=(i, f)) for i, f in enumerate(workers)]
     for t in threads:
         t.start()
     for t in threads:
         t.join(60)
+    assert not any(t.is_alive() for t in threads), "a race worker did not finish in time"
+    failure = next((error for error in failures if error is not None), None)
+    if failure is not None:
+        raise failure
     return results
 
 
 def _run_threads(*targets: Callable[[], None], timeout: float = 60) -> None:
     """Start the workers, join them, and fail (never hang or pass silently) on a timeout."""
-    threads = [threading.Thread(target=t) for t in targets]
+    failures: list[BaseException] = []
+
+    def run(target: Callable[[], None]) -> None:
+        try:
+            target()
+        except BaseException as exc:
+            failures.append(exc)
+
+    threads = [threading.Thread(target=run, args=(target,)) for target in targets]
     for t in threads:
         t.start()
     for t in threads:
         t.join(timeout)
     assert not any(t.is_alive() for t in threads), "a worker did not finish in time"
+    if failures:
+        raise failures[0]
 
 
 def _effects(factory: sessionmaker[Session]) -> int:
@@ -121,8 +146,13 @@ def test_concurrent_claims_of_one_packet(factory: sessionmaker[Session]) -> None
 
         return run
 
-    outcomes = _both(worker("kernel-a"), worker("kernel-b"))
+    outcomes = _both(
+        worker("kernel-a"),
+        worker("kernel-b"),
+        allowed_exceptions=(ClaimError, OperationalError),
+    )
     assert outcomes.count("won") == 1, outcomes
+    assert all(o == "won" or o in {"ClaimError", "OperationalError"} for o in outcomes), outcomes
     with factory() as s:
         packet = get_packet(s, ref)
         runs = s.scalars(select(GenerationRun)).all()
@@ -135,6 +165,7 @@ def _claim_with_writer(factory: sessionmaker[Session], ref: str, writer) -> list
     """Session A checks readiness and builds the snapshot; session B commits ``writer``; then
     A's guarded UPDATE runs."""
     outcome: list[str] = []
+    failures: list[BaseException] = []
     checked, written = threading.Event(), threading.Event()
 
     def worker_a() -> None:
@@ -142,30 +173,44 @@ def _claim_with_writer(factory: sessionmaker[Session], ref: str, writer) -> list
 
             def seam() -> None:
                 checked.set()
-                written.wait(15)
+                assert written.wait(15), "the concurrent writer did not finish"
 
             try:
                 claim(a, ref, "kernel-a", before_cas=seam)
                 a.commit()
                 outcome.append("won")
-            except Exception as exc:
+            except (ClaimError, OperationalError) as exc:
                 a.rollback()
                 outcome.append(type(exc).__name__)
 
     def worker_b() -> None:
-        checked.wait(15)
+        assert checked.wait(15), "the dispatch check did not reach its barrier"
         try:
             with factory() as b:
                 writer(b)
                 b.commit()
+        except OperationalError:
+            pass
         finally:
             written.set()
 
-    threads = [threading.Thread(target=worker_a), threading.Thread(target=worker_b)]
+    def guarded(target: Callable[[], None]) -> None:
+        try:
+            target()
+        except BaseException as exc:
+            failures.append(exc)
+
+    threads = [
+        threading.Thread(target=guarded, args=(worker_a,)),
+        threading.Thread(target=guarded, args=(worker_b,)),
+    ]
     for t in threads:
         t.start()
     for t in threads:
         t.join(60)
+    assert not any(t.is_alive() for t in threads), "a claim-race worker did not finish in time"
+    if failures:
+        raise failures[0]
     return outcome
 
 
@@ -246,10 +291,89 @@ def test_two_claimers_race_for_the_last_budget_unit(factory: sessionmaker[Sessio
 
         return run
 
-    outcomes = _both(worker("op-a"), worker("op-b"))
+    outcomes = _both(
+        worker("op-a"),
+        worker("op-b"),
+        allowed_exceptions=(BudgetExhausted, OperationalError),
+    )
     assert outcomes.count("won") == 1, outcomes
+    assert all(o == "won" or o in {"BudgetExhausted", "OperationalError"} for o in outcomes)
     with factory() as s:
         assert s.scalar(select(func.count()).select_from(BudgetReservation)) == 2
+
+
+def test_dispatch_budget_and_acceptance_guards_prevent_unapproved_effects(
+    factory: sessionmaker[Session],
+) -> None:
+    class EffectCountingFakeAdapter:
+        def __init__(self) -> None:
+            self.dispatches: list[str] = []
+            self.publications: list[str] = []
+
+        def dispatch(self, attempt: ChannelRun) -> None:
+            self.dispatches.append(attempt.id)
+
+        def publish(self, run: GenerationRun) -> None:
+            self.publications.append(run.id)
+
+    adapter = EffectCountingFakeAdapter()
+    hour = datetime(2026, 11, 4, 12, tzinfo=UTC)
+    demand = Demand("channel", "local_generation", "runs", "hour", hour, 1, 1)
+    with factory() as s:
+        packet_a, run_a = claimed_run(s)
+        packet_b, run_b = claimed_run(s)
+        ref_a, run_id_a = packet_a.ref, run_a.id
+        ref_b, run_id_b = packet_b.ref, run_b.id
+        s.commit()
+
+    with factory() as s:
+        run = s.get(GenerationRun, run_id_a)
+        assert run is not None
+        attempt = authorise_dispatch(s, run, demands=[demand], lock=held(s))
+        s.commit()
+        adapter.dispatch(attempt)
+
+    with factory() as s:
+        run = s.get(GenerationRun, run_id_b)
+        assert run is not None
+        try:
+            authorise_dispatch(s, run, demands=[demand], lock=held(s))
+        except BudgetExhausted:
+            s.rollback()
+        else:
+            raise AssertionError("an exhausted budget must refuse dispatch")
+
+    with factory() as s:
+        run = s.get(GenerationRun, run_id_a)
+        attempt = s.scalar(select(ChannelRun).where(ChannelRun.generation_run_id == run_id_a))
+        assert run is not None and attempt is not None
+        record_outcome(s, attempt, AttemptOutcome.SUCCEEDED, exit_code=0)
+        move_run(s, run, R.AWAITING_RESULT, KERNEL, "adapter completed")
+        move_run(s, run, R.VALIDATING, KERNEL, "validate output")
+        s.commit()
+
+    with factory() as s:
+        packet = get_packet(s, ref_a)
+        grant_waiver(s, packet.ref, "tools_needed", actor=USER, reason="gate changed")
+        s.commit()
+
+    with factory() as s:
+        run = s.get(GenerationRun, run_id_a)
+        assert run is not None
+        try:
+            accept_run(s, run, "m" * 64, lock=held(s))
+        except StaleRun:
+            s.commit()
+        else:
+            adapter.publish(run)
+            s.commit()
+            raise AssertionError("a stale run must not be published")
+
+    assert adapter.dispatches == [attempt.id]
+    assert adapter.publications == []
+    with factory() as s:
+        assert get_packet(s, ref_b).status is S.RUNNING
+        assert s.scalar(select(func.count()).select_from(ChannelRun)) == 1
 
 
 # --------------------------------------------------------------------------- parked runs
@@ -281,9 +405,17 @@ def test_approval_and_rejection_race_for_a_parked_run(factory: sessionmaker[Sess
             s.commit()
             return "rejected"
 
-    outcomes = _both(approve, reject)
+    outcomes = _both(
+        approve,
+        reject,
+        allowed_exceptions=(ConfirmationError, LostRace, OperationalError),
+    )
     winners = [o for o in outcomes if o in ("approved", "rejected")]
     assert len(winners) == 1, outcomes
+    assert all(
+        o in {"approved", "rejected", "ConfirmationError", "LostRace", "OperationalError"}
+        for o in outcomes
+    )
     with factory() as s:
         run = s.get(GenerationRun, run_id)
         packet = get_packet(s, ref)
@@ -306,9 +438,9 @@ def test_approval_racing_a_governance_write_never_resumes(factory: sessionmaker[
 
     def approve() -> str:
         with factory() as s:
-            approve_run(s, confirmation_id, actor=USER)
+            attempt = approve_run(s, confirmation_id, actor=USER)
             s.commit()
-            return "approved"
+            return "approved" if attempt is not None else "stale"
 
     def waive() -> str:
         with factory() as s:
@@ -316,7 +448,18 @@ def test_approval_racing_a_governance_write_never_resumes(factory: sessionmaker[
             s.commit()
             return "waived"
 
-    outcomes = _both(approve, waive)
+    outcomes = _both(
+        approve,
+        waive,
+        allowed_exceptions=(LostRace, StaleRun, OperationalError),
+    )
+    assert set(outcomes) in (
+        {"approved", "waived"},
+        {"stale", "waived"},
+        {"waived", "LostRace"},
+        {"waived", "StaleRun"},
+        {"waived", "OperationalError"},
+    ), outcomes
     with factory() as s:
         run = s.get(GenerationRun, run_id)
         assert run is not None
@@ -324,7 +467,8 @@ def test_approval_racing_a_governance_write_never_resumes(factory: sessionmaker[
             assert _effects(factory) == 2
             assert run.gate_revision != get_packet(s, ref).gate_revision  # later write: stale
         else:  # the waiver came first: the approval matched no gate and resumed nothing
-            assert _effects(factory) == 1 and run.state is R.AWAITING_CONFIRMATION
+            assert _effects(factory) == 1
+            assert run.state in (R.STALE, R.AWAITING_CONFIRMATION)
 
 
 # --------------------------------------------------------------------------- results
@@ -344,7 +488,15 @@ def test_a_duplicate_result_is_recorded_once(factory: sessionmaker[Session]) -> 
             s.commit()
             return "recorded" if row is not None else "duplicate"
 
-    outcomes = _both(report, report)
+    outcomes = _both(
+        report,
+        report,
+        allowed_exceptions=(IntegrityError, OperationalError),
+    )
+    assert all(
+        o in {"recorded", "duplicate", "IntegrityError", "OperationalError"} for o in outcomes
+    )
+    assert outcomes.count("recorded") == 1
     assert outcomes.count("recorded") == 1, outcomes
     with factory() as s:
         assert s.scalar(select(func.count()).select_from(ChannelRunOutcome)) == 1
@@ -376,7 +528,12 @@ def test_a_late_result_after_lease_takeover_has_no_effect(factory: sessionmaker[
             s.commit()
             return str(row.outcome) if row is not None else "duplicate"
 
-    outcomes = _both(late, late)
+    outcomes = _both(
+        late,
+        late,
+        allowed_exceptions=(IntegrityError, OperationalError),
+    )
+    assert all(o in {"stale", "IntegrityError", "OperationalError"} for o in outcomes)
     assert sorted(outcomes)[-1] == "stale" and outcomes.count("stale") == 1, outcomes
     with factory() as s:
         packet = get_packet(s, ref)
@@ -408,23 +565,19 @@ def test_dispatch_authorised_first_drains_when_the_pause_follows(
             assert run is not None
             authorise_dispatch(s, run, lock=held(s))  # scope rows touched and locked until commit
             authorised.set()
-            paused.wait(1.5)  # on PostgreSQL the pause is blocked behind us
+            paused.wait(1.5)  # SQLite waits behind the dispatch; PostgreSQL holds its row lock.
             s.commit()
             log.append("dispatch committed")
 
     def pauser() -> None:
-        authorised.wait(15)
+        assert authorised.wait(15), "the dispatch was not authorised"
         with factory() as s:
             pause(s, "objective", objective, actor=USER, reason="stop")
             s.commit()
             log.append("pause committed")
         paused.set()
 
-    threads = [threading.Thread(target=dispatcher), threading.Thread(target=pauser)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join(60)
+    _run_threads(dispatcher, pauser)
     assert log == ["dispatch committed", "pause committed"], log
     assert _effects(factory) == 1  # authorised before the pause committed: in flight, drains
     with factory() as s:
@@ -442,11 +595,11 @@ def test_pause_committed_first_refuses_the_dispatch(factory: sessionmaker[Sessio
         with factory() as s:
             pause(s, "objective", objective, actor=USER, reason="stop")
             pausing.set()
-            done.wait(1.0)  # hold the pause open while the dispatcher tries
+            assert done.wait(15), "the dispatch did not finish its pause check"
             s.commit()
 
     def dispatcher() -> None:
-        pausing.wait(15)
+        assert pausing.wait(15), "the pause was not committed to the transaction"
         with factory() as s:
             try:
                 run = s.get(GenerationRun, run_id)
@@ -454,16 +607,12 @@ def test_pause_committed_first_refuses_the_dispatch(factory: sessionmaker[Sessio
                 authorise_dispatch(s, run, lock=held(s))
                 s.commit()
                 outcome.append("dispatched")
-            except Exception as exc:
+            except (DispatchRefused, OperationalError) as exc:
                 s.rollback()
                 outcome.append(type(exc).__name__)
         done.set()
 
-    threads = [threading.Thread(target=pauser), threading.Thread(target=dispatcher)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join(60)
+    _run_threads(pauser, dispatcher)
     assert outcome and outcome[0] in ("DispatchRefused", "OperationalError"), outcome
     assert _effects(factory) == 0
     with factory() as s:
@@ -491,9 +640,14 @@ def test_two_kernels_race_for_an_expired_lock(factory: sessionmaker[Session]) ->
 
         return run
 
-    outcomes = _both(take("kernel-a"), take("kernel-b"))
+    outcomes = _both(
+        take("kernel-a"),
+        take("kernel-b"),
+        allowed_exceptions=(LockHeld, OperationalError),
+    )
     winners = [o for o in outcomes if o in locks]
     assert len(winners) == 1, outcomes
+    assert all(o in {*locks, "LockHeld", "OperationalError"} for o in outcomes), outcomes
     loser = next(n for n in locks if n not in winners)
     with factory() as s:
         from orchestrator.control import FencedOut
@@ -554,21 +708,22 @@ def test_concurrent_ticks_admit_once(factory: sessionmaker[Session]) -> None:
 
     def tick() -> None:
         with factory() as s:
-            barrier.wait()
+            barrier.wait(10)
             try:
                 admitted = admit_next(s)
                 s.commit()
                 results.append(admitted.ref if admitted else "none")
-            except Exception:  # SQLite: the losing writer may get a snapshot conflict
+            except (ClaimError, LostRace, OperationalError) as exc:
                 s.rollback()
-                results.append("error")
+                results.append(type(exc).__name__)
 
-    threads = [threading.Thread(target=tick) for _ in range(2)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join(30)
+    _run_threads(tick, tick, timeout=30)
     assert results.count(ref) == 1
+    assert all(
+        result == ref or result in {"ClaimError", "LostRace", "OperationalError", "none"}
+        for result in results
+    )
+    assert len(results) == 2
     with factory() as s:
         assert s.scalar(select(func.count()).select_from(QueueAdmission)) == 1
 
