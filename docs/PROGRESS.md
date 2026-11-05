@@ -4,6 +4,29 @@ Newest entries first. Every agent session appends an entry: what changed, decisi
 
 ---
 
+## 2026-11-05 09:00–09:30 — R4 audit (Argon) J1–J3 fixed (Claude Code)
+
+Argon's independent audit of PR #3 was a **conditional pass: fix J1 and J2, then merge**. The PM decided J1–J3 under sprint autonomy (the CFO is busy). J4/J5 are informational, so no change. Not merged; the PM merges.
+
+- **J1 [HIGH] (3e2c5b0):** a rejected split now goes `awaiting_confirmation → held` with the reason (D8 row 61).
+  - Removed the user `awaiting_confirmation → ready` row from `transitions.py`, the regenerated baseline (so the DB trigger rejects it too) and ARCHITECTURE §7.
+  - `confirmations.reject` refuses a blank reason (D8: "reason required").
+  - The kernel `ready → awaiting_confirmation` split-confirmation row is kept and documented in deviation **P1** as a D8 gap-fill alongside the failure-budget one.
+  - Removed the stale §7.3 row saying a confirmed split is recorded as `system:brancher`; since MR5 it is the approving user's move (D8 row 60).
+  - The branching test asserts `held`, the user actor and reason, the blank-reason refusal, and that release + readiness still never re-proposes the split.
+- **J2 [MEDIUM] (56c7994):** in `stale_run`'s keep-state branch, the ownership release changes the ORM object and records `packet.run_released` only when its UPDATE matched one row.
+  - **Choice on 0 rows:** re-read the packet. If this run no longer owns it, record nothing (logged at info), because the release's goal is already met. If it somehow still does, raise `LostRace`.
+  - **Why not always raise `LostRace`:** it would roll back the run's own audited stale disposition (MR9), which is still correct.
+  - The test injects the concurrent release between the read and the UPDATE, and fails without the fix.
+  - The residual `LostRace` branch is untested; it is unreachable without a concurrent writer restoring the same ownership.
+- **J3 [LOW] (c2a6499):** both `reconcile_runs` scans are ordered by `(packet_id, id)`.
+
+**Tests:** 599 passed, 4 skipped locally on SQLite + PostgreSQL 16; ruff clean. CI: see the PR.
+
+**Next:** the PM merges PR #3; then the M3a spec once the CFO signs off T1-C v2.
+
+---
+
 ## 2026-11-05 08:20–09:00 — R4 verification on PostgreSQL, fixes and review (Claude Code)
 
 Fresh session on PR [redtongues/PythonPlanner#3](https://github.com/redtongues/PythonPlanner/pull/3) (`claude/elegant-davinci-hcny5t`). It covers the Copilot agent's groups 3–11 (d205356, 66076d0). No new features, no T1-C/M3a work; not merged.
