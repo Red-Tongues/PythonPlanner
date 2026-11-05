@@ -14,7 +14,7 @@ from orchestrator.cli import app
 from orchestrator.confirmations import approve, list_confirmations, reject
 from orchestrator.contracts import AutonomyMode, PacketStatus, Stage
 from orchestrator.db import init_db, make_engine, make_session_factory
-from orchestrator.db.models import BranchApplication, Packet
+from orchestrator.db.models import BranchApplication, Event, Packet
 from orchestrator.lifecycle import transition
 from orchestrator.llm import FakeProvider
 from orchestrator.repository import get_packet, set_autonomy_mode, set_setting
@@ -65,8 +65,19 @@ def test_confirm_scope_queues_then_approve_or_reject(session: Session, tree) -> 
     assert outcome.action == "confirmation" and children_of(session, trunk) == []
     pending = [c for c in list_confirmations(session) if c.stage is Stage.BRANCHING]
     assert len(pending) == 1
+    assert trunk.status is PacketStatus.AWAITING_CONFIRMATION  # the split awaits the owner
     result = approve(session, pending[0].id, actor=USER, provider=provider)
     assert result["children"] and children_of(session, trunk)
+    # R4 MR5: the confirmed split is the approving user's move, bound to the confirmation
+    split = session.scalars(
+        select(Event).where(
+            Event.entity_id == trunk.id,
+            Event.action == "packet.transition",
+            Event.reason.like("split into%"),
+        )
+    ).one()
+    assert split.actor == str(USER) and pending[0].id in (split.reason or "")
+    assert split.after is not None and split.after["status"] == "waiting_for_children"
 
 
 def test_rejected_split_is_not_proposed_again(session: Session, tree) -> None:
