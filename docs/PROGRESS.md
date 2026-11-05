@@ -4,6 +4,18 @@ Newest entries first. Every agent session appends an entry: what changed, decisi
 
 ---
 
+## 2026-11-05 — Agent guidance maintenance
+
+Removed the duplicated implementation overview from `CLAUDE.md`; the project plan remains
+the linked source of that description. Clarified that `db/ddl.py` owns dialect-specific
+trigger DDL, not all dialect-specific schema statements: tables and views retain their
+existing owners. All governance rules, commands and milestone constraints remain unchanged.
+
+No runtime behavior changed or milestone work was undertaken. No deviations or new known
+issues. Next: review the guidance-only PR before merging.
+
+---
+
 ## 2026-11-05 09:00–09:30 — R4 audit (Argon) J1–J3 fixed (Claude Code)
 
 Argon's independent audit of PR #3 was a **conditional pass: fix J1 and J2, then merge**. The PM decided J1–J3 under sprint autonomy (the CFO is busy). J4/J5 are informational, so no change. Not merged; the PM merges.
