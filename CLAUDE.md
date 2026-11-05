@@ -2,10 +2,6 @@
 
 Guidance for any coding agent (Claude Code is the main engineer) working in this repository.
 
-## What this is
-
-The **Python Orchestrator** is the custom Python kernel of an autonomous project/software-development stack. It turns messy planning documents into a standardised database of `Project > Objective > Task (Prompt Packet)`, has small local LLMs score and tag every packet (six-pass "quickfire" evaluation), uses SQL to turn those evaluations into deterministic decisions (consensus, priority, routing, branching), and dispatches work to channels (local generation, the juggler.studio workbench), writing accepted output to a separate production git repo that SonarQube checks.
-
 **Spec of record:** `docs/PROJECT_PLAN.md`. Milestone specs: `docs/milestones/`. Session log: `docs/PROGRESS.md`. The original CFO draft is archived (read-only) in `docs/archive/`.
 
 ## The Key Idea filter (apply to every change)
