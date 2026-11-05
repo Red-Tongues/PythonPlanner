@@ -4,6 +4,22 @@ Newest entries first. Every agent session appends an entry: what changed, decisi
 
 ---
 
+## 2026-11-05 02:10–03:00 — Sprint: T1-C v2 and R4 status (PM)
+
+- **R4 groups 3–11:** done by the GitHub Copilot cloud agent (SQLite 361 passed / 234 skipped; PostgreSQL not run). **Not pushed.** Waiting for the CFO to press *Create pull request*.
+  - PR #3 head (groups 1–2) is green in CI on PostgreSQL 16.
+  - PM read the visible diff. One D8 deviation: `awaiting_confirmation → ready` on split rejection. One minor gap: the failure-budget resume changes `input_hash` without that change appearing in the event's before/after (Golden Rule 5).
+- **T1-C → v2** (`docs/notes/2026-11-05_T1C_v2.md`): Argon G-audit → v2 → GPT-6.1 review → Argon audit #2, verdict *conditional pass, ready for CFO sign-off*.
+  - Trigger proof-of-concept executed on SQLite and PostgreSQL; one SQLite producer-attribution defect fixed.
+- **Q1 step 3** (integer ranking policy) recorded in the Q1 note.
+- **Next:**
+  1. The CFO creates the PR.
+  2. A fresh Claude Code session merges it into PR #3, runs the PostgreSQL suite and maps all 16 items (handover in `docs/notes/2026-11-05_sprint_plan.md`).
+  3. The CFO answers T1-C v2's 7 questions.
+  4. Then the M3a spec.
+
+---
+
 ## 2026-11-04 (late) — R4 fixes completed (Copilot)
 
 Continued the approved fix list on PR #3 from Claude Code's checkpoint (groups 1–2 already done). Completed groups 3–11; no M3a/Stage B feature work.
