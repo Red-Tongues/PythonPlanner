@@ -27,6 +27,7 @@ from orchestrator.contracts import (
 from orchestrator.control import DispatchRefused, FencedOut, KernelLock, LockHeld, pause, resume
 from orchestrator.db.models import (
     BudgetCounter,
+    BudgetReservation,
     ChannelRun,
     ChannelRunOutcome,
     Confirmation,
@@ -267,6 +268,22 @@ def test_budget_validation_and_multi_demand_audit_order(session: Session) -> Non
         )
     with pytest.raises(ValueError, match="non-negative integer"):
         reconcile(session, reservation_ids[0], -1, actor=KERNEL)
+
+
+def test_a_refused_reservation_records_no_reserved_event(session: Session) -> None:
+    """PM review of R4 GA-R5: the "budget.reserved" event is written only after every demand
+    succeeded, so a refusal leaves no event claiming a reservation (even before rollback)."""
+    hour = datetime(2026, 11, 4, 12, tzinfo=UTC)
+    demands = [
+        Demand("channel", "local_generation", "runs", "hour", hour, 1, 3),
+        Demand("objective", "O-1", "tokens", "day", hour, 20, 10),  # over its limit
+    ]
+    with pytest.raises(BudgetExhausted):
+        reserve(session, "op-refused", demands, actor=KERNEL)
+    pending = [e for e in session.new if isinstance(e, Event) and e.action == "budget.reserved"]
+    assert pending == []
+    assert not [o for o in session.new if isinstance(o, BudgetReservation)]
+    session.rollback()
 
 
 # --------------------------------------------------------------------------- outcomes, acceptance

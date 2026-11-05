@@ -95,7 +95,36 @@ def reserve(
     for demand in ordered:
         _require_nonnegative_integer(demand.amount, "budget demand amount")
         _require_nonnegative_integer(demand.limit, "budget demand limit")
+    reservations: list[BudgetReservation] = []
+    # GA-R5 / PM (c): the counter UPDATEs run first under no_autoflush (nothing is flushed
+    # mid-loop, so the flush guard never sees a reservation without its event); the event and
+    # the reservation rows are added together only once every demand has succeeded, so a
+    # refused reservation never leaves a "budget.reserved" event behind, even for a caller
+    # that does not roll back. (The caller must still roll back: earlier counter UPDATEs in a
+    # refused multi-demand reservation are only undone by the rollback.)
     with session.no_autoflush:
+        for d in ordered:
+            counter_id = _counter(session, d)
+            result = session.execute(
+                update(t)
+                .where(t.c.id == counter_id, t.c.used + d.amount <= d.limit)
+                .values(used=t.c.used + d.amount, updated_at=utcnow())
+            )
+            if result.rowcount != 1:
+                raise BudgetExhausted(
+                    f"{d.scope_type}:{d.scope_id} {d.metric}/{d.period} has no capacity for "
+                    f"{d.amount} (limit {d.limit})"
+                )
+            reservations.append(
+                BudgetReservation(
+                    id=new_id(),
+                    operation_id=operation_id,
+                    counter_id=counter_id,
+                    amount=d.amount,
+                    packet_id=packet_id,
+                    generation_run_id=generation_run_id,
+                )
+            )
         record_event(
             session,
             actor=actor,
@@ -109,28 +138,8 @@ def reserve(
                 ],
             },
         )
-        for d in ordered:
-            counter_id = _counter(session, d)
-            result = session.execute(
-                update(t)
-                .where(t.c.id == counter_id, t.c.used + d.amount <= d.limit)
-                .values(used=t.c.used + d.amount, updated_at=utcnow())
-            )
-            if result.rowcount != 1:
-                raise BudgetExhausted(
-                    f"{d.scope_type}:{d.scope_id} {d.metric}/{d.period} has no capacity for "
-                    f"{d.amount} (limit {d.limit})"
-                )
-            reservation = BudgetReservation(
-                id=new_id(),
-                operation_id=operation_id,
-                counter_id=counter_id,
-                amount=d.amount,
-                packet_id=packet_id,
-                generation_run_id=generation_run_id,
-            )
-            session.add(reservation)
-            ids.append(reservation.id)
+        session.add_all(reservations)
+        ids.extend(r.id for r in reservations)
     session.flush()
     return ids
 
