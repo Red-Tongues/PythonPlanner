@@ -200,7 +200,6 @@ _PACKET_RULES: list[Rule] = [
         "R1; then the shared dispatch guard (E3); resumes the same conversation exactly once",
     ),
     *_p(S.AWAITING_CONFIRMATION, S.QUEUED, U, "failure-budget or 48 h approval", "H current"),
-    *_p(S.AWAITING_CONFIRMATION, S.READY, U, "branch split rejected", "decision is recorded"),
     *_p(
         S.AWAITING_CONFIRMATION,
         S.EVALUATING_POST,

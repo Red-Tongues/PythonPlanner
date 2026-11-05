@@ -11,7 +11,7 @@ from typer.testing import CliRunner
 
 from orchestrator.branching import apply_branch_triggers, children_of, rollup_trunks
 from orchestrator.cli import app
-from orchestrator.confirmations import approve, list_confirmations, reject
+from orchestrator.confirmations import ConfirmationError, approve, list_confirmations, reject
 from orchestrator.contracts import AutonomyMode, PacketStatus, Stage
 from orchestrator.db import init_db, make_engine, make_session_factory
 from orchestrator.db.models import BranchApplication, Event, Packet
@@ -85,7 +85,25 @@ def test_rejected_split_is_not_proposed_again(session: Session, tree) -> None:
     provider = FakeProvider()
     apply_branch_triggers(session, provider)
     pending = [c for c in list_confirmations(session) if c.stage is Stage.BRANCHING]
+    with pytest.raises(ConfirmationError, match="needs a reason"):
+        reject(session, pending[0].id, actor=USER, reason="  ")
     reject(session, pending[0].id, actor=USER, reason="keep it whole")
+    trunk = session.get(Packet, pending[0].entity_id)
+    assert trunk is not None
+    # R4 audit J1 / D8 row 61: a rejected split holds the packet, with the reason
+    assert trunk.status is PacketStatus.HELD
+    held = session.scalars(
+        select(Event).where(
+            Event.entity_id == trunk.id,
+            Event.action == "packet.transition",
+            Event.reason == "branch split rejected: keep it whole",
+        )
+    ).one()
+    assert held.actor == str(USER) and held.after is not None
+    assert held.after["status"] == "held"
+    # the owner releases the hold; the kernel then re-evaluates and readiness re-admits it
+    transition(trunk, PacketStatus.EVALUATING_PRE, USER, "release", session=session)
+    transition(trunk, PacketStatus.READY, KERNEL, "readiness", session=session)
     outcome = apply_branch_triggers(session, provider)[0]
     assert outcome.action == "skipped" and "rejected" in outcome.reason
 

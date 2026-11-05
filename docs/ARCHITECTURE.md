@@ -193,7 +193,6 @@ change (DB-enforced).
 | `awaiting_confirmation` → `evaluating_pre` | kernel / user | approval but H stale (C25); candidate-promotion approval (E1) | targets the current version and context; promotion and C25 gate bump atomic; readiness recomputed; a stale approval does not apply |  |
 | `awaiting_confirmation` → `held` | kernel / user | rejection (any type); HOLD (user) or alignment hold (governor) | reason required; E2: an exit-3 rejection keeps the run parked |  |
 | `awaiting_confirmation` → `queued` | user | failure-budget or 48 h approval | H current |  |
-| `awaiting_confirmation` → `ready` | user | branch split rejected | decision is recorded |  |
 | `awaiting_confirmation` → `running` | user | exit-3 approval | R1; then the shared dispatch guard (E3); resumes the same conversation exactly once |  |
 | `awaiting_confirmation` → `waiting_for_children` | user | split approval | E10 split guard; the confirmation is validated and C25 applied |  |
 | `blocked` → `closed_unverified` | user | explicit owner close (branch kill is a BLOCK, not a close: D9-R1) | reason required; locks; in-flight runs staled |  |
@@ -290,7 +289,7 @@ change (DB-enforced).
 
 | # | Deviation | Reason |
 |---|---|---|
-| P1 | `ready → awaiting_confirmation` (failure budget) is kept | M2.1 #12's sweep parks exhausted packets found in `ready` or `queued`. A packet can reach `ready` with an exhausted budget (`failed → evaluating_pre → ready`); without this row it would sit in `ready`, never admitted and never surfaced to the owner. It only parks; it never advances |
+| P1 | `ready → awaiting_confirmation` (kernel) is kept, for the failure budget and for a branch-split confirmation (D8 gap-fills) | **Failure budget:** M2.1 #12's sweep parks exhausted packets found in `ready` or `queued`. A packet can reach `ready` with an exhausted budget (`failed → evaluating_pre → ready`); without this row it would sit in `ready`, never admitted and never surfaced to the owner. **Split confirmation (R4):** split triggers fire on `ready` packets, and D8's split approval row (`awaiting_confirmation → waiting_for_children`) needs the packet in `awaiting_confirmation`; D8 lists only `evaluating_pre → awaiting_confirmation`. Either way it only parks; it never advances. A rejected split goes to `held` (D8 row 61), never straight back to `ready` |
 | P2 | `evaluating_post → completed` and `waiting_for_children → completed` also allow a **user** actor | Keeps M2.1 fix 5's `orchestrator packet complete`: the identical completion gate applies to users, so this grants no extra authority. Completing from any other status (M2.1 allowed it from any non-terminal status with evidence) is now rejected, per D8 §4 #3 |
 | P3 | Legacy M1 statuses `evaluating`, `in_progress`, `processed` keep one exit, `→ evaluating_pre` (kernel), plus `→ closed_unverified` (user) | Old rows must stay valid (C22) and must be able to re-enter the governed pipeline. They re-enter from scratch rather than resuming (`in_progress → running` would bypass the claim and fencing) |
 | P4 | `archived` is terminal with **no entries** | D8 has no `archived`; `closed_unverified` (with a reason) replaces it. Existing archived rows stay valid and locked |
@@ -298,7 +297,6 @@ change (DB-enforced).
 | P6 | `blocked → evaluating_post` (kernel) when the required scanner is available again | D10 ruling Q14: recovery from the E6 post-phase blocker. Only a scanner blocker qualifies; the recorded manifest and commit are unchanged, so post-evaluation resumes for the same M |
 | R1 | Legacy run state `claimed` may only go `stale` | An M2 claim has no fencing token or operation ID, so it can never dispatch or publish under C26 |
 | — | `dispatched → dispatched` (E11) is listed as a self-transition | A deadline expiry with attempts left is a new attempt row, not a state change; the row documents that the retry passes the E3 guard |
-| — | A user-approved split's `→ waiting_for_children` is recorded with the kernel actor `system:brancher` | D8 lists the split as a kernel move; the owner's approval authorises it and is recorded in the confirmation and split events |
 
 **D10 rulings that shape these tables.** Q4: pause/resume are controls serialised through the
 scope rows (C26), not C25 governance writes, so they never bump G. Q5: rejecting an exit-3

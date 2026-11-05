@@ -11,8 +11,8 @@ Approving carries out what was proposed, as the approving user:
   or ``evaluating_pre`` if the context changed); rejecting holds the packet (C27, D8);
 * anything else (e.g. ``ingestion``) — recorded as approved.
 
-Rejecting records the decision; a rejected branching proposal is not proposed again for the
-same packet version and rule version.
+Rejecting needs a reason and records the decision. A rejected split holds the packet (D8 row 61)
+and is not proposed again for the same packet version and rule version.
 """
 
 from __future__ import annotations
@@ -303,6 +303,8 @@ def _resume_after_budget(
 def reject(session: Session, confirmation_id: str, *, actor: Actor, reason: str) -> None:
     if not actor.is_user:
         raise PermissionError("only a user may reject a confirmation")
+    if not reason.strip():
+        raise ConfirmationError("a rejection needs a reason (D8: rejection of any type)")
     confirmation = _find(session, confirmation_id)
     _decide(session, confirmation, ConfirmationStatus.REJECTED, actor, reason)
     if confirmation.stage is Stage.BRANCHING and confirmation.entity_type == "packet":
@@ -310,9 +312,12 @@ def reject(session: Session, confirmation_id: str, *, actor: Actor, reason: str)
 
         packet = session.get(Packet, confirmation.entity_id)
         if packet is not None and PacketStatus(packet.status) is PacketStatus.AWAITING_CONFIRMATION:
+            # D8 row 61 (R4 audit J1): a rejection of any type holds the packet with the
+            # reason. Readiness stays a kernel decision: the owner releases the hold
+            # (held → evaluating_pre) and the kernel re-admits it.
             transition(
                 packet,
-                PacketStatus.READY,
+                PacketStatus.HELD,
                 actor,
                 f"branch split rejected: {reason}",
                 session=session,
