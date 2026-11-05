@@ -21,6 +21,7 @@ import threading
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
@@ -430,6 +431,43 @@ def test_approval_and_rejection_race_for_a_parked_run(factory: sessionmaker[Sess
             assert confirmation.status == "rejected"
             assert run.state is R.AWAITING_CONFIRMATION and packet.status is S.HELD
             assert _effects(factory) == 1  # no resume
+
+
+def test_a_late_approval_never_stales_a_rejected_parked_run(factory: sessionmaker[Session]) -> None:
+    """The interleaving PostgreSQL found (READ COMMITTED): the approval reads the confirmation
+    as pending and the run at G, then a rejection commits (moving packet and run to G + 1),
+    then the approval reads the packet at G + 1. The torn read looks like a stale binding; the
+    approval must lose (the confirmation is already decided), not stale the rejected run."""
+    ref, run_id, confirmation_id = _parked_run(factory)
+    packet_refreshes: list[int] = []
+
+    with factory() as s:
+        real_refresh = s.refresh
+
+        def refresh(instance: object, *args: object, **kwargs: object) -> None:
+            if isinstance(instance, Packet):
+                packet_refreshes.append(1)
+                if len(packet_refreshes) == 2:  # binding_mismatch: after the run, before this
+                    with factory() as other:
+                        reject_run(other, confirmation_id, actor=USER, reason="no")
+                        other.commit()
+            real_refresh(instance, *args, **kwargs)  # type: ignore[arg-type]
+
+        s.refresh = refresh  # type: ignore[method-assign]
+        with pytest.raises((ConfirmationError, OperationalError)):
+            approve_run(s, confirmation_id, actor=USER)
+            s.commit()  # a real caller commits a stale disposition; this one must not get here
+    assert len(packet_refreshes) >= 2
+    with factory() as s:
+        run = s.get(GenerationRun, run_id)
+        confirmation = s.get(Confirmation, confirmation_id)
+        packet = get_packet(s, ref)
+        assert run is not None and confirmation is not None
+        assert confirmation.status == "rejected"
+        assert run.state is R.AWAITING_CONFIRMATION and packet.status is S.HELD
+        assert packet.active_run_id == run.id
+        assert run.gate_revision == packet.gate_revision
+        assert _effects(factory) == 1
 
 
 def test_approval_racing_a_governance_write_never_resumes(factory: sessionmaker[Session]) -> None:

@@ -921,6 +921,23 @@ def approve_run(
         raise RunError(f"run {run.id} is {GenerationRunState(run.state).value}, not parked")
     why = binding_mismatch(session, run, now=now, lease=False)
     if why is not None:
+        # MR9: retire *this* confirmation first, with the same once-only CAS a decision uses.
+        # If a concurrent rejection (or approval) decided it after we read it, this raises
+        # ConfirmationError and we roll back: a late approval must not stale a run that the
+        # winning decision kept parked (its G moved with the packet's, so it reads as stale).
+        decide_once(session, confirmation, ConfirmationStatus.RETIRED, KERNEL, why)
+        record_event(
+            session,
+            actor=KERNEL,
+            action="confirmation.retired",
+            entity_type="confirmation",
+            entity_id=confirmation.id,
+            entity_ref=confirmation.entity_ref,
+            entity_version=confirmation.entity_version,
+            before={"status": ConfirmationStatus.PENDING.value},
+            after={"status": ConfirmationStatus.RETIRED.value, "run": run.id},
+            reason=f"approval by {actor} found the binding stale: {why}",
+        )
         stale_run(session, run, why, actor=KERNEL)
         return None
     decide_once(session, confirmation, ConfirmationStatus.APPROVED, actor, reason)
