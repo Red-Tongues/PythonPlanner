@@ -496,7 +496,6 @@ def test_a_duplicate_result_is_recorded_once(factory: sessionmaker[Session]) -> 
     assert all(
         o in {"recorded", "duplicate", "IntegrityError", "OperationalError"} for o in outcomes
     )
-    assert outcomes.count("recorded") == 1
     assert outcomes.count("recorded") == 1, outcomes
     with factory() as s:
         assert s.scalar(select(func.count()).select_from(ChannelRunOutcome)) == 1
@@ -533,7 +532,10 @@ def test_a_late_result_after_lease_takeover_has_no_effect(factory: sessionmaker[
         late,
         allowed_exceptions=(IntegrityError, OperationalError),
     )
-    assert all(o in {"stale", "IntegrityError", "OperationalError"} for o in outcomes)
+    # one report is recorded as stale evidence; the other is a duplicate (or loses the race)
+    assert all(
+        o in {"stale", "duplicate", "IntegrityError", "OperationalError"} for o in outcomes
+    ), outcomes
     assert sorted(outcomes)[-1] == "stale" and outcomes.count("stale") == 1, outcomes
     with factory() as s:
         packet = get_packet(s, ref)
@@ -595,7 +597,11 @@ def test_pause_committed_first_refuses_the_dispatch(factory: sessionmaker[Sessio
         with factory() as s:
             pause(s, "objective", objective, actor=USER, reason="stop")
             pausing.set()
-            assert done.wait(15), "the dispatch did not finish its pause check"
+            # Hold the uncommitted pause open while the dispatcher tries. SQLite refuses the
+            # dispatch's write at once (database locked), so ``done`` is set; PostgreSQL makes
+            # the dispatch wait on the scope row lock until this commit, so ``done`` cannot be
+            # set first. The bounded hold is the barrier, not a failure condition.
+            done.wait(1.0)
             s.commit()
 
     def dispatcher() -> None:

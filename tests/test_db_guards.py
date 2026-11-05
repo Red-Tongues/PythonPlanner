@@ -95,7 +95,7 @@ def test_budget_tables_reject_negative_values(engine: Engine) -> None:
             ),
         ]
         for statement, values in invalid_rows:
-            with c.begin_nested(), pytest.raises(IntegrityError):
+            with pytest.raises(IntegrityError), c.begin_nested():
                 c.execute(text(statement), values)
 
 
