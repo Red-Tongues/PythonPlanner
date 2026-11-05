@@ -247,6 +247,7 @@ def _resume_after_budget(
     check_packet(source, target, transition_actor)
     table = Packet.__table__
     observed_gate = packet.gate_revision
+    observed_hash = packet.input_hash
     values = {
         "status": target.value,
         "gate_revision": observed_gate + 1,
@@ -282,8 +283,17 @@ def _resume_after_budget(
         entity_id=packet.id,
         entity_ref=packet.ref,
         entity_version=packet.version,
-        before={"status": source.value, "gate_revision": observed_gate},
-        after={"status": target.value, "gate_revision": observed_gate + 1},
+        # Golden Rule 5: every column this write changes is in before/after (input_hash too)
+        before={
+            "status": source.value,
+            "gate_revision": observed_gate,
+            **({} if unchanged else {"input_hash": observed_hash}),
+        },
+        after={
+            "status": target.value,
+            "gate_revision": observed_gate + 1,
+            **({} if unchanged else {"input_hash": current_hash}),
+        },
         reason=reason,
     )
     session.flush()

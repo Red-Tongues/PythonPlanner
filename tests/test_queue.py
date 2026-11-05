@@ -276,3 +276,29 @@ def test_reject_holds_the_packet(session: Session) -> None:
     admit_next(session)
     reject(session, budget_confirmation(session, packet).id, actor=USER, reason="give up")
     assert packet.status is PacketStatus.HELD
+
+
+def test_failure_budget_approval_with_a_changed_context_events_the_new_hash(
+    session: Session,
+) -> None:
+    """Golden Rule 5 (PM review of R4 GA-R2): when the context changed, the approval rewrites
+    ``input_hash`` and the event's before/after names it, old and new."""
+    packet = ready_packet(session)
+    fail_runs(session, packet, 3, datetime.now(UTC) - timedelta(hours=2))
+    admit_next(session)
+    session.execute(  # simulate a context change since the packet was admitted
+        text("UPDATE packets SET input_hash = 'old-context' WHERE id = :id"), {"id": packet.id}
+    )
+    session.refresh(packet)
+    approve(session, budget_confirmation(session, packet).id, actor=USER)
+    assert packet.status is PacketStatus.EVALUATING_PRE
+    assert packet.input_hash not in (None, "old-context")
+    event = session.scalars(
+        select(Event)
+        .where(Event.entity_id == packet.id, Event.action == "packet.transition")
+        .order_by(Event.created_at.desc())
+    ).first()
+    assert event is not None and event.after is not None and event.before is not None
+    assert event.before["input_hash"] == "old-context"
+    assert event.after["input_hash"] == packet.input_hash
+    assert event.after["status"] == PacketStatus.EVALUATING_PRE.value
