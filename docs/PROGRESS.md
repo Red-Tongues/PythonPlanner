@@ -4,6 +4,16 @@ Newest entries first. Every agent session appends an entry: what changed, decisi
 
 ---
 
+## 2026-11-06 00:05-00:40 - R5: independent audit of the CFO directive, PM decisions (PM)
+
+- Added the R5 audit: Argon directive findings, R&D queue-score critique and GitHub Copilot CI/branch report. Product decisions remain the CFO's; PM decisions are triage and recommendations.
+- Accepted claim-time seal binding and the unbounded lineage/crash-loop risks (OQ29, OQ14, OQ18); recommended numeric stop and crash ceilings.
+- Accepted evaluation lockout races and snapshotting (OQ30-OQ31), trigger ordering on both dialects (OQ32), separate content revision (OQ33), quote re-verification (OQ34), and seal-time outbox draining (OQ35); noted SQLite WAL concurrency and content-blob uniqueness.
+- Recommended bounded queue-score terms, a root default grade, bounded ageing and explicit tie-breaks under OQ4-OQ9; questioned-context boosting conflicts with refresh lockout (OQ5).
+- Main CI was green at 71977eb and PR #3 merge 6b89a18; the earlier known issue is closed. PRs #4 and #5 are open, three squash-merged source branches are cleanup candidates, and review-packs are kept. PR #5 stays draft pending CFO sign-off of OQ1-OQ35.
+
+---
+
 ## 2026-11-05 (evening) — CFO directive folded in: T1-C v3, Q1 v2, M3a spec draft (Claude Code, docs only)
 
 Handover from the PM after the CFO's directive (`docs/notes/2026-11-05_CFO_T1C_v2_Directive_and_Review.docx`). The work is **docs only**: no `src/` changes and no M3a code. Branch `docs/t1c-v3-m3a-spec`, one commit per task, draft PR into `main` (not merged). PR #3 was already merged (6b89a18), so the directive's Step 1 is done.
