@@ -4,6 +4,45 @@ Newest entries first. Every agent session appends an entry: what changed, decisi
 
 ---
 
+## 2026-11-06 — M3a.1 follow-ups: HOLD inheritance, tunability sweep, lineage_key note (Claude Code)
+
+Branch `m3a1/followups`, cut from `main` after PR #6's merge (b932a4b). Draft PR to `main`; not merged.
+
+**What changed**
+- **HOLD inheritance (Argon ruling), 6a1bb92.** In the seal transaction, `gen_eva.spawn_child` copies the parent's *active, user-originated* HOLD and BLOCK queue overrides to the re-imagined child (origin actor, reason, scope and expiry kept; `inherited_from_id`, note `inherited from <parent ref>`, event `queue_override.inherited`).
+  - Not copied: revoked or expired overrides, other kinds (PIN, FORCE, REORDER), dependency blocks (unmet edges are not overrides) and system holds (`hold_reason` statuses such as `crash_limit`/`grade_met`).
+  - `queue_overrides` gains `expires_at` (an expired override is inactive in Python and in the genQueue SQL), `inherited_from_id` and `note`.
+  - Releasing an override of a sealed packet is refused and names the child that inherited it, so a release racing the seal ends in one of two consistent states: it lands first (child not held) or it fails (child held, parent override unrevoked). Releasing the child's hold is a normal user action.
+- **lineage_key note, 4c5bcec.** Two-line comments on `packets.root_id` (top of the split tree, FK) and `packets.lineage_key` (groups re-attempts; dependency satisfaction, centrality, lockout).
+- **Tunability sweep (CFO rule).** New `orchestrator/tunables.py`: one table of every tunable (key, default, validated range, description).
+  - The seed is generated from it. `settings_store.get_int/get_decimal/get_setting` and the SQL helpers `views._setting`/`genqueue._int` take only a key; their fallback is the table's default, so a Python fallback always equals the seeded value.
+  - `set_setting` refuses out-of-range values.
+  - Moved out of code:
+    - feedback windows 86,400/259,200 s and the mid-window scale (`feedback.*`);
+    - lockout depth (`lockout.max_position`);
+    - composite weights and the sonar shift (`gen_eva.w_*_e4`, `gen_eva.sonar_na_shift_e4`);
+    - critique and contradiction counts;
+    - consensus defaults (the oracle's `ConsensusSettings` now reads the table);
+    - the ambiguity fallback;
+    - the gating tier (`readiness.max_gating_tier`, Python and SQL);
+    - the centrality cap;
+    - the evaQueue question multiplier;
+    - the crash cooldown factor;
+    - branching subtask attempts, tokens and position stride.
+  - `tests/test_tunables.py` fails if any settings reader passes a literal default, names a key not in the table, or if a number other than 0/1 appears in the decision modules' Python or SQL text without a `structural` marker (units, the 10^4 scale, rounding, pass numbers).
+  - `tests/test_m3a1_tunables_behaviour.py` has a test per moved setting showing that changing it changes behaviour.
+
+**Deviations**
+- Overrides had no expiry before; `expires_at` was added so "keep expiry" has meaning (NULL = until revoked).
+- An inherited HOLD/BLOCK keeps the existing override semantics: the child is excluded from genQueue and claims, but its *status* is not changed to `held` (only system holds use the status).
+- The literal scan covers the decision modules (genqueue, views, gen_eva, readiness, consensus, context, queue, runs, branching, gates, budgets). Not scanned: `control.KernelLock`'s 2-minute default TTL (an API parameter callers set), the ingest parser and the LLM adapters (no decisions). Marked structural, not tunable: the 10^4 scale and its rounding, seconds→minutes, 0–10→e4, evaluation pass numbers, and `temperature=0.0` for subtask proposals (determinism, Golden Rule 2).
+
+**Tests:** one full run on SQLite + PostgreSQL 16: 759 passed, 4 skipped (pre-existing dialect skips), 0 failed (12 min 30 s). Ruff check and format clean.
+
+**Not in M3a.1 (M3b):** the local-model crash run journal; a versioned settings table with decision-level version stamping and re-scoring; the daemon.
+
+---
+
 ## 2026-11-06 00:40-01:10 - R6: Argon rulings on M3a OQ1-OQ35 (PM)
 
 - The CFO delegated binding decisions on M3a OQ1-OQ35 to Argon, without further CFO sign-off.
