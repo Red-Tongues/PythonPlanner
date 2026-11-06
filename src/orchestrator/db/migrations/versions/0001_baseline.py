@@ -706,12 +706,16 @@ STATEMENTS: dict[str, list[str]] = {
 	value FLOAT,
 	actor VARCHAR(64) NOT NULL,
 	reason TEXT NOT NULL,
+	expires_at DATETIME,
+	inherited_from_id VARCHAR(36),
+	note TEXT,
 	created_at DATETIME NOT NULL,
 	CONSTRAINT pk_queue_overrides PRIMARY KEY (id),
 	CONSTRAINT ck_queue_overrides_lineage_scope CHECK (scope = 'version' OR kind IN ('block', 'hold')),
 	CONSTRAINT fk_queue_overrides_packet_id_packets FOREIGN KEY(packet_id) REFERENCES packets (id),
 	CONSTRAINT ck_queue_overrides_overridekind CHECK (kind IN ('block', 'hold', 'force', 'pin', 'reorder')),
-	CONSTRAINT ck_queue_overrides_overridescope CHECK (scope IN ('version', 'lineage'))
+	CONSTRAINT ck_queue_overrides_overridescope CHECK (scope IN ('version', 'lineage')),
+	CONSTRAINT fk_queue_overrides_inherited_from_id_queue_overrides FOREIGN KEY(inherited_from_id) REFERENCES queue_overrides (id)
 )""",
         """CREATE INDEX ix_queue_overrides_packet_id ON queue_overrides (packet_id)""",
         """CREATE INDEX ix_queue_overrides_packet_ref ON queue_overrides (packet_ref)""",
@@ -1588,7 +1592,7 @@ WITH x AS (
          COALESCE(fh.missing_optional_fields, 0) AS missing_optional_fields,
          COALESCE(fh.missing_local_drafts, 0) AS missing_local_drafts,
          COALESCE(uf.feedback_e4, 0) AS feedback_e4,
-         CASE WHEN p.status = 'held' OR EXISTS (SELECT 1 FROM queue_overrides o WHERE o.packet_ref = p.ref AND o.kind IN ('block', 'hold') AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'override' AND rv.target_id = o.id) AND (o.scope = 'lineage' OR o.target_version = p.version)) THEN 1 ELSE 0 END AS is_held,
+         CASE WHEN p.status = 'held' OR EXISTS (SELECT 1 FROM queue_overrides o WHERE o.packet_ref = p.ref AND o.kind IN ('block', 'hold') AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'override' AND rv.target_id = o.id) AND (o.scope = 'lineage' OR o.target_version = p.version) AND (o.expires_at IS NULL OR CAST(strftime('%s', o.expires_at) AS INTEGER) > CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER))) THEN 1 ELSE 0 END AS is_held,
          CASE WHEN EXISTS (SELECT 1 FROM packet_dependencies e WHERE e.packet_id = p.id AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = e.id) AND NOT EXISTS (SELECT 1 FROM packets m JOIN sealed_bundles sb ON sb.packet_id = m.id WHERE m.lineage_key = e.depends_on_id AND m.status = 'sealed' AND sb.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER))) THEN 0 ELSE 1 END AS deps_satisfied,
          CASE WHEN EXISTS (SELECT 1 FROM route_health rh WHERE rh.channel = p.channel AND rh.unhealthy_until IS NOT NULL AND CAST(strftime('%s', rh.unhealthy_until) AS INTEGER) > CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER)) THEN 0 ELSE 1 END AS route_healthy,
          CASE WHEN (p.cooldown_until IS NOT NULL AND CAST(strftime('%s', p.cooldown_until) AS INTEGER) > CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER)) THEN 1 ELSE 0 END AS cooling
@@ -1641,7 +1645,7 @@ WITH s AS (WITH x AS (
          COALESCE(fh.missing_optional_fields, 0) AS missing_optional_fields,
          COALESCE(fh.missing_local_drafts, 0) AS missing_local_drafts,
          COALESCE(uf.feedback_e4, 0) AS feedback_e4,
-         CASE WHEN p.status = 'held' OR EXISTS (SELECT 1 FROM queue_overrides o WHERE o.packet_ref = p.ref AND o.kind IN ('block', 'hold') AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'override' AND rv.target_id = o.id) AND (o.scope = 'lineage' OR o.target_version = p.version)) THEN 1 ELSE 0 END AS is_held,
+         CASE WHEN p.status = 'held' OR EXISTS (SELECT 1 FROM queue_overrides o WHERE o.packet_ref = p.ref AND o.kind IN ('block', 'hold') AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'override' AND rv.target_id = o.id) AND (o.scope = 'lineage' OR o.target_version = p.version) AND (o.expires_at IS NULL OR CAST(strftime('%s', o.expires_at) AS INTEGER) > CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER))) THEN 1 ELSE 0 END AS is_held,
          CASE WHEN EXISTS (SELECT 1 FROM packet_dependencies e WHERE e.packet_id = p.id AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = e.id) AND NOT EXISTS (SELECT 1 FROM packets m JOIN sealed_bundles sb ON sb.packet_id = m.id WHERE m.lineage_key = e.depends_on_id AND m.status = 'sealed' AND sb.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER))) THEN 0 ELSE 1 END AS deps_satisfied,
          CASE WHEN EXISTS (SELECT 1 FROM route_health rh WHERE rh.channel = p.channel AND rh.unhealthy_until IS NOT NULL AND CAST(strftime('%s', rh.unhealthy_until) AS INTEGER) > CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER)) THEN 0 ELSE 1 END AS route_healthy,
          CASE WHEN (p.cooldown_until IS NOT NULL AND CAST(strftime('%s', p.cooldown_until) AS INTEGER) > CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER)) THEN 1 ELSE 0 END AS cooling
@@ -1714,7 +1718,7 @@ WITH s AS (WITH x AS (
          COALESCE(fh.missing_optional_fields, 0) AS missing_optional_fields,
          COALESCE(fh.missing_local_drafts, 0) AS missing_local_drafts,
          COALESCE(uf.feedback_e4, 0) AS feedback_e4,
-         CASE WHEN p.status = 'held' OR EXISTS (SELECT 1 FROM queue_overrides o WHERE o.packet_ref = p.ref AND o.kind IN ('block', 'hold') AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'override' AND rv.target_id = o.id) AND (o.scope = 'lineage' OR o.target_version = p.version)) THEN 1 ELSE 0 END AS is_held,
+         CASE WHEN p.status = 'held' OR EXISTS (SELECT 1 FROM queue_overrides o WHERE o.packet_ref = p.ref AND o.kind IN ('block', 'hold') AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'override' AND rv.target_id = o.id) AND (o.scope = 'lineage' OR o.target_version = p.version) AND (o.expires_at IS NULL OR CAST(strftime('%s', o.expires_at) AS INTEGER) > CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER))) THEN 1 ELSE 0 END AS is_held,
          CASE WHEN EXISTS (SELECT 1 FROM packet_dependencies e WHERE e.packet_id = p.id AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = e.id) AND NOT EXISTS (SELECT 1 FROM packets m JOIN sealed_bundles sb ON sb.packet_id = m.id WHERE m.lineage_key = e.depends_on_id AND m.status = 'sealed' AND sb.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER))) THEN 0 ELSE 1 END AS deps_satisfied,
          CASE WHEN EXISTS (SELECT 1 FROM route_health rh WHERE rh.channel = p.channel AND rh.unhealthy_until IS NOT NULL AND CAST(strftime('%s', rh.unhealthy_until) AS INTEGER) > CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER)) THEN 0 ELSE 1 END AS route_healthy,
          CASE WHEN (p.cooldown_until IS NOT NULL AND CAST(strftime('%s', p.cooldown_until) AS INTEGER) > CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER)) THEN 1 ELSE 0 END AS cooling
@@ -1766,7 +1770,7 @@ g AS (WITH s AS (WITH x AS (
          COALESCE(fh.missing_optional_fields, 0) AS missing_optional_fields,
          COALESCE(fh.missing_local_drafts, 0) AS missing_local_drafts,
          COALESCE(uf.feedback_e4, 0) AS feedback_e4,
-         CASE WHEN p.status = 'held' OR EXISTS (SELECT 1 FROM queue_overrides o WHERE o.packet_ref = p.ref AND o.kind IN ('block', 'hold') AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'override' AND rv.target_id = o.id) AND (o.scope = 'lineage' OR o.target_version = p.version)) THEN 1 ELSE 0 END AS is_held,
+         CASE WHEN p.status = 'held' OR EXISTS (SELECT 1 FROM queue_overrides o WHERE o.packet_ref = p.ref AND o.kind IN ('block', 'hold') AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'override' AND rv.target_id = o.id) AND (o.scope = 'lineage' OR o.target_version = p.version) AND (o.expires_at IS NULL OR CAST(strftime('%s', o.expires_at) AS INTEGER) > CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER))) THEN 1 ELSE 0 END AS is_held,
          CASE WHEN EXISTS (SELECT 1 FROM packet_dependencies e WHERE e.packet_id = p.id AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = e.id) AND NOT EXISTS (SELECT 1 FROM packets m JOIN sealed_bundles sb ON sb.packet_id = m.id WHERE m.lineage_key = e.depends_on_id AND m.status = 'sealed' AND sb.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER))) THEN 0 ELSE 1 END AS deps_satisfied,
          CASE WHEN EXISTS (SELECT 1 FROM route_health rh WHERE rh.channel = p.channel AND rh.unhealthy_until IS NOT NULL AND CAST(strftime('%s', rh.unhealthy_until) AS INTEGER) > CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER)) THEN 0 ELSE 1 END AS route_healthy,
          CASE WHEN (p.cooldown_until IS NOT NULL AND CAST(strftime('%s', p.cooldown_until) AS INTEGER) > CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER)) THEN 1 ELSE 0 END AS cooling
@@ -2384,12 +2388,16 @@ LEFT JOIN channel_run_outcomes o ON o.channel_run_id = c.id""",
 	value FLOAT,
 	actor VARCHAR(64) NOT NULL,
 	reason TEXT NOT NULL,
+	expires_at TIMESTAMP WITH TIME ZONE,
+	inherited_from_id VARCHAR(36),
+	note TEXT,
 	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
 	CONSTRAINT pk_queue_overrides PRIMARY KEY (id),
 	CONSTRAINT ck_queue_overrides_lineage_scope CHECK (scope = 'version' OR kind IN ('block', 'hold')),
 	CONSTRAINT fk_queue_overrides_packet_id_packets FOREIGN KEY(packet_id) REFERENCES packets (id),
 	CONSTRAINT ck_queue_overrides_overridekind CHECK (kind IN ('block', 'hold', 'force', 'pin', 'reorder')),
-	CONSTRAINT ck_queue_overrides_overridescope CHECK (scope IN ('version', 'lineage'))
+	CONSTRAINT ck_queue_overrides_overridescope CHECK (scope IN ('version', 'lineage')),
+	CONSTRAINT fk_queue_overrides_inherited_from_id_queue_overrides FOREIGN KEY(inherited_from_id) REFERENCES queue_overrides (id)
 )""",
         """CREATE INDEX ix_queue_overrides_packet_id ON queue_overrides (packet_id)""",
         """CREATE INDEX ix_queue_overrides_packet_ref ON queue_overrides (packet_ref)""",
@@ -3668,7 +3676,7 @@ WITH x AS (
          COALESCE(fh.missing_optional_fields, 0) AS missing_optional_fields,
          COALESCE(fh.missing_local_drafts, 0) AS missing_local_drafts,
          COALESCE(uf.feedback_e4, 0) AS feedback_e4,
-         CASE WHEN p.status = 'held' OR EXISTS (SELECT 1 FROM queue_overrides o WHERE o.packet_ref = p.ref AND o.kind IN ('block', 'hold') AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'override' AND rv.target_id = o.id) AND (o.scope = 'lineage' OR o.target_version = p.version)) THEN 1 ELSE 0 END AS is_held,
+         CASE WHEN p.status = 'held' OR EXISTS (SELECT 1 FROM queue_overrides o WHERE o.packet_ref = p.ref AND o.kind IN ('block', 'hold') AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'override' AND rv.target_id = o.id) AND (o.scope = 'lineage' OR o.target_version = p.version) AND (o.expires_at IS NULL OR CAST(FLOOR(EXTRACT(EPOCH FROM o.expires_at)) AS BIGINT) > CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT))) THEN 1 ELSE 0 END AS is_held,
          CASE WHEN EXISTS (SELECT 1 FROM packet_dependencies e WHERE e.packet_id = p.id AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = e.id) AND NOT EXISTS (SELECT 1 FROM packets m JOIN sealed_bundles sb ON sb.packet_id = m.id WHERE m.lineage_key = e.depends_on_id AND m.status = 'sealed' AND sb.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER))) THEN 0 ELSE 1 END AS deps_satisfied,
          CASE WHEN EXISTS (SELECT 1 FROM route_health rh WHERE rh.channel = p.channel AND rh.unhealthy_until IS NOT NULL AND CAST(FLOOR(EXTRACT(EPOCH FROM rh.unhealthy_until)) AS BIGINT) > CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT)) THEN 0 ELSE 1 END AS route_healthy,
          CASE WHEN (p.cooldown_until IS NOT NULL AND CAST(FLOOR(EXTRACT(EPOCH FROM p.cooldown_until)) AS BIGINT) > CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT)) THEN 1 ELSE 0 END AS cooling
@@ -3721,7 +3729,7 @@ WITH s AS (WITH x AS (
          COALESCE(fh.missing_optional_fields, 0) AS missing_optional_fields,
          COALESCE(fh.missing_local_drafts, 0) AS missing_local_drafts,
          COALESCE(uf.feedback_e4, 0) AS feedback_e4,
-         CASE WHEN p.status = 'held' OR EXISTS (SELECT 1 FROM queue_overrides o WHERE o.packet_ref = p.ref AND o.kind IN ('block', 'hold') AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'override' AND rv.target_id = o.id) AND (o.scope = 'lineage' OR o.target_version = p.version)) THEN 1 ELSE 0 END AS is_held,
+         CASE WHEN p.status = 'held' OR EXISTS (SELECT 1 FROM queue_overrides o WHERE o.packet_ref = p.ref AND o.kind IN ('block', 'hold') AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'override' AND rv.target_id = o.id) AND (o.scope = 'lineage' OR o.target_version = p.version) AND (o.expires_at IS NULL OR CAST(FLOOR(EXTRACT(EPOCH FROM o.expires_at)) AS BIGINT) > CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT))) THEN 1 ELSE 0 END AS is_held,
          CASE WHEN EXISTS (SELECT 1 FROM packet_dependencies e WHERE e.packet_id = p.id AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = e.id) AND NOT EXISTS (SELECT 1 FROM packets m JOIN sealed_bundles sb ON sb.packet_id = m.id WHERE m.lineage_key = e.depends_on_id AND m.status = 'sealed' AND sb.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER))) THEN 0 ELSE 1 END AS deps_satisfied,
          CASE WHEN EXISTS (SELECT 1 FROM route_health rh WHERE rh.channel = p.channel AND rh.unhealthy_until IS NOT NULL AND CAST(FLOOR(EXTRACT(EPOCH FROM rh.unhealthy_until)) AS BIGINT) > CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT)) THEN 0 ELSE 1 END AS route_healthy,
          CASE WHEN (p.cooldown_until IS NOT NULL AND CAST(FLOOR(EXTRACT(EPOCH FROM p.cooldown_until)) AS BIGINT) > CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT)) THEN 1 ELSE 0 END AS cooling
@@ -3794,7 +3802,7 @@ WITH s AS (WITH x AS (
          COALESCE(fh.missing_optional_fields, 0) AS missing_optional_fields,
          COALESCE(fh.missing_local_drafts, 0) AS missing_local_drafts,
          COALESCE(uf.feedback_e4, 0) AS feedback_e4,
-         CASE WHEN p.status = 'held' OR EXISTS (SELECT 1 FROM queue_overrides o WHERE o.packet_ref = p.ref AND o.kind IN ('block', 'hold') AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'override' AND rv.target_id = o.id) AND (o.scope = 'lineage' OR o.target_version = p.version)) THEN 1 ELSE 0 END AS is_held,
+         CASE WHEN p.status = 'held' OR EXISTS (SELECT 1 FROM queue_overrides o WHERE o.packet_ref = p.ref AND o.kind IN ('block', 'hold') AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'override' AND rv.target_id = o.id) AND (o.scope = 'lineage' OR o.target_version = p.version) AND (o.expires_at IS NULL OR CAST(FLOOR(EXTRACT(EPOCH FROM o.expires_at)) AS BIGINT) > CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT))) THEN 1 ELSE 0 END AS is_held,
          CASE WHEN EXISTS (SELECT 1 FROM packet_dependencies e WHERE e.packet_id = p.id AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = e.id) AND NOT EXISTS (SELECT 1 FROM packets m JOIN sealed_bundles sb ON sb.packet_id = m.id WHERE m.lineage_key = e.depends_on_id AND m.status = 'sealed' AND sb.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER))) THEN 0 ELSE 1 END AS deps_satisfied,
          CASE WHEN EXISTS (SELECT 1 FROM route_health rh WHERE rh.channel = p.channel AND rh.unhealthy_until IS NOT NULL AND CAST(FLOOR(EXTRACT(EPOCH FROM rh.unhealthy_until)) AS BIGINT) > CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT)) THEN 0 ELSE 1 END AS route_healthy,
          CASE WHEN (p.cooldown_until IS NOT NULL AND CAST(FLOOR(EXTRACT(EPOCH FROM p.cooldown_until)) AS BIGINT) > CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT)) THEN 1 ELSE 0 END AS cooling
@@ -3846,7 +3854,7 @@ g AS (WITH s AS (WITH x AS (
          COALESCE(fh.missing_optional_fields, 0) AS missing_optional_fields,
          COALESCE(fh.missing_local_drafts, 0) AS missing_local_drafts,
          COALESCE(uf.feedback_e4, 0) AS feedback_e4,
-         CASE WHEN p.status = 'held' OR EXISTS (SELECT 1 FROM queue_overrides o WHERE o.packet_ref = p.ref AND o.kind IN ('block', 'hold') AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'override' AND rv.target_id = o.id) AND (o.scope = 'lineage' OR o.target_version = p.version)) THEN 1 ELSE 0 END AS is_held,
+         CASE WHEN p.status = 'held' OR EXISTS (SELECT 1 FROM queue_overrides o WHERE o.packet_ref = p.ref AND o.kind IN ('block', 'hold') AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'override' AND rv.target_id = o.id) AND (o.scope = 'lineage' OR o.target_version = p.version) AND (o.expires_at IS NULL OR CAST(FLOOR(EXTRACT(EPOCH FROM o.expires_at)) AS BIGINT) > CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT))) THEN 1 ELSE 0 END AS is_held,
          CASE WHEN EXISTS (SELECT 1 FROM packet_dependencies e WHERE e.packet_id = p.id AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = e.id) AND NOT EXISTS (SELECT 1 FROM packets m JOIN sealed_bundles sb ON sb.packet_id = m.id WHERE m.lineage_key = e.depends_on_id AND m.status = 'sealed' AND sb.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER))) THEN 0 ELSE 1 END AS deps_satisfied,
          CASE WHEN EXISTS (SELECT 1 FROM route_health rh WHERE rh.channel = p.channel AND rh.unhealthy_until IS NOT NULL AND CAST(FLOOR(EXTRACT(EPOCH FROM rh.unhealthy_until)) AS BIGINT) > CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT)) THEN 0 ELSE 1 END AS route_healthy,
          CASE WHEN (p.cooldown_until IS NOT NULL AND CAST(FLOOR(EXTRACT(EPOCH FROM p.cooldown_until)) AS BIGINT) > CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT)) THEN 1 ELSE 0 END AS cooling

@@ -236,7 +236,8 @@ def queue_score_select(dialect: str, now: str) -> str:
         "EXISTS (SELECT 1 FROM queue_overrides o WHERE o.packet_ref = p.ref "
         "AND o.kind IN ('block', 'hold') AND NOT EXISTS (SELECT 1 FROM revocations rv "
         "WHERE rv.target_type = 'override' AND rv.target_id = o.id) "
-        "AND (o.scope = 'lineage' OR o.target_version = p.version))"
+        "AND (o.scope = 'lineage' OR o.target_version = p.version) "
+        f"AND (o.expires_at IS NULL OR {epoch.format(x='o.expires_at')} > {epoch.format(x=now)}))"
     )
     unsatisfied = (
         "EXISTS (SELECT 1 FROM packet_dependencies e WHERE e.packet_id = p.id AND "

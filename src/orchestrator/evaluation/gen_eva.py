@@ -455,6 +455,60 @@ def _copy_results(session: Session, parent: Packet, child: Packet, actor: Actor)
     return carried
 
 
+def inherit_overrides(
+    session: Session, parent: Packet, child: Packet, *, actor: Actor = GEN_EVA
+) -> list[str]:
+    """M3a.1 (Argon ruling): copy the parent's **active, user-originated** HOLD and BLOCK queue
+    overrides to the child, in the seal transaction. Origin actor, reason, scope and expiry are
+    kept; ``inherited_from_id`` and ``note`` record the source. Dependency blocks (unmet edges)
+    and system holds (``hold_reason`` statuses such as ``crash_limit``/``grade_met``) are not
+    overrides and are never copied. Releasing the child's hold is a normal user action."""
+    from orchestrator.contracts import OverrideKind
+    from orchestrator.db.models import QueueOverride
+    from orchestrator.governance import active_overrides
+
+    copied: list[str] = []
+    for source in active_overrides(session, parent):
+        if OverrideKind(source.kind) not in (OverrideKind.HOLD, OverrideKind.BLOCK):
+            continue
+        if not source.actor.startswith("user:"):
+            continue
+        copy = QueueOverride(
+            id=new_id(),
+            packet_id=child.id,
+            packet_ref=child.ref,
+            kind=source.kind,
+            scope=source.scope,
+            target_version=child.version,
+            value=source.value,
+            actor=source.actor,
+            reason=source.reason,
+            expires_at=source.expires_at,
+            inherited_from_id=source.id,
+            note=f"inherited from {parent.ref}",
+        )
+        session.add(copy)
+        record_event(
+            session,
+            actor=actor,
+            action="queue_override.inherited",
+            entity_type="queue_override",
+            entity_id=copy.id,
+            entity_ref=child.ref,
+            entity_version=child.version,
+            after={
+                "kind": OverrideKind(copy.kind).value,
+                "origin_actor": copy.actor,
+                "inherited_from": source.id,
+                "expires_at": copy.expires_at.isoformat() if copy.expires_at else None,
+            },
+            reason=f"inherited from {parent.ref} at its seal (M3a.1)",
+        )
+        session.flush()
+        copied.append(copy.id)
+    return copied
+
+
 def child_of(session: Session, bundle: SealedBundle) -> Packet | None:
     return session.scalar(select(Packet).where(Packet.parent_bundle_id == bundle.id))
 
@@ -521,6 +575,7 @@ def spawn_child(
     )
     session.flush()
     _copy_results(session, parent, child, actor)
+    inherit_overrides(session, parent, child, actor=actor)
     if bundle.composite_grade_e4 >= get_int(session, "lineage_stop_grade_e4", 8500):
         record_event(
             session,

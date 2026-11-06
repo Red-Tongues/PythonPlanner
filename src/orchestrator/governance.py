@@ -19,11 +19,19 @@ Only user actors make these decisions; every one is evented.
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from orchestrator.actors import Actor
-from orchestrator.contracts import DependencyKind, EvaPhase, OverrideKind, OverrideScope
+from orchestrator.contracts import (
+    DependencyKind,
+    EvaPhase,
+    OverrideKind,
+    OverrideScope,
+    PacketStatus,
+)
 from orchestrator.db.models import (
     Packet,
     PacketDependency,
@@ -106,6 +114,7 @@ def add_override(
     reason: str,
     scope: OverrideScope | str = OverrideScope.VERSION,
     value: float | None = None,
+    expires_at: datetime | None = None,
 ) -> QueueOverride:
     _require_user(actor)
     kind, scope = OverrideKind(kind), OverrideScope(scope)
@@ -124,6 +133,7 @@ def add_override(
         value=value,
         actor=str(actor),
         reason=reason,
+        expires_at=expires_at,
     )
     session.add(override)
     record_event(
@@ -134,7 +144,12 @@ def add_override(
         entity_id=override.id,
         entity_ref=packet.ref,
         entity_version=packet.version,
-        after={"kind": kind.value, "scope": scope.value, "value": value},
+        after={
+            "kind": kind.value,
+            "scope": scope.value,
+            "value": value,
+            "expires_at": expires_at.isoformat() if expires_at else None,
+        },
         reason=reason,
     )
     session.flush()
@@ -163,6 +178,16 @@ def revoke(
         return existing
     packet = session.get(Packet, target.packet_id)
     assert packet is not None
+    if target_type == "override" and PacketStatus(packet.status) is PacketStatus.SEALED:
+        # M3a.1: a sealed packet's active HOLD/BLOCK was inherited by its re-imagined child in
+        # the seal transaction; the hold now lives on the child, which is released normally
+        child = session.scalar(
+            select(QueueOverride.packet_ref).where(QueueOverride.inherited_from_id == target_id)
+        )
+        raise GovernanceError(
+            f"{packet.ref} is sealed; its {target.kind} override "
+            + (f"was inherited by {child}: release it there" if child else "has no effect")
+        )
     revocation = Revocation(
         id=new_id(), target_type=target_type, target_id=target_id, actor=str(actor), reason=reason
     )
@@ -219,8 +244,14 @@ def add_dependency(
     return dependency
 
 
-def active_overrides(session: Session, packet: Packet) -> list[QueueOverride]:
-    """Unrevoked overrides that apply to this packet version (lineage scope or same version)."""
+def active_overrides(
+    session: Session, packet: Packet, *, now: datetime | None = None
+) -> list[QueueOverride]:
+    """Unrevoked, unexpired overrides that apply to this packet version (lineage scope or same
+    version)."""
+    from orchestrator.db.models import utcnow
+
+    now = now or utcnow()
     revoked = select(Revocation.target_id).where(Revocation.target_type == "override")
     rows = session.scalars(
         select(QueueOverride).where(
@@ -230,5 +261,6 @@ def active_overrides(session: Session, packet: Packet) -> list[QueueOverride]:
     return [
         o
         for o in rows
-        if OverrideScope(o.scope) is OverrideScope.LINEAGE or o.target_version == packet.version
+        if (OverrideScope(o.scope) is OverrideScope.LINEAGE or o.target_version == packet.version)
+        and (o.expires_at is None or o.expires_at > now)
     ]

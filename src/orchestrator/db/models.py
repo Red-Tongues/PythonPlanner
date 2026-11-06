@@ -777,6 +777,12 @@ class QueueOverride(Base):
     value: Mapped[float | None] = mapped_column(Float)  # REORDER: priority delta
     actor: Mapped[str] = mapped_column(String(64), nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
+    #: M3a.1: an override past this instant is inactive (NULL = until revoked)
+    expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    #: M3a.1 (Argon): a HOLD/BLOCK copied from a sealed parent to its re-imagined child keeps
+    #: the origin actor, reason and expiry and points at the override it was inherited from
+    inherited_from_id: Mapped[str | None] = mapped_column(ForeignKey("queue_overrides.id"))
+    note: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = _created()
 
 

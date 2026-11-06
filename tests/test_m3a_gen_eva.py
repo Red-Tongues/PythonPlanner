@@ -444,11 +444,10 @@ def test_a_soft_hold_during_a_run_and_the_seal_are_one_transaction(
     """Argon E4: the seal, the child spawn and everything they decide commit together; another
     session sees either the running parent with no child, or the sealed parent with its child.
 
-    What a soft HOLD set during the run does (stated, not changed): a HOLD is a queue override
-    keyed by the packet's ref. It never stops the run (R6 OQ19). At the seal the parent is
-    sealed and locked; the override stays on the parent's ref, where it no longer has any
-    effect. The child has a new ref and is therefore *not* held by it — only a parent grade
-    ≥ ``lineage_stop_grade_e4`` holds the child (``grade_met``)."""
+    A soft HOLD set during the run never stops it (R6 OQ19). Since M3a.1 the seal transaction
+    copies the parent's active user HOLD/BLOCK overrides to the child (Argon ruling), so the
+    hold lands on the child; a parent grade ≥ ``lineage_stop_grade_e4`` also holds the child
+    (``grade_met``, a status)."""
     from orchestrator.contracts import OverrideKind
     from orchestrator.governance import add_override
 
@@ -477,5 +476,11 @@ def test_a_soft_hold_during_a_run_and_the_seal_are_one_transaction(
         assert parent.status is S.SEALED and parent.locked
         assert child is not None and child.parent_id == parent.id
         held_child = (result.grade_e4 or 0) >= 8500
-        assert (child.status is S.HELD) is held_child  # the user's HOLD did not carry over
+        assert (child.status is S.HELD) is held_child
         assert child.hold_reason == ("grade_met" if held_child else None)
+        # M3a.1: the user's HOLD is inherited by the child in the same commit
+        from orchestrator.governance import active_overrides
+
+        inherited = active_overrides(b, child)
+        assert [OverrideKind(o.kind) for o in inherited] == [OverrideKind.HOLD]
+        assert inherited[0].note == f"inherited from {ref}"
