@@ -18,6 +18,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from orchestrator.sql import genqueue
+
 
 @dataclass(frozen=True)
 class Dialect:
@@ -58,7 +60,6 @@ VIEW_NAMES: tuple[str, ...] = (
     "v_branch_model_usage",
     "v_branch_triggers",
     "v_ready_candidates",
-    "v_queue",
 )
 
 
@@ -508,101 +509,6 @@ WHERE req.phase = 'pre'
 GROUP BY h.id, h.ref, h.version, h.status"""
 
 
-def queue_select(dialect: str, now: str) -> str:
-    """The ``v_queue`` query with ``now`` as an SQL expression (``CURRENT_TIMESTAMP`` in the view,
-    a bound ``:now`` in ``orchestrator.sql.queries.queue_rows`` for simulated time)."""
-    d = _DIALECT[dialect]
-    age = d.hours.format(a=now, b="p.created_at")
-    now_ts = d.ts.format(x=now)
-    max_age = _setting("priority.max_age_hours", "72")
-    budget = _setting("queue.failure_budget", "3")
-    backoff_h = f"({_setting('queue.retry_backoff_minutes', '30')} / 60.0)"
-    last_fail_age = d.hours.format(a=now, b="x.last_failure_at")
-    active = (
-        "NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'override' "
-        "AND rv.target_id = o.id) AND (o.scope = 'lineage' OR o.target_version = p.version)"
-    )
-    w = {
-        k: _setting(f"priority.w_{k}", v)
-        for k, v in (
-            ("objective", "0.30"),
-            ("age", "0.25"),
-            ("ambiguity", "0.15"),
-            ("boost", "0.20"),
-            ("failures", "0.10"),
-        )
-    }
-    return f"""WITH x AS (
-  SELECT p.id AS packet_id, p.ref AS packet_ref, p.version AS packet_version, p.status,
-         p.created_at, p.claimed_by, p.lease_expires_at,
-         COALESCE(o.priority_level, 5) AS objective_priority,
-         COALESCE((SELECT CAST(c.final_value AS NUMERIC) FROM v_field_consensus c
-                   WHERE c.packet_id = p.id AND c.field_name = 'ambiguity_quotient'
-                     AND c.phase = 'pre' AND c.status = 'accepted'), 5) AS ambiguity,
-         CASE WHEN p.manual_boost < 0 THEN 0 WHEN p.manual_boost > 10 THEN 10
-              ELSE p.manual_boost END AS boost,
-         (SELECT COUNT(*) FROM channel_runs r WHERE r.packet_id = p.id AND r.status = 'failed'
-            AND r.channel IN ('local_generation', 'workbench_production')
-            AND NOT EXISTS (SELECT 1 FROM confirmations cf WHERE cf.entity_id = p.id
-                              AND cf.entity_type = 'failure_budget' AND cf.status = 'approved'
-                              AND {d.ts.format(x="cf.decided_at")}
-                                  >= {d.ts.format(x="r.finished_at")})) AS failed_runs,
-         (SELECT MAX(r.finished_at) FROM channel_runs r WHERE r.packet_id = p.id
-            AND r.status = 'failed'
-            AND r.channel IN ('local_generation', 'workbench_production')) AS last_failure_at,
-         {age} AS age_hours,
-         (SELECT MIN(CASE o.kind WHEN 'block' THEN 1 WHEN 'hold' THEN 2 WHEN 'force' THEN 3
-                                 WHEN 'pin' THEN 4 ELSE 5 END)
-            FROM queue_overrides o WHERE o.packet_ref = p.ref AND {active}) AS override_rank,
-         COALESCE((SELECT SUM(o.value) FROM queue_overrides o WHERE o.packet_ref = p.ref
-                     AND o.kind = 'reorder' AND {active}), 0) AS reorder_delta,
-         (SELECT COUNT(*) FROM confirmations cf WHERE cf.entity_id = p.id
-            AND cf.status = 'pending') AS pending_approvals
-  FROM packets p
-  LEFT JOIN objectives o ON o.id = p.objective_id
-  WHERE p.status IN ('ready', 'queued')
-    AND NOT EXISTS (SELECT 1 FROM packets s WHERE s.supersedes_id = p.id)
-),
-y AS (
-  SELECT x.*,
-    CASE WHEN x.override_rank = 1 THEN 'blocked'
-         WHEN x.override_rank = 2 THEN 'held'
-         WHEN x.pending_approvals > 0 THEN 'awaiting_approval'
-         WHEN x.failed_runs >= {budget} THEN 'failure_budget'
-         WHEN x.last_failure_at IS NOT NULL AND {last_fail_age} < {backoff_h} THEN 'backoff'
-         WHEN x.claimed_by IS NOT NULL AND x.lease_expires_at IS NOT NULL
-              AND {d.ts.format(x="x.lease_expires_at")} > {now_ts} THEN 'claimed'
-         ELSE NULL END AS ineligible_reason,
-    CASE WHEN x.override_rank = 3 THEN 1
-         WHEN x.override_rank = 4 THEN 2
-         WHEN x.age_hours >= {_setting("queue.max_wait_hours", "48")} THEN 3
-         ELSE 4 END AS queue_class,
-    ROUND(CAST(
-        {w["objective"]} * x.objective_priority / 10.0
-      + {w["age"]} * (CASE WHEN x.age_hours < 0 THEN 0
-                           WHEN x.age_hours > {max_age} THEN {max_age}
-                           ELSE x.age_hours END) / {max_age}
-      + {w["ambiguity"]} * (10 - x.ambiguity) / 10.0
-      + {w["boost"]} * x.boost / 10.0
-      - {w["failures"]} * (CASE WHEN x.failed_runs > {budget} THEN {budget}
-                                ELSE x.failed_runs END) / {budget}
-      + x.reorder_delta AS NUMERIC), 6) AS priority
-  FROM x
-)
-SELECT y.packet_id, y.packet_ref, y.packet_version, y.status, y.created_at,
-       CASE WHEN y.ineligible_reason IS NULL THEN 1 ELSE 0 END AS eligible,
-       y.ineligible_reason, y.queue_class, y.priority, y.age_hours, y.failed_runs,
-       CASE WHEN y.ineligible_reason IS NULL THEN ROW_NUMBER() OVER (
-              PARTITION BY CASE WHEN y.ineligible_reason IS NULL THEN 0 ELSE 1 END
-              ORDER BY y.queue_class, y.priority DESC, y.created_at, y.packet_ref)
-            ELSE NULL END AS position
-FROM y"""
-
-
-def _queue(dialect: str) -> str:
-    return "CREATE VIEW v_queue AS\n" + queue_select(dialect, "CURRENT_TIMESTAMP")
-
-
 # --------------------------------------------------------------------------- entry points
 
 
@@ -620,7 +526,7 @@ def view_statements(dialect: str) -> list[str]:
         _branch_model_usage(),
         _branch_triggers(),
         _ready_candidates(),
-        _queue(dialect),
+        *genqueue.statements(dialect),
     ]
 
 
@@ -670,7 +576,7 @@ RUN_VIEWS: dict[str, str] = {
 }
 
 #: every view of the schema, in creation order
-ALL_VIEW_NAMES: tuple[str, ...] = (*HEAD_VIEWS, *VIEW_NAMES, *RUN_VIEWS)
+ALL_VIEW_NAMES: tuple[str, ...] = (*HEAD_VIEWS, *VIEW_NAMES, *genqueue.VIEW_NAMES, *RUN_VIEWS)
 
 
 def all_view_statements(dialect: str) -> list[str]:

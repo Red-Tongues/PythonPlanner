@@ -3,26 +3,19 @@
 from __future__ import annotations
 
 import threading
-from datetime import datetime
 
 import httpx
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from orchestrator.contracts import (
-    Channel,
-    ConfirmationStatus,
     PacketStatus,
     ProjectTree,
-    RunStatus,
 )
 from orchestrator.db.models import (
     CandidateFieldDefinitionRow,
-    ChannelRun,
-    Confirmation,
     Event,
     Packet,
-    new_id,
 )
 from orchestrator.events import record_event
 from orchestrator.governance import grant_waiver
@@ -154,34 +147,3 @@ def ollama_with_tags(digest: str) -> OllamaProvider:
 
 def event_actions(session: Session) -> set[str]:
     return set(session.scalars(select(Event.action).where(Event.action.like("evaluation.%"))))
-
-
-def fail_runs(session: Session, packet: Packet, n: int, at: datetime) -> None:
-    for i in range(n):
-        session.add(
-            ChannelRun(
-                id=new_id(),
-                run_id=f"LG-{new_id()[:8]}-{i}",
-                channel=Channel.LOCAL_GENERATION,
-                packet_id=packet.id,
-                attempt=1,
-                max_attempts=3,
-                contract="x",
-                status=RunStatus.FAILED,
-                finished_at=at,
-            )
-        )
-        record_event(session, actor=KERNEL, action="t", entity_type="channel_run")
-        session.flush()
-
-
-def budget_confirmation(session: Session, packet: Packet) -> Confirmation:
-    confirmation = session.scalar(
-        select(Confirmation).where(
-            Confirmation.entity_id == packet.id,
-            Confirmation.entity_type == "failure_budget",
-            Confirmation.status == ConfirmationStatus.PENDING,
-        )
-    )
-    assert confirmation is not None
-    return confirmation

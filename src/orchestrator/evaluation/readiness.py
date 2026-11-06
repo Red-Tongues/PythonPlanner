@@ -74,6 +74,9 @@ class ReadinessInputs:
     waived: frozenset[str] = frozenset()
     unmet_dependencies: tuple[str, ...] = ()
     pending_approvals: int = 0
+    #: R6 OQ11: the accepted ambiguity quotient × 1000 (``None`` when not accepted)
+    ambiguity_e4: int | None = None
+    max_ambiguity_e4: int = 4000
 
 
 @dataclass
@@ -149,8 +152,13 @@ def assess_fields(inputs: ReadinessInputs) -> ReadinessReport:
 def assess_readiness(inputs: ReadinessInputs) -> ReadinessReport:
     """The authoritative predicate (pure; D1 point 4)."""
     report = assess_fields(inputs)
+    if inputs.ambiguity_e4 is not None and inputs.ambiguity_e4 > inputs.max_ambiguity_e4:
+        report.blockers.append(
+            f"ambiguity {inputs.ambiguity_e4} > {inputs.max_ambiguity_e4} (R6 OQ11)"
+        )
+        report.needs_review = True
     for dependency in inputs.unmet_dependencies:
-        report.blockers.append(f"dependency {dependency} not completed")
+        report.blockers.append(f"dependency {dependency} not satisfied")
     if inputs.pending_approvals:
         report.blockers.append(f"{inputs.pending_approvals} approval(s) pending")
     report.ready = not report.blockers
@@ -167,6 +175,42 @@ def current_presets_by_field(session: Session, phase: EvaPhase) -> dict[str, Eva
     ):
         latest[preset.field_name] = preset
     return {k: v for k, v in latest.items() if v.enabled}
+
+
+def mandatory_fields_for_packet(session: Session, packet: Packet) -> dict[str, str]:
+    """R6 OQ10/OQ11: field → why it is mandatory. Universal ∪ relational (dependencies,
+    dependents, chartedness) ∪ the task family's ``eva_presets.required`` pre-phase fields.
+    Mirrors ``v_packet_mandatory_fields`` (parity-tested)."""
+    from orchestrator.sql.genqueue import RELATIONAL_FIELDS, UNIVERSAL_FIELDS
+
+    result = {name: "universal" for name in UNIVERSAL_FIELDS}
+
+    def add(names: tuple[str, ...], reason: str) -> None:
+        for name in names:
+            result.setdefault(name, reason)
+
+    revoked = select(Revocation.target_id).where(Revocation.target_type == "dependency")
+    active = PacketDependency.id.not_in(revoked)
+    if session.scalar(
+        select(PacketDependency.id).where(PacketDependency.packet_id == packet.id, active).limit(1)
+    ):
+        add(RELATIONAL_FIELDS["has_dependencies"], "has_dependencies")
+    if session.scalar(
+        select(PacketDependency.id)
+        .where(
+            PacketDependency.depends_on_id.in_([packet.id, packet.root_id or packet.id]),
+            PacketDependency.packet_id != packet.id,
+            active,
+        )
+        .limit(1)
+    ):
+        add(RELATIONAL_FIELDS["has_dependents"], "has_dependents")
+    if packet.repo_target_path is not None:
+        add(RELATIONAL_FIELDS["charted_repo_target"], "charted_repo_target")
+    for name, preset in current_presets_by_field(session, EvaPhase.PRE).items():
+        if preset.required and preset.tier in (1, 2):
+            add((name,), "preset_required")
+    return result
 
 
 def field_gates(session: Session, packet: Packet, phase: EvaPhase) -> list[FieldGate]:
@@ -194,14 +238,17 @@ def field_gates(session: Session, packet: Packet, phase: EvaPhase) -> list[Field
     kinds = {
         d.name: FieldKind(d.kind) for d in session.scalars(select(CandidateFieldDefinitionRow))
     }
+    mandatory = mandatory_fields_for_packet(session, packet) if phase is EvaPhase.PRE else {}
     gates = []
-    for name, preset in current_presets_by_field(session, phase).items():
+    presets = current_presets_by_field(session, phase)
+    for name, preset in presets.items():
         row = statuses.get(name)
+        forced = name in mandatory
         gates.append(
             FieldGate(
                 field=name,
-                tier=preset.tier,
-                required=preset.required,
+                tier=min(preset.tier, 2) if forced else preset.tier,
+                required=preset.required or forced,
                 hard=preset.hard,
                 kind=kinds.get(name, FieldKind.SCORE),
                 status=row.status if row is not None else None,
@@ -210,6 +257,8 @@ def field_gates(session: Session, packet: Packet, phase: EvaPhase) -> list[Field
                 gate_value=preset.gate_value,
             )
         )
+    for name in sorted(set(mandatory) - set(presets)):  # mandatory with no preset: never met
+        gates.append(FieldGate(name, 2, True, False, kinds.get(name, FieldKind.SCORE), None))
     return gates
 
 
@@ -227,21 +276,40 @@ def valid_waivers(session: Session, packet: Packet, phase: EvaPhase) -> frozense
 
 
 def unmet_dependencies(session: Session, packet: Packet) -> tuple[str, ...]:
-    from orchestrator.repository import get_packet
+    """R6 OQ13: an edge (re-pointed at the target's lineage root) is satisfied when any member
+    of that lineage is sealed with ``composite_grade_e4 >= dep_satisfaction_grade_e4``, or is
+    ``completed`` (legacy roll-up). Mirrors ``genqueue.satisfied_sql``."""
+    from orchestrator.db.models import SealedBundle
+    from orchestrator.settings_store import get_int
 
+    grade = get_int(session, "dep_satisfaction_grade_e4", 7000)
     lineage = select(Packet.id).where(Packet.ref == packet.ref)
     unmet: list[str] = []
     revoked = select(Revocation.target_id).where(Revocation.target_type == "dependency")
     for dep in session.scalars(
-        select(PacketDependency).where(
-            PacketDependency.packet_id.in_(lineage), PacketDependency.id.not_in(revoked)
-        )
+        select(PacketDependency)
+        .where(PacketDependency.packet_id.in_(lineage), PacketDependency.id.not_in(revoked))
+        .order_by(PacketDependency.id)
     ):
-        target = session.get(Packet, dep.depends_on_id)
-        assert target is not None
-        head = get_packet(session, target.ref)
-        if PacketStatus(head.status) is not PacketStatus.COMPLETED and target.ref not in unmet:
-            unmet.append(target.ref)
+        members = (Packet.id == dep.depends_on_id) | (Packet.root_id == dep.depends_on_id)
+        done = session.scalar(
+            select(Packet.id)
+            .outerjoin(SealedBundle, SealedBundle.packet_id == Packet.id)
+            .where(
+                members,
+                (Packet.status == PacketStatus.COMPLETED)
+                | (
+                    (Packet.status == PacketStatus.SEALED)
+                    & (SealedBundle.composite_grade_e4 >= grade)
+                ),
+            )
+            .limit(1)
+        )
+        if done is None:
+            target = session.get(Packet, dep.depends_on_id)
+            ref = target.ref if target is not None else dep.depends_on_id
+            if ref not in unmet:
+                unmet.append(ref)
     return tuple(unmet)
 
 
@@ -257,20 +325,51 @@ def pending_approvals(session: Session, packet: Packet) -> int:
 
 
 def evaluation_verdict(session: Session, packet: Packet, phase: EvaPhase) -> ReadinessReport:
-    """Fields only (with waivers): what an evaluation cycle concludes."""
-    return assess_fields(
-        ReadinessInputs(field_gates(session, packet, phase), valid_waivers(session, packet, phase))
+    """Fields only (with waivers; pre phase also the ambiguity bound): what an evaluation cycle
+    concludes."""
+    from orchestrator.settings_store import get_int
+
+    pre = phase is EvaPhase.PRE
+    return assess_readiness(
+        ReadinessInputs(
+            field_gates(session, packet, phase),
+            valid_waivers(session, packet, phase),
+            ambiguity_e4=accepted_ambiguity_e4(session, packet) if pre else None,
+            max_ambiguity_e4=get_int(session, "readiness.max_ambiguity_e4", 4000),
+        )
     )
 
 
+def accepted_ambiguity_e4(session: Session, packet: Packet) -> int | None:
+    value = session.execute(
+        text(
+            "SELECT final_value FROM v_field_consensus WHERE packet_id = :id "
+            "AND field_name = 'ambiguity_quotient' AND phase = 'pre' AND status = 'accepted'"
+        ),
+        {"id": packet.id},
+    ).scalar()
+    if value is None:
+        return None
+    try:
+        return int(Decimal(str(value)) * 1000)
+    except InvalidOperation:
+        return None
+
+
 def readiness(session: Session, packet: Packet) -> ReadinessReport:
-    """Full readiness of a genPacket version (fields, waivers, dependencies, approvals)."""
+    """Full readiness of a genPacket (R6 OQ11): mandatory and required fields (with waivers), no
+    hard failure, dependencies satisfied, approvals granted, ambiguity ≤ 4,000. The context
+    hash check is gone: upstream changes raise ``question_context`` instead."""
+    from orchestrator.settings_store import get_int
+
     return assess_readiness(
         ReadinessInputs(
             fields=field_gates(session, packet, EvaPhase.PRE),
             waived=valid_waivers(session, packet, EvaPhase.PRE),
             unmet_dependencies=unmet_dependencies(session, packet),
             pending_approvals=pending_approvals(session, packet),
+            ambiguity_e4=accepted_ambiguity_e4(session, packet),
+            max_ambiguity_e4=get_int(session, "readiness.max_ambiguity_e4", 4000),
         )
     )
 

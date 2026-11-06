@@ -44,7 +44,7 @@ from orchestrator.governance import (
 )
 from orchestrator.ingest import persist_tree
 from orchestrator.lifecycle import transition
-from orchestrator.queue import ClaimError, admit_next, claim, queue_rows
+from orchestrator.queue import ClaimError, admit_next, claim, gen_queue_rows
 from tests.conftest import DIALECT_PARAMS, KERNEL, POSTGRES_URL, SMALL_TREE, USER, _reset_postgres
 from tests.evafixtures import (
     TEXT_FIELD,
@@ -515,8 +515,6 @@ def test_tc45_tc46_hard_gate_never_waived_or_forced(factory: sessionmaker[Sessio
         # TC-46: FORCE changes priority only — not admitted, cannot be claimed
         transition(p, PacketStatus.READY, KERNEL, "test: force a status")
         add_override(session, p.ref, OverrideKind.FORCE, actor=USER, reason="urgent")
-        row = next(r for r in queue_rows(session) if r.packet_ref == p.ref)
-        assert row.queue_class == "force"
         assert admit_next(session) is None or admit_next(session).ref != p.ref
         transition(p, PacketStatus.QUEUED, KERNEL, "test: bypass admission")
         with pytest.raises(ClaimError, match="no longer ready"):
@@ -541,6 +539,7 @@ def test_tc48_tc49_dependencies_and_approvals(factory: sessionmaker[Session]) ->
         other = _packet(session)
         add_dependency(session, p.ref, other.ref, actor=USER)
         assert any("dependency" in b for b in readiness(session, p).blockers)
+        accept_all(session, p)  # R6 OQ10: a dependency makes two more fields mandatory
         complete_with_evidence(session, other, USER)
         assert readiness(session, p).ready
         from orchestrator.db.models import Confirmation
@@ -568,9 +567,7 @@ def test_tc50_hold_or_block_stops_admission(factory: sessionmaker[Session], kind
         transition(p, PacketStatus.READY, KERNEL)
         assert readiness(session, p).ready  # readiness itself is unaffected
         add_override(session, p.ref, kind, actor=USER, reason="stop", scope="lineage")
-        row = next(r for r in queue_rows(session) if r.packet_ref == p.ref)
-        expected = {OverrideKind.HOLD: "held", OverrideKind.BLOCK: "blocked"}[kind]
-        assert not row.eligible and row.ineligible_reason == expected
+        assert p.id not in {r.packet_id for r in gen_queue_rows(session)}  # R6 OQ2: held
         admitted = admit_next(session)
         assert admitted is None or admitted.ref != p.ref
         session.rollback()

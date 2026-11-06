@@ -195,16 +195,6 @@ SETTINGS_M2 = (
     ("evaluation.num_ctx", 4096, "Context window sent explicitly to the evaluator (B11)"),
     ("evaluation.max_tokens", 512, "Max completion tokens per evaluation call"),
     ("evaluation.max_exemplars", 3, "Exemplars per field included in a prompt"),
-    ("priority.w_objective", 0.3, "Priority weight: objective priority (0-1)"),
-    ("priority.w_age", 0.25, "Priority weight: capped age (0-1)"),
-    ("priority.w_ambiguity", 0.15, "Priority weight: clarity = (10 - ambiguity) / 10"),
-    ("priority.w_boost", 0.2, "Priority weight: manual boost (0-1)"),
-    ("priority.w_failures", 0.1, "Priority weight (subtracted): failed runs / budget"),
-    ("priority.max_age_hours", 72, "Ageing saturates after this many hours (B4)"),
-    ("queue.max_wait_hours", 48, "Eligible packets older than this are served next (B4)"),
-    ("queue.failure_budget", 3, "Lifetime failed runs before awaiting_confirmation (B4)"),
-    ("queue.retry_backoff_minutes", 30, "Minimum wait after a failed run (B4)"),
-    ("queue.fair_admission_every", 3, "Reserve one normal admission per N forced/pinned (B9)"),
     ("queue.lease_minutes", 30, "Claim lease length"),
     ("branching.max_depth", 2, "Maximum branch depth (B5)"),
     ("branching.max_descendants", 12, "Maximum descendants per trunk (B5)"),
@@ -357,6 +347,34 @@ PRESETS: dict[str, tuple[str, int, bool, bool, str | None, str | None]] = {
 }
 
 
+#: M3a (R6 OQ10, OQ16): pre-phase presets for the universal and relational mandatory fields (their
+#: mandatoriness is relational, computed per packet, so ``required`` stays false) and post-phase
+#: presets for the composite gen_eva grade. (field, phase) → (tier, required, hard, op, value)
+M3A_PRESETS: dict[tuple[str, str], tuple[int, bool, bool, str | None, str | None]] = {
+    **{
+        (name, "pre"): (2, False, False, None, None)
+        for name in (
+            "requirement_alignment",
+            "testability",
+            "acceptance_criteria_coverage",
+            "dependency_validity",
+            "interface_stability",
+            "downstream_contract_clarity",
+            "risk_assessment",
+            "sonar_hotspot_alignment",
+        )
+    },
+    ("risk_assessment", "post"): (3, False, False, None, None),
+    ("sonar_hotspot_alignment", "post"): (3, False, False, None, None),
+}
+
+
+def all_presets() -> list[tuple[str, str, int, bool, bool, str | None, str | None]]:
+    rows = [(f, *spec) for f, spec in PRESETS.items()]
+    rows += [(f, ph, *spec) for (f, ph), spec in M3A_PRESETS.items()]
+    return rows
+
+
 def ensure_defaults(session: Session, actor: Actor = SYSTEM_ACTOR) -> dict[str, list[str]]:
     """Insert every missing default row (never overwrite one); one event per table (GE6)."""
     inserted: dict[str, list[str]] = {}
@@ -410,7 +428,7 @@ def ensure_defaults(session: Session, actor: Actor = SYSTEM_ACTOR) -> dict[str, 
             (p.field_name, p.phase.value if hasattr(p.phase, "value") else p.phase)
             for p in session.scalars(select(EvaPreset))
         }
-        for field_name, (phase, tier, required, hard, gate_op, gate_value) in PRESETS.items():
+        for field_name, phase, tier, required, hard, gate_op, gate_value in all_presets():
             if (field_name, phase) not in present:
                 note(
                     "eva_preset",

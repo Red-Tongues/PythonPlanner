@@ -242,6 +242,7 @@ change (DB-enforced).
 | `queued` → `closed_unverified` | user | explicit owner close (branch kill is a BLOCK, not a close: D9-R1) | reason required; locks; in-flight runs staled |  |
 | `queued` → `evaluating_pre` | kernel | fingerprint or readiness changed | H ≠ current or not ready; the kernel commits (M2.1 ruling 4) |  |
 | `queued` → `held` | kernel / user | HOLD (user) or alignment hold (governor) | no active BLOCK |  |
+| `queued` → `ready` | kernel | admission tick: score below the floor (M3a, R6 OQ12) | not running; guarded UPDATE on status and G |  |
 | `queued` → `running` | kernel | claim | E9: H recomputed, then the full readiness predicate; guarded UPDATE (status, version, H, G, lease); not paused (C26); budget reserved (C36); snapshot written and F incremented in the same transaction |  |
 | `ready` → `awaiting_confirmation` | kernel | branch split confirmation; failure budget | one version-bound approval | P1 |
 | `ready` → `blocked` | user | BLOCK, incl. branch kill (D9-R1: a branch-scope BLOCK, reversible) | G bumped in scope (C35) |  |

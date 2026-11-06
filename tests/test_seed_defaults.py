@@ -11,10 +11,11 @@ from orchestrator.db import init_db
 from orchestrator.db.models import Event
 from orchestrator.db.seed import (
     AUTONOMY_SCOPES,
-    PRESETS,
+    M3A_PRESETS,
     SETTINGS,
     SETTINGS_M3A,
     THRESHOLDS,
+    all_presets,
     ensure_defaults,
 )
 from orchestrator.repository import set_setting
@@ -51,17 +52,17 @@ def test_live_defaults_equal_the_frozen_migration_seeds(engine: Engine, session:
     assert settings == {(k, v) for k, v, _ in SETTINGS}
     assert scopes == {(s, m) for s, m, _, _ in AUTONOMY_SCOPES}
     assert thresholds == {(n, f, o, v) for n, f, o, v, *_ in THRESHOLDS}
-    assert presets == {(f, *p) for f, p in PRESETS.items()}
+    assert presets == {tuple(p) for p in all_presets()}
 
 
 def test_init_db_restores_deleted_defaults_and_keeps_edits(
     engine: Engine, session: Session
 ) -> None:
-    set_setting(session, "queue.failure_budget", 5, actor=USER, reason="tolerate more")
+    set_setting(session, "queue.lease_minutes", 45, actor=USER, reason="longer leases")
     session.commit()
     with engine.begin() as c:
         c.execute(
-            text("DELETE FROM settings WHERE key IN ('consensus.winner_min', 'priority.w_age')")
+            text("DELETE FROM settings WHERE key IN ('consensus.winner_min', 'admission.floor_e4')")
         )
         c.execute(text("DELETE FROM thresholds WHERE name = 'split_high_parsability'"))
         c.execute(text("DELETE FROM autonomy_scopes WHERE stage = 'routing'"))
@@ -70,15 +71,15 @@ def test_init_db_restores_deleted_defaults_and_keeps_edits(
     summary = init_db(engine)
     assert summary["reseeded"] == {
         "autonomy_scope": ["routing"],
-        "setting": ["consensus.winner_min", "priority.w_age"],
+        "setting": ["consensus.winner_min", "admission.floor_e4"],
         "threshold": ["split_high_parsability"],
         "control_state": ["1"],
     }
     assert init_db(engine)["reseeded"] == {}  # idempotent
     session.expire_all()
     with engine.connect() as c:
-        budget = c.execute(text("SELECT value FROM settings WHERE key = 'queue.failure_budget'"))
-        assert _value(budget.scalar_one()) == 5  # the user's edit survives
+        budget = c.execute(text("SELECT value FROM settings WHERE key = 'queue.lease_minutes'"))
+        assert _value(budget.scalar_one()) == 45  # the user's edit survives
     events = [
         e
         for e in session.scalars(
@@ -126,16 +127,6 @@ EXPECTED_SETTINGS = {
     ("evaluation.num_ctx", 4096),
     ("evaluation.max_tokens", 512),
     ("evaluation.max_exemplars", 3),
-    ("priority.w_objective", 0.3),
-    ("priority.w_age", 0.25),
-    ("priority.w_ambiguity", 0.15),
-    ("priority.w_boost", 0.2),
-    ("priority.w_failures", 0.1),
-    ("priority.max_age_hours", 72),
-    ("queue.max_wait_hours", 48),
-    ("queue.failure_budget", 3),
-    ("queue.retry_backoff_minutes", 30),
-    ("queue.fair_admission_every", 3),
     ("queue.lease_minutes", 30),
     ("branching.max_depth", 2),
     ("branching.max_descendants", 12),
@@ -214,6 +205,8 @@ def test_seeds_on_a_fresh_database_are_exact(engine) -> None:  # type: ignore[no
                 "revision FROM eva_presets"
             )
         ).all()
-    assert len(presets) == 36 and {(p.plan, p.revision) for p in presets} == {("combined", 1)}
+    assert len(presets) == 46 and {(p.plan, p.revision) for p in presets} == {("combined", 1)}
     gating = {(p[0], p[1], p[2], bool(p[3]), bool(p[4]), p[5], p[6]) for p in presets if p[2] < 3}
-    assert gating == EXPECTED_GATING_PRESETS
+    assert gating == EXPECTED_GATING_PRESETS | {
+        (f, ph, *spec) for (f, ph), spec in M3A_PRESETS.items() if spec[0] < 3
+    }

@@ -49,7 +49,7 @@ from tests.govfixtures import (
 )
 from tests.legacy import supersede_packet
 
-PRE_FIELDS = 15  # task-level fields with pre-phase presets
+PRE_FIELDS = 23  # fields with pre-phase presets (15 task-level + 8 M3a relational, R6 OQ10)
 
 
 def _evaluate(session: Session, ref: str, provider: FakeProvider, **kw):  # type: ignore[no-untyped-def]

@@ -287,6 +287,10 @@ class Packet(Base):
         ForeignKey("sealed_bundles.id", use_alter=True)
     )
     parent_bundle_hash: Mapped[str | None] = mapped_column(String(64))
+    #: R6 OQ10: ``locally_drafted_examples`` = an example blob is present (``content_blobs``)
+    examples_hash: Mapped[str | None] = mapped_column(
+        ForeignKey("content_blobs.hash", use_alter=True)
+    )
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = _updated()
 

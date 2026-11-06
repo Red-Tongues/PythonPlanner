@@ -70,6 +70,8 @@ def transition(
 
     before = packet_snapshot(packet)
     packet.status = target
+    if target is S.READY:  # R6 OQ2/OQ6: ageing and the tie-break start when it becomes ready
+        packet.ready_since = utcnow()
     if target in LOCKING_STATUSES:
         # Same flush → same UPDATE statement; the DB trigger verifies both are set.
         packet.locked = True

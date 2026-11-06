@@ -189,7 +189,8 @@ def test_cli_acceptance_chain(tmp_path) -> None:  # type: ignore[no-untyped-def]
     cli("init-db")
     cli("ingest", "examples/sample_project_plan.md")
     out = cli("evaluate")
-    assert out.count("→ ready") == 15
+    # R6 OQ11: two sample packets exceed the ambiguity bound (FakeProvider scores) and need review
+    assert out.count("→ ready") == 13 and out.count("→ needs_review") == 2
     shown = cli("consensus", "PP-000001")
     assert "accepted" in shown and "conf 0.80" in shown and "SUPPORT:" in shown
     out = cli("branch", "apply")

@@ -52,7 +52,8 @@ def table_statements(dialect: str) -> list[str]:
         )
         for index in sorted(table.indexes, key=lambda ix: ix.name or ""):
             statements.append(_text(CreateIndex(index), compiled_for))
-    for fk in deferred:
+    # a table's foreign keys are a set: sort the deferred ones so the text is deterministic
+    for fk in sorted(deferred, key=lambda c: c.name or ""):
         # AddConstraint marks the constraint "not inline" for good; restore that, or a later
         # SQLite CREATE TABLE in the same process would silently drop the foreign key.
         rule = fk._create_rule

@@ -459,23 +459,23 @@ def queue(
         bool, typer.Option("--all", help="Include ineligible packets with the reason.")
     ] = False,
 ) -> None:
-    """The generation queue: unique deterministic order (v_queue)."""
-    from orchestrator.queue import queue_rows
+    """genQueue (R6): position, score and floor (v_gen_queue)."""
+    from orchestrator.queue import gen_queue_rows
 
     with _session() as session:
-        rows = queue_rows(session)
+        rows = gen_queue_rows(session)
         if channel:
             wanted = {p.id for p in session.query(Packet).filter(Packet.channel == channel)}
             rows = [r for r in rows if r.packet_id in wanted]
-        shown = [r for r in rows if r.eligible or all_rows]
-        if not shown:
+        if not rows:
             typer.echo("the queue is empty — evaluate packets first (`orchestrator evaluate`)")
-        for r in shown:
-            position = f"{r.position:>3}" if r.position is not None else "  -"
-            note = "" if r.eligible else f"  ({r.ineligible_reason})"
+        for r in rows:
             typer.echo(
-                f"{position}  {r.packet_ref} v{r.packet_version}  {r.status:<7} "
-                f"{r.queue_class:<8} priority {r.priority:.4f}  age {r.age_hours:.1f}h{note}"
+                f"{r.gen_position:>3}  {r.packet_ref}  {r.status:<7} score {r.score_e4:>6} "
+                f"floor {r.floor_e4}  wait {r.wait_sec}s  "
+                f"(grade {r.parent_grade_e4}, centrality {r.centrality_e4}, "
+                f"questioned -{r.question_score_e4}, feedback {r.feedback_e4:+d}, "
+                f"ageing +{r.ageing_e4})"
             )
 
 

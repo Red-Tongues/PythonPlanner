@@ -27,7 +27,7 @@ from orchestrator.db.models import Confirmation, Objective, Packet, Project
 from orchestrator.events import record_event
 
 #: confirmation entity types that concern one genPacket's readiness
-PACKET_CONFIRMATION_TYPES: frozenset[str] = frozenset({"packet", "packet_review", "failure_budget"})
+PACKET_CONFIRMATION_TYPES: frozenset[str] = frozenset({"packet", "packet_review"})
 
 
 def bump_gate(session: Session, packet: Packet, *, actor: Actor, cause: str) -> int | None:

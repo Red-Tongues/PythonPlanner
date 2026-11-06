@@ -128,6 +128,13 @@ _PACKET_RULES: list[Rule] = [
         "one confirmation",
         deviation="P1",
     ),
+    *_p(
+        S.QUEUED,
+        S.READY,
+        K,
+        "admission tick: score below the floor (M3a, R6 OQ12)",
+        "not running; guarded UPDATE on status and G",
+    ),
     *_p(S.QUEUED, S.BLOCKED, K, "WP routing with no consumer (C5)"),
     *_p(
         S.QUEUED,

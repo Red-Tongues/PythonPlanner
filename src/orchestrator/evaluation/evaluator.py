@@ -120,6 +120,10 @@ class EvaluationError(OrchestratorError):
     """The packet cannot be evaluated in its current state."""
 
 
+class LockedOut(EvaluationError):
+    """R6 OQ3/OQ31: the packet is in the genQueue lockout of the newest epoch snapshot."""
+
+
 class StaleEvaluation(OrchestratorError):
     """The packet changed (new version or new input hash) while an evaPacket was running."""
 
@@ -382,6 +386,10 @@ class Evaluator:
         if phase is EvaPhase.PRE:
             if status not in PRE_STATUSES_TO_EVALUATE:
                 raise EvaluationError(f"{packet.ref} is {status.value}; cannot pre-evaluate now")
+            self._refuse_if_locked_out(packet)
+            from orchestrator.queue import latest_epoch
+
+            self._observed = (packet.content_revision, latest_epoch(session))
             target = refresh_input_hash(session, packet, self.actor)
             document, _ = packet_document(session, packet)
             if status not in ENRICHED_IN_PLACE and status is not PacketStatus.EVALUATING_PRE:
@@ -1032,9 +1040,74 @@ class Evaluator:
 
     # ------------------------------------------------------------------ decisions
 
+    def _refuse_if_locked_out(self, packet: Packet) -> None:
+        """AC20 (defence in depth): an evaPacket never runs on a locked-out packet."""
+        from orchestrator.queue import is_locked_out
+
+        if is_locked_out(self.session, packet.id):
+            record_event(
+                self.session,
+                actor=self.actor,
+                action="evaluation.lockout_refused",
+                entity_type="packet",
+                entity_id=packet.id,
+                entity_ref=packet.ref,
+                entity_version=packet.version,
+                reason="the packet is in the genQueue position 0-2 lockout (R6 OQ3, OQ31)",
+            )
+            self.session.flush()
+            raise LockedOut(f"{packet.ref} is locked out of evaQueue (genQueue positions 0-2)")
+
+    def _commit_guard(self, work: list[_Work]) -> None:
+        """R6 OQ30: an in-flight evaluation finishes, but its commit checks the newest lockout
+        snapshot and the content revision in one compare-and-set; on conflict its evaPackets
+        are superseded and the discard is logged (append-only ``eva_discard_log``)."""
+        from orchestrator.db.models import EvaDiscardLog
+        from orchestrator.queue import is_locked_out, latest_epoch
+
+        observed = getattr(self, "_observed", None)
+        if observed is None or not work:
+            return
+        packet = self.session.get(Packet, work[0].eva.packet_id)
+        assert packet is not None
+        self.session.refresh(packet)
+        locked = is_locked_out(self.session, packet.id)
+        if packet.content_revision == observed[0] and not locked:
+            return
+        open_states = (EvaState.PLANNED, EvaState.EXTRACTING, EvaState.CROSS_SCORING)
+        for w in work:
+            if EvaState(w.eva.state) in open_states:
+                self._set_state(w.eva, EvaState.SUPERSEDED, "discarded at commit (R6 OQ30)")
+        row = EvaDiscardLog(
+            id=new_id(),
+            packet_id=packet.id,
+            cycle_id=work[0].eva.cycle_id,
+            epoch_id=latest_epoch(self.session),
+            expected_content_revision=observed[0],
+            actual_content_revision=packet.content_revision,
+            locked_out=locked,
+            reason="locked out at commit" if locked else "content revision moved",
+        )
+        self.session.add(row)
+        record_event(
+            self.session,
+            actor=self.actor,
+            action="evaluation.discarded",
+            entity_type="eva_discard_log",
+            entity_id=row.id,
+            entity_ref=packet.ref,
+            entity_version=packet.version,
+            after={"locked_out": locked, "content_revision": packet.content_revision},
+            reason=row.reason,
+        )
+        self.session.flush()
+        raise StaleEvaluation(f"{packet.ref}: evaluation discarded at commit ({row.reason})")
+
     def _finish(self, work: list[_Work], report: EvaluationReport) -> None:
         """Record the SQL decision as the evaPacket's terminal state, then register the
         context each finished pre-phase evaPacket read (M3a, R6 OQ22)."""
+        if work and EvaPhase(work[0].eva.phase) is EvaPhase.PRE:
+            self._commit_guard(work)
         self._decide(work, report)
         from orchestrator.evaluation.context import register_context_links
 
@@ -1146,35 +1219,15 @@ def evaluate_packet(
 
 
 def pending_packets(session: Session, limit: int | None = None) -> list[Packet]:
-    """Head genPackets whose pre-phase evaluation set is missing or stale — changed inputs or
-    context, or results no longer current for the active definitions and presets (needs_review
-    is left alone: no evaluation loop on a dispute — B9)."""
-    from orchestrator.repository import _heads
+    """The evaluator's work list (M3a, R6 OQ5): ``v_eva_queue`` in priority order — developing
+    packets with missing mandatory or optional fields or questioned context, minus the lockout
+    of the newest epoch snapshot. ``needs_review`` is left alone (B9: no loop on a dispute)."""
+    from orchestrator.queue import eva_queue_rows
 
-    candidates = session.scalars(
-        _heads(Packet)
-        .where(
-            Packet.locked.is_(False),
-            Packet.status.in_(
-                [
-                    PacketStatus.DRAFT,
-                    PacketStatus.EVALUATING_PRE,
-                    PacketStatus.EVALUATING,
-                    PacketStatus.READY,
-                ]
-            ),
-        )
-        .order_by(Packet.created_at, Packet.ref)
-    ).all()
     result: list[Packet] = []
-    for packet in candidates:
-        _, target = packet_document(session, packet)
-        stale = packet.input_hash != target or PacketStatus(packet.status) is not PacketStatus.READY
-        if not stale:  # M2.1 fix 4: a new definition or preset revision makes results pending
-            from orchestrator.evaluation.readiness import evaluation_verdict
-
-            stale = not evaluation_verdict(session, packet, EvaPhase.PRE).ok
-        if stale:
+    for row in eva_queue_rows(session):
+        packet = session.get(Packet, row.packet_id)
+        if packet is not None:
             result.append(packet)
         if limit is not None and len(result) >= limit:
             break

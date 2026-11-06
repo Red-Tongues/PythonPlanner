@@ -282,16 +282,23 @@ def oracle_inputs(
 def accept_all(
     session: Session, packet: Packet, *, skip: set[str] | frozenset[str] = frozenset()
 ) -> None:
-    """Accepted consensus for every required pre-phase field (a ready evaluation set)."""
-    from orchestrator.evaluation.readiness import current_presets_by_field
+    """Accepted consensus for every required and every mandatory pre-phase field (a ready
+    evaluation set; M3a R6 OQ10/OQ11). Scores are 3 so the ambiguity bound (≤ 4,000) holds."""
+    from orchestrator.evaluation.readiness import (
+        current_presets_by_field,
+        mandatory_fields_for_packet,
+    )
 
     eights = {3: 8, 4: 8, 5: 8, 6: 8}
     support = {4: (1, 0, 0), 5: (1, 0, 0)}
+    mandatory = mandatory_fields_for_packet(session, packet)
     for name, preset in current_presets_by_field(session, EvaPhase.PRE).items():
-        if name in skip or not preset.required or preset.tier == 3:
+        if name in skip:
+            continue
+        if name not in mandatory and (not preset.required or preset.tier == 3):
             continue
         kind = kind_of(session, name)
-        value = {FieldKind.SCORE: "5", FieldKind.BOOL: "true", FieldKind.TEXT: "x"}.get(kind)
+        value = {FieldKind.SCORE: "3", FieldKind.BOOL: "true", FieldKind.TEXT: "x"}.get(kind)
         key = "other" if kind is FieldKind.TAGSET else ""
         seed_eva(session, packet, name, {key: Item(value or "on", value or "on", eights, support)})
 
