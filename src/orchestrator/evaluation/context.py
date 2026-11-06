@@ -108,7 +108,8 @@ def verified_quotes(session: Session, eva: EvaPacket) -> list[str]:
     quotes: list[str] = []
     for row in session.scalars(
         select(EvaluationPass).where(
-            EvaluationPass.eva_packet_id == eva.id, EvaluationPass.pass_no >= 3
+            EvaluationPass.eva_packet_id == eva.id,
+            EvaluationPass.pass_no >= 3,  # structural: evaluation passes 3-6
         )
     ):
         for ev in row.evidence or []:

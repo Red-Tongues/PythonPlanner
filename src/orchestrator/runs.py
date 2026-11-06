@@ -983,7 +983,7 @@ def approve_run(
         reason=reason,
     )
     _bump_pair(session, packet, run, "parked run approved", actor)
-    lease = now + timedelta(minutes=get_int(session, "queue.lease_minutes", 30))
+    lease = now + timedelta(minutes=get_int(session, "queue.lease_minutes"))
     _packet_cas(
         session,
         packet,
@@ -1129,12 +1129,13 @@ def try_claim(
 
 
 def crash_cooldown_seconds(session: Session, crash_count: int) -> int:
-    """``min(max, base · 2^(crash_count − 1))`` in whole seconds (integer only)."""
+    """``min(max, base · factor^(crash_count − 1))`` in whole seconds (integer only)."""
     from orchestrator.settings_store import get_int
 
-    base = get_int(session, "crash.cooldown_base_sec", 30)
-    cap = get_int(session, "crash.cooldown_max_sec", 3600)
-    return min(cap, base * (2 ** max(0, crash_count - 1)))
+    base = get_int(session, "crash.cooldown_base_sec")
+    cap = get_int(session, "crash.cooldown_max_sec")
+    factor = get_int(session, "crash.cooldown_factor")
+    return min(cap, base * (factor ** max(0, crash_count - 1)))
 
 
 def record_crash(
@@ -1207,7 +1208,7 @@ def record_crash(
     )
     session.flush()
     if crash.channel is not None:
-        window = get_int(session, "route.crash_window_sec", 300)
+        window = get_int(session, "route.crash_window_sec")
         recent = session.scalar(
             select(func.count())
             .select_from(CrashEvent)
@@ -1216,9 +1217,9 @@ def record_crash(
                 CrashEvent.created_at > now - _td(seconds=window),
             )
         )
-        if (recent or 0) >= get_int(session, "route.crash_threshold", 3):
+        if (recent or 0) >= get_int(session, "route.crash_threshold"):
             health = session.get(RouteHealth, crash.channel)
-            until = now + _td(seconds=get_int(session, "route.unhealthy_sec", 600))
+            until = now + _td(seconds=get_int(session, "route.unhealthy_sec"))
             if health is None:
                 health = RouteHealth(channel=crash.channel, crashes=0)
                 session.add(health)
@@ -1234,7 +1235,7 @@ def record_crash(
                 reason=f"{recent} crashes within {window} s (R6 OQ18)",
             )
             session.flush()
-    if count >= get_int(session, "crash.limit", 5):
+    if count >= get_int(session, "crash.limit"):
         record_event(
             session,
             actor=actor,

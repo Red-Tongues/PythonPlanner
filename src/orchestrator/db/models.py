@@ -234,6 +234,8 @@ class Packet(Base):
     # unique → linear history: a packet can be superseded at most once.
     supersedes_id: Mapped[str | None] = mapped_column(ForeignKey("packets.id"), unique=True)
     parent_id: Mapped[str | None] = mapped_column(ForeignKey("packets.id"), index=True)
+    #: root_id = the top of the split (federation) tree (FK; roll-up, archival).
+    #: Not the re-attempt lineage: see ``lineage_key`` below.
     root_id: Mapped[str | None] = mapped_column(ForeignKey("packets.id"), index=True)
     branch_reason: Mapped[str | None] = mapped_column(Text)
     depth: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
@@ -289,6 +291,8 @@ class Packet(Base):
     lineage_depth: Mapped[int] = mapped_column(
         Integer, default=0, server_default=text("0"), nullable=False
     )
+    #: lineage_key = groups successive re-attempts (re-imagined children) of the same task;
+    #: used for dependency satisfaction, centrality and the lockout — never root_id.
     #: Argon K1 (amends R6 OQ13/OQ24): the re-imagination lineage. A root or a split child is its
     #: own lineage (its id); a re-imagined child inherits its parent's key. Dependency edges,
     #: their satisfaction, centrality and the lineage part of the lockout use this key; root_id
@@ -777,6 +781,12 @@ class QueueOverride(Base):
     value: Mapped[float | None] = mapped_column(Float)  # REORDER: priority delta
     actor: Mapped[str] = mapped_column(String(64), nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
+    #: M3a.1: an override past this instant is inactive (NULL = until revoked)
+    expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    #: M3a.1 (Argon): a HOLD/BLOCK copied from a sealed parent to its re-imagined child keeps
+    #: the origin actor, reason and expiry and points at the override it was inherited from
+    inherited_from_id: Mapped[str | None] = mapped_column(ForeignKey("queue_overrides.id"))
+    note: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = _created()
 
 
