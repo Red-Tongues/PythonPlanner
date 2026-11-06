@@ -56,7 +56,9 @@ OVERRIDABLE: frozenset[PacketStatus] = frozenset(
     }
 )
 #: terminal packet statuses: locked, no exits (``archived`` is legacy, see deviation P4)
-TERMINAL: frozenset[PacketStatus] = frozenset({S.COMPLETED, S.CLOSED_UNVERIFIED, S.ARCHIVED})
+TERMINAL: frozenset[PacketStatus] = frozenset(
+    {S.COMPLETED, S.CLOSED_UNVERIFIED, S.ARCHIVED, S.SEALED}
+)
 NON_TERMINAL: frozenset[PacketStatus] = frozenset(PacketStatus) - TERMINAL
 #: M1 statuses kept so old rows stay valid; they only have exits (deviation P3)
 LEGACY: frozenset[PacketStatus] = frozenset({S.EVALUATING, S.IN_PROGRESS, S.PROCESSED})
@@ -77,6 +79,13 @@ def _p(
 
 _PACKET_RULES: list[Rule] = [
     *_p(S.DRAFT, S.EVALUATING_PRE, K, "tick step 2", "H = current fingerprint (B9, C25)"),
+    *_p(
+        S.DRAFT,
+        S.READY,
+        K,
+        "child genPacket whose carried fields satisfy the mandatory sets (M3a, R6 OQ27)",
+        "the full readiness predicate at spawn",
+    ),
     *_p(
         S.EVALUATING_PRE,
         S.READY,
@@ -111,20 +120,19 @@ _PACKET_RULES: list[Rule] = [
         "version, H, G; no BLOCK/HOLD; within failure budget",
     ),
     *_p(
-        [S.READY, S.QUEUED, S.FAILED],
+        S.FAILED,
         S.EVALUATING_PRE,
         K,
-        "fingerprint or readiness changed",
-        "H ≠ current or not ready; the kernel commits (M2.1 ruling 4)",
+        "readiness changed",
+        "not ready; the kernel commits (M2.1 ruling 4)",
     ),
-    *_p(S.QUEUED, S.AWAITING_CONFIRMATION, K, "failure budget / 48 h touch", "one confirmation"),
+    *_p(S.QUEUED, S.AWAITING_CONFIRMATION, K, "48 h touch", "one confirmation"),
     *_p(
+        S.QUEUED,
         S.READY,
-        S.AWAITING_CONFIRMATION,
         K,
-        "failure budget",
-        "one confirmation",
-        deviation="P1",
+        "admission tick: score below the floor (M3a, R6 OQ12)",
+        "not running; guarded UPDATE on status and G",
     ),
     *_p(S.QUEUED, S.BLOCKED, K, "WP routing with no consumer (C5)"),
     *_p(
@@ -146,8 +154,14 @@ _PACKET_RULES: list[Rule] = [
         "SHA recorded first",
     ),
     *_p(S.RUNNING, S.AWAITING_CONFIRMATION, K, "exit 3 / repo_write = confirm"),
+    *_p(
+        S.RUNNING,
+        S.QUEUED,
+        K,
+        "crash with no gradable output (cooldown), hard halt or stale run (M3a, R6 OQ18/OQ19)",
+        "the run is crashed or stale; ownership and lease released in the same CAS",
+    ),
     *_p(S.RUNNING, S.BLOCKED, K, "execution check under NoRunner (C31)"),
-    *_p(S.RUNNING, S.FAILED, K, "run failed", "F matches"),
     *_p(
         S.RUNNING,
         S.EVALUATING_PRE,
@@ -156,17 +170,14 @@ _PACKET_RULES: list[Rule] = [
         "E7: only if the packet's active run ID and F match this run, it is still running, and "
         "no hold, block, pause or confirmation applies (V2)",
     ),
-    *_p(S.FAILED, S.QUEUED, K, "retry", "within budget and backoff, or config changed; H current"),
-    *_p(S.FAILED, S.AWAITING_CONFIRMATION, K, "failure budget exhausted", "one confirmation"),
+    *_p(S.FAILED, S.QUEUED, K, "retry", "config changed; readiness re-checked"),
     *_p(
         S.EVALUATING_POST,
-        S.COMPLETED,
-        KU,
-        "completion",
-        "E5: every required post field complete, accepted and current for M from C29-verified "
-        "evaluators; scan bound to the commit SHA; quality policy (C30); all hard gates; no "
-        "hold or block; locks",
-        deviation="P2",
+        S.SEALED,
+        K,
+        "gen_eva seal (M3a, R6 OQ13)",
+        "a gen_eva grade; outbox drained; one sealed_bundles row (UNIQUE packet_id) from the "
+        "claim-time content revision; locks; exactly one child genPacket spawned",
     ),
     *_p(
         S.EVALUATING_POST,
@@ -199,7 +210,7 @@ _PACKET_RULES: list[Rule] = [
         "exit-3 approval",
         "R1; then the shared dispatch guard (E3); resumes the same conversation exactly once",
     ),
-    *_p(S.AWAITING_CONFIRMATION, S.QUEUED, U, "failure-budget or 48 h approval", "H current"),
+    *_p(S.AWAITING_CONFIRMATION, S.QUEUED, U, "48 h approval", "readiness re-checked"),
     *_p(
         S.AWAITING_CONFIRMATION,
         S.EVALUATING_POST,
@@ -312,7 +323,7 @@ PACKET_TRANSITIONS: dict[tuple[str, str], Rule] = _index(_PACKET_RULES)
 #: run states after which a ``generation_runs`` row never changes (DB-enforced; ``accepted``
 #: also becomes final once its commit is recorded — D8 R4)
 RUN_TERMINAL: frozenset[GenerationRunState] = frozenset(
-    {R.FAILED, R.STALE, R.SUCCEEDED, R.ABANDONED}
+    {R.FAILED, R.STALE, R.SUCCEEDED, R.ABANDONED, R.CRASHED}
 )
 #: run states holding a live claim on their packet
 RUN_ACTIVE: frozenset[GenerationRunState] = frozenset(
@@ -355,7 +366,8 @@ _RUN_RULES: list[Rule] = [
         [R.PLANNED, R.DISPATCHED, R.AWAITING_RESULT, R.VALIDATING],
         R.STALE,
         K,
-        "F superseded, G or H mismatch, packet closed/held/blocked",
+        "F superseded, lease expired, packet closed/blocked, GLOBAL_PAUSE or CFO_ABORT (M3a, R6 "
+        "OQ19: never a G/H change or a soft HOLD)",
         "releases unused reservations",
     ),
     *_r(R.DISPATCHED, R.AWAITING_RESULT, K, "payload written / process launched", "deadline"),
@@ -394,11 +406,11 @@ _RUN_RULES: list[Rule] = [
         R.AWAITING_CONFIRMATION,
         R.STALE,
         K,
-        "non-approval governance change or H change",
+        "owner BLOCK/close, superseded F, GLOBAL_PAUSE (M3a, R6 OQ19: not a G/H change)",
         "E2: the rejection of this run's own exit-3 confirmation is excluded (the run stays "
         "parked); later unrelated changes still stale it",
     ),
-    *_r(R.VALIDATING, R.ACCEPTED, K, "checks pass", "F, G, H match; compute M"),
+    *_r(R.VALIDATING, R.ACCEPTED, K, "checks pass", "F and ownership match; compute M"),
     *_r(
         R.VALIDATING,
         R.AWAITING_RESULT,
@@ -411,11 +423,26 @@ _RUN_RULES: list[Rule] = [
         R.ACCEPTED,
         R.STALE,
         K,
-        "F/G/H change (E8), superseded version (E8), HEAD moved, modifies base mismatch",
+        "F superseded, owner BLOCK/close (E8 as amended by R6 OQ19), superseded legacy version, "
+        "HEAD moved, modifies base mismatch",
         "only before the commit is recorded (R4); publication prohibited; only unused "
         "reservations released",
     ),
     *_r(R.CLAIMED, R.STALE, K, "legacy M2 claim (no fencing token)", deviation="R1"),
+    *_r(
+        [R.DISPATCHED, R.AWAITING_RESULT, R.VALIDATING],
+        R.CRASHED,
+        K,
+        "no gradable output: timeout, disconnect, adapter fault (M3a, R6 OQ18)",
+        "crash_count + 1; never a grade; packet running → queued with cooldown",
+    ),
+    *_r(
+        R.ACCEPTED,
+        R.SUCCEEDED,
+        K,
+        "gen_eva sealed the output (M3a, R6 OQ13/OQ15)",
+        "one sealed_bundles row for the packet; final",
+    ),
 ]
 
 RUN_TRANSITIONS: dict[tuple[str, str], Rule] = _index(_RUN_RULES)

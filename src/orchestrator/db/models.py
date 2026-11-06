@@ -28,6 +28,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    event,
     false,
     text,
 )
@@ -115,6 +116,14 @@ def _locked() -> Mapped[bool]:
     return mapped_column(Boolean, default=False, nullable=False)
 
 
+def _content_revision() -> Mapped[int]:
+    return mapped_column(Integer, default=0, server_default=text("0"), nullable=False)
+
+
+def _last_producer() -> Mapped[str]:
+    return mapped_column(String(64), default="kernel", server_default="kernel", nullable=False)
+
+
 # --------------------------------------------------------------------------- core tree
 
 
@@ -137,6 +146,10 @@ class Project(Base):
     source_path: Mapped[str | None] = mapped_column(Text)
     source_sha256: Mapped[str | None] = mapped_column(String(64))
     tree_contract: Mapped[str | None] = mapped_column(String(64))  # e.g. "ProjectTree@1.0"
+    #: M3a (OQ21, OQ26): edited in place; every change of an audited column bumps this and is
+    #: captured by the outbox trigger into ``field_revisions``
+    content_revision: Mapped[int] = _content_revision()
+    last_producer: Mapped[str] = _last_producer()
     version: Mapped[int] = _version()
     supersedes_id: Mapped[str | None] = mapped_column(ForeignKey("projects.id"), unique=True)
     locked: Mapped[bool] = _locked()
@@ -159,6 +172,8 @@ class Objective(Base):
     tags: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     scores: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     source: Mapped[str] = mapped_column(String(64), default="manual", nullable=False)
+    content_revision: Mapped[int] = _content_revision()
+    last_producer: Mapped[str] = _last_producer()
     version: Mapped[int] = _version()
     supersedes_id: Mapped[str | None] = mapped_column(ForeignKey("objectives.id"), unique=True)
     locked: Mapped[bool] = _locked()
@@ -172,7 +187,19 @@ class Packet(Base):
     """A Task = Prompt Packet: core fields + master governance fields."""
 
     __tablename__ = "packets"
-    __table_args__ = (UniqueConstraint("ref", "version"),)
+    __table_args__ = (
+        UniqueConstraint("ref", "version"),
+        # R6 OQ24 as amended by Argon D1 (PM-resolved): one active version per lineage step
+        Index(
+            "uq_packets_lineage_step",
+            "objective_id",
+            "lineage_key",
+            "lineage_depth",
+            unique=True,
+            sqlite_where=text("supersedes_id IS NULL"),
+            postgresql_where=text("supersedes_id IS NULL"),
+        ),
+    )
 
     id: Mapped[str] = _id()
     ref: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
@@ -242,11 +269,54 @@ class Packet(Base):
     recovery_pending: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default=false(), nullable=False
     )
+    # ---- M3a: the genPacket loop (R6)
+    #: OQ33: bumped only when an audited content column changes (kernel writes bump it with
+    #: ``last_producer``; a raw SQL edit is bumped by the trigger and attributed to ``user_sql``)
+    content_revision: Mapped[int] = _content_revision()
+    last_producer: Mapped[str] = _last_producer()
+    #: OQ18: generations that ended with no gradable output (never a quality signal)
+    crash_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
+    #: OQ18: a crashed packet is not dispatched again before this time
+    cooldown_until: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    #: OQ14 / OQ18: why the packet is ``held`` (``grade_met``, ``crash_limit``, ``user``)
+    hold_reason: Mapped[str | None] = mapped_column(String(32))
+    #: OQ2 / OQ6: when the packet last entered ``ready`` (tie-break and ageing)
+    ready_since: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    #: OQ24: re-imagination generation (0 for an original genPacket); ``depth`` stays the split
+    #: depth (B5)
+    lineage_depth: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
+    #: Argon K1 (amends R6 OQ13/OQ24): the re-imagination lineage. A root or a split child is its
+    #: own lineage (its id); a re-imagined child inherits its parent's key. Dependency edges,
+    #: their satisfaction, centrality and the lineage part of the lockout use this key; root_id
+    #: stays the federation (split) tree for roll-up and archival. Set on insert (see below).
+    lineage_key: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    #: Q6 / OQ24: the sealed bundle of the parent this child re-imagines
+    parent_bundle_id: Mapped[str | None] = mapped_column(
+        ForeignKey("sealed_bundles.id", use_alter=True)
+    )
+    parent_bundle_hash: Mapped[str | None] = mapped_column(String(64))
+    #: R6 OQ10: ``locally_drafted_examples`` = an example blob is present (``content_blobs``)
+    examples_hash: Mapped[str | None] = mapped_column(
+        ForeignKey("content_blobs.hash", use_alter=True)
+    )
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = _updated()
 
     project: Mapped[Project] = relationship()
     objective: Mapped[Objective | None] = relationship(foreign_keys=[objective_id])
+
+
+@event.listens_for(Packet, "before_insert")
+def _default_lineage_key(_mapper: Any, _connection: Any, target: Packet) -> None:
+    """A packet inserted without a lineage key starts its own lineage (roots, split children)."""
+    if target.id is None:
+        target.id = new_id()
+    if target.lineage_key is None:
+        target.lineage_key = target.id
 
 
 # --------------------------------------------------------------------------- evaluation layer
@@ -811,6 +881,9 @@ class GenerationRun(Base):
     )
     stale_reason: Mapped[str | None] = mapped_column(Text)
     finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    #: R6 OQ20: the packet's ``content_revision`` at dispatch; the seal reconstructs exactly
+    #: that revision from ``field_revisions`` (edits during the run carry to the child)
+    claim_content_revision: Mapped[int | None] = mapped_column(Integer)
 
 
 class QueueAdmission(Base):
@@ -972,6 +1045,188 @@ class BudgetTopup(Base):
     created_at: Mapped[datetime] = _created()
 
 
+# --------------------------------------------------------------------------- M3a: genPacket loop
+
+
+class ContentBlob(Base):
+    """A value stored once and referenced by its sha256 (T1-C v3 §1). **Insert-once**."""
+
+    __tablename__ = "content_blobs"
+
+    hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    body: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = _created()
+
+
+class RawRevisionOutbox(Base):
+    """Transient raw capture of an audited column change (T1-C v3 H1). Written only by the
+    AFTER UPDATE triggers; the kernel drains it synchronously into ``content_blobs`` and
+    ``field_revisions`` (R6 OQ35) and deletes the row."""
+
+    __tablename__ = "raw_revision_outbox"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tx_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    entity_type: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    entity_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    field_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    old_value: Mapped[str | None] = mapped_column(Text)
+    new_value: Mapped[str | None] = mapped_column(Text)
+    producer: Mapped[str] = mapped_column(String(64), nullable=False)
+    content_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    captured_at: Mapped[datetime] = _created()
+
+
+class FieldRevision(Base):
+    """One change of one audited field, hash-only (T1-C v3 §1, Q6). **Append-only**."""
+
+    __tablename__ = "field_revisions"
+
+    id: Mapped[str] = _id()
+    entity_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    entity_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    field_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    old_hash: Mapped[str] = mapped_column(ForeignKey("content_blobs.hash"), nullable=False)
+    new_hash: Mapped[str] = mapped_column(ForeignKey("content_blobs.hash"), nullable=False)
+    #: Q6: the hash this value was derived from (the field's previous value)
+    based_on_hash: Mapped[str | None] = mapped_column(String(64))
+    producer: Mapped[str] = mapped_column(String(64), nullable=False)
+    content_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    revision_group_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: sha256 of every audited column of the entity after this revision group
+    manifest_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = _created()
+
+
+class SealedBundle(Base):
+    """The one permanent snapshot of a genPacket after ``gen_eva`` (T1-C v3 §1, R6 OQ13/OQ20).
+    **Append-only**; ``UNIQUE(packet_id)``: a genPacket seals once."""
+
+    __tablename__ = "sealed_bundles"
+
+    id: Mapped[str] = _id()
+    packet_id: Mapped[str] = mapped_column(ForeignKey("packets.id"), unique=True, nullable=False)
+    run_id: Mapped[str | None] = mapped_column(ForeignKey("generation_runs.id"))
+    claim_content_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    #: the canonical JSON snapshot, stored in ``content_blobs``
+    snapshot_hash: Mapped[str] = mapped_column(ForeignKey("content_blobs.hash"), nullable=False)
+    #: sha256 over the snapshot hash, grade and artifact hash
+    bundle_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    composite_grade_e4: Mapped[int] = mapped_column(Integer, nullable=False)
+    artifact_hash: Mapped[str | None] = mapped_column(String(64))
+    #: OQ15: the commit of the output on ``refs/gen/<run_id>`` (NULL with no repository)
+    output_ref: Mapped[str | None] = mapped_column(String(200))
+    created_at: Mapped[datetime] = _created()
+
+
+class EvaContextLink(Base):
+    """One context source an evaPacket read (R6 OQ22). **Append-only** except that
+    ``is_questioned`` may go from false to true (OQ23, OQ34; DB-enforced)."""
+
+    __tablename__ = "eva_context_links"
+    __table_args__ = (
+        CheckConstraint("link_strength IN ('direct', 'peripheral')", name="strength"),
+        CheckConstraint(
+            "source_type IN ('project', 'objective', 'packet', 'definition')", name="source_type"
+        ),
+    )
+
+    id: Mapped[str] = _id()
+    eva_packet_id: Mapped[str] = mapped_column(
+        ForeignKey("eva_packets.id"), nullable=False, index=True
+    )
+    packet_id: Mapped[str] = mapped_column(ForeignKey("packets.id"), nullable=False, index=True)
+    field_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    source_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_ref: Mapped[str | None] = mapped_column(String(64))
+    source_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: the source's ``content_revision`` (or definition version) when the evaPacket read it
+    source_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    link_strength: Mapped[str] = mapped_column(String(16), nullable=False)
+    #: direct_quote | hard_dep | ambient | carried | definition
+    link_reason: Mapped[str] = mapped_column(String(16), nullable=False)
+    quote: Mapped[str | None] = mapped_column(Text)
+    is_questioned: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false(), nullable=False
+    )
+    created_at: Mapped[datetime] = _created()
+
+
+class EvaDiscardLog(Base):
+    """An evaluation whose commit lost the lockout / content-revision CAS (R6 OQ30).
+    **Append-only**."""
+
+    __tablename__ = "eva_discard_log"
+
+    id: Mapped[str] = _id()
+    packet_id: Mapped[str] = mapped_column(ForeignKey("packets.id"), nullable=False, index=True)
+    cycle_id: Mapped[str | None] = mapped_column(ForeignKey("evaluation_cycles.id"))
+    epoch_id: Mapped[int | None] = mapped_column(Integer)
+    expected_content_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    actual_content_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    locked_out: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = _created()
+
+
+class QueueEpochSnapshot(Base):
+    """genQueue as computed at one admission tick, dispatch or completion (R6 OQ31). Lockout
+    and dispatch read the newest epoch, never the live ``ROW_NUMBER``. **Append-only**."""
+
+    __tablename__ = "queue_epoch_snapshot"
+    __table_args__ = (UniqueConstraint("epoch_id", "packet_id"),)
+
+    id: Mapped[str] = _id()
+    epoch_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    packet_id: Mapped[str] = mapped_column(ForeignKey("packets.id"), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    queue_pos: Mapped[int | None] = mapped_column(Integer)
+    is_locked_out: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    score_e4: Mapped[int | None] = mapped_column(Integer)
+    cause: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_at: Mapped[datetime] = _created()
+
+
+class FeedbackEvent(Base):
+    """A human queue weight (R6 OQ9): BOOST, NUDGE, DEMOTE or PIN. **Append-only**."""
+
+    __tablename__ = "feedback_events"
+    __table_args__ = (CheckConstraint("kind IN ('boost', 'nudge', 'demote', 'pin')", name="kind"),)
+
+    id: Mapped[str] = _id()
+    packet_id: Mapped[str] = mapped_column(ForeignKey("packets.id"), nullable=False, index=True)
+    actor: Mapped[str] = mapped_column(String(64), nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = _created()
+
+
+class CrashEvent(Base):
+    """A generation that ended with no gradable output (R6 OQ18). **Append-only**."""
+
+    __tablename__ = "crash_events"
+
+    id: Mapped[str] = _id()
+    packet_id: Mapped[str] = mapped_column(ForeignKey("packets.id"), nullable=False, index=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("generation_runs.id"), nullable=False)
+    channel: Mapped[str | None] = mapped_column(String(32))
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = _created()
+
+
+class RouteHealth(Base):
+    """Per-channel route health (R6 OQ18): unhealthy until ``unhealthy_until`` after three
+    crashes within 300 s. Rows are never deleted."""
+
+    __tablename__ = "route_health"
+
+    channel: Mapped[str] = mapped_column(String(32), primary_key=True)
+    unhealthy_until: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    crashes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    updated_at: Mapped[datetime] = _updated()
+
+
 TABLE_NAMES: tuple[str, ...] = (
     "projects",
     "objectives",
@@ -1009,4 +1264,14 @@ TABLE_NAMES: tuple[str, ...] = (
     "budget_reservations",
     "budget_reconciliations",
     "budget_topups",
+    "content_blobs",
+    "raw_revision_outbox",
+    "field_revisions",
+    "sealed_bundles",
+    "eva_context_links",
+    "eva_discard_log",
+    "queue_epoch_snapshot",
+    "feedback_events",
+    "crash_events",
+    "route_health",
 )

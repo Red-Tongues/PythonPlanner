@@ -358,7 +358,10 @@ def _request_confirmation(session: Session, packet: Packet, rule: Threshold, act
 
 
 def rollup_trunks(session: Session, *, actor: Actor = BRANCHER) -> list[str]:
-    """Complete every waiting trunk whose children are all completed (deterministic roll-up)."""
+    """Complete every waiting trunk whose children are all done (deterministic roll-up): each
+    child's lineage has a member sealed at ``dep_satisfaction_grade_e4`` (M3a), or the child is
+    a completed legacy row."""
+    from orchestrator.evaluation.readiness import completion_blockers
     from orchestrator.lifecycle import transition
     from orchestrator.repository import _heads
 
@@ -367,12 +370,13 @@ def rollup_trunks(session: Session, *, actor: Actor = BRANCHER) -> list[str]:
         _heads(Packet).where(Packet.status == PacketStatus.WAITING_FOR_CHILDREN)
     ):
         children = children_of(session, trunk)
-        if children and all(PacketStatus(c.status) is PacketStatus.COMPLETED for c in children):
+        blockers = completion_blockers(session, trunk, PacketStatus.WAITING_FOR_CHILDREN)
+        if children and not blockers:
             transition(
                 trunk,
                 PacketStatus.COMPLETED,
                 actor,
-                f"all {len(children)} children completed",
+                f"all {len(children)} children done",
                 session=session,
             )
             completed.append(trunk.ref)

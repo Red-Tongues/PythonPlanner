@@ -141,9 +141,9 @@ def test_legacy_rows_stay_valid_and_only_reenter_evaluation(db_url: str) -> None
                         "INSERT INTO packets (id, ref, project_id, position, packet_kind, title,"
                         " prompt_description, response_structure, response_contract, "
                         "manual_boost, status, evaluations_count, locked, version, depth, "
-                        "source, created_at, updated_at) VALUES (:id, :ref, 'p1', 0, 'task', "
-                        "'Legacy', 'x', 'markdown_document', 'markdown_document@1.0', 0, :s, 0, "
-                        ":f, 1, 0, 'm', :t, :t)"
+                        "source, created_at, updated_at, lineage_key) VALUES (:id, :ref, 'p1', "
+                        "0, 'task', 'Legacy', 'x', 'markdown_document', 'markdown_document@1.0', "
+                        "0, :s, 0, :f, 1, 0, 'm', :t, :t, :id)"
                     ),
                     {"id": pid, "ref": f"PP-00000{pid[1]}", "s": status, "t": now, "f": False},
                 )
@@ -189,7 +189,8 @@ def test_cli_acceptance_chain(tmp_path) -> None:  # type: ignore[no-untyped-def]
     cli("init-db")
     cli("ingest", "examples/sample_project_plan.md")
     out = cli("evaluate")
-    assert out.count("→ ready") == 15
+    # R6 OQ11: two sample packets exceed the ambiguity bound (FakeProvider scores) and need review
+    assert out.count("→ ready") == 13 and out.count("→ needs_review") == 2
     shown = cli("consensus", "PP-000001")
     assert "accepted" in shown and "conf 0.80" in shown and "SUPPORT:" in shown
     out = cli("branch", "apply")

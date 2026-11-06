@@ -18,6 +18,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from orchestrator.sql import genqueue
+
 
 @dataclass(frozen=True)
 class Dialect:
@@ -50,6 +52,7 @@ _DIALECT: dict[str, Dialect] = {
 VIEW_NAMES: tuple[str, ...] = (
     "v_eva_progress",
     "v_eva_item_consensus",
+    "v_context_link_status",
     "v_field_consensus",
     "v_field_status",
     "v_packet_stats",
@@ -57,7 +60,6 @@ VIEW_NAMES: tuple[str, ...] = (
     "v_branch_model_usage",
     "v_branch_triggers",
     "v_ready_candidates",
-    "v_queue",
 )
 
 
@@ -229,20 +231,49 @@ SELECT r.eva_packet_id, r.packet_id, r.packet_version, r.eval_cycle_id, r.field_
 FROM r"""
 
 
+def _context_link_status() -> str:
+    """Every context link with ``questioned`` (0/1): the link was flagged (quote broken, carried
+    to a child, OQ24/OQ34) or its source's revision moved past the one it read (R6 OQ23)."""
+    current = (
+        "CASE l.source_type "
+        "WHEN 'project' THEN (SELECT x.content_revision FROM projects x WHERE x.id = l.source_id) "
+        "WHEN 'objective' THEN (SELECT x.content_revision FROM objectives x "
+        "WHERE x.id = l.source_id) "
+        "WHEN 'packet' THEN (SELECT x.content_revision FROM packets x WHERE x.id = l.source_id) "
+        "ELSE COALESCE((SELECT d.version FROM candidate_field_definitions d "
+        "WHERE d.name = l.source_id), (SELECT MAX(ps.revision) FROM eva_presets ps "
+        "WHERE 'preset:' || ps.field_name || ':' || ps.phase = l.source_id)) END"
+    )
+    return f"""CREATE VIEW v_context_link_status AS
+SELECT l.id AS link_id, l.eva_packet_id, l.packet_id, l.field_name, l.source_type,
+       l.source_id, l.source_ref, l.source_revision, l.link_strength, l.link_reason,
+       {current} AS current_revision,
+       CASE WHEN l.is_questioned OR {current} > l.source_revision THEN 1 ELSE 0 END
+         AS questioned
+FROM eva_context_links l"""
+
+
 def _field_consensus() -> str:
     """Current consensus per head packet × field × phase × item (strict binding, ruling 7).
 
-    An evaPacket is *current* (M2.1 fixes 3, 4) only when all of these hold:
-    - same packet row (= version);
-    - its target is the packet's ``input_hash`` (pre) or the sha256 of the packet's newest
-      artifact (post);
-    - its preset is the active (newest, enabled) revision for its field and phase;
-    - its ``definition_version`` equals the field definition's current version.
+    M3a (R6 OQ23, T1-C v3 §2): an evaPacket is *current* while it targets the packet's own
+    intra-packet ``input_hash`` (pre) or the sha256 of the packet's newest artifact (post), on
+    the same packet row, with its preset and definition still enabled. Upstream context and
+    definition/preset version bumps never null a result; they raise ``question_context``:
+
+    - ``question_context`` (0/1) and ``question_context_count`` (questioned links) of the chosen
+      evaPacket, both 0 for ``waiting_for_children`` and ``archived`` packets;
+    - ``question_weight_e4`` (OQ4): ``qctx.w_direct_e4`` if a direct link is questioned, else
+      ``qctx.w_periph_e4`` if a peripheral one is, else 0.
+
     The most relevant evaPacket is chosen: current first, then complete, then the highest
     escalation, then newest. If it is not current the row reports ``pending`` with no
-    confidence or value, so stale results can never satisfy readiness or completion.
+    confidence or value, so a result for another packet definition never satisfies readiness.
     """
-    return """CREATE VIEW v_field_consensus AS
+    w_direct = _setting("qctx.w_direct_e4", "750")
+    w_periph = _setting("qctx.w_periph_e4", "250")
+    quiet = "p.status IN ('waiting_for_children', 'archived')"
+    return f"""CREATE VIEW v_field_consensus AS
 WITH art AS (
   SELECT a.packet_id, a.sha256,
          ROW_NUMBER() OVER (PARTITION BY a.packet_id ORDER BY a.created_at DESC, a.id DESC)
@@ -254,11 +285,7 @@ bound AS (
          CASE WHEN ((e.phase = 'pre' AND e.target_hash = p.input_hash)
                     OR (e.phase = 'post' AND e.target_hash = la.sha256))
                    AND ps.enabled
-                   AND ps.revision = (SELECT MAX(p2.revision) FROM eva_presets p2
-                                      WHERE p2.field_name = e.field_name
-                                        AND p2.phase = e.phase)
                    AND d.enabled
-                   AND e.definition_version = d.version
               THEN 1 ELSE 0 END AS is_current
   FROM eva_packets e
   JOIN packets p ON p.id = e.packet_id
@@ -277,6 +304,13 @@ cand AS (
                                      bound.escalation DESC, bound.created_at DESC,
                                      bound.id DESC) AS rn
   FROM bound
+),
+q AS (
+  SELECT ls.eva_packet_id, SUM(ls.questioned) AS qn,
+         MAX(CASE WHEN ls.questioned = 1 AND ls.link_strength = 'direct' THEN 1 ELSE 0 END)
+           AS qd
+  FROM v_context_link_status ls
+  GROUP BY ls.eva_packet_id
 )
 SELECT p.id AS packet_id, p.ref AS packet_ref, p.version AS packet_version,
        c.field_name, c.phase, c.item_key, c.kind,
@@ -290,10 +324,17 @@ SELECT p.id AS packet_id, p.ref AS packet_ref, p.version AS packet_version,
        CASE WHEN cand.is_current = 1 AND c.status = 'accepted' THEN c.winning_value
             ELSE NULL END AS final_value,
        c.supports, c.contradictions, c.unverified, c.eva_packet_id, c.eval_cycle_id,
-       cand.is_current
+       cand.is_current,
+       CASE WHEN {quiet} THEN 0 WHEN COALESCE(q.qn, 0) > 0 THEN 1 ELSE 0 END
+         AS question_context,
+       CASE WHEN {quiet} THEN 0 ELSE COALESCE(q.qn, 0) END AS question_context_count,
+       CAST(CASE WHEN {quiet} THEN 0 WHEN q.qd = 1 THEN {w_direct}
+                 WHEN COALESCE(q.qn, 0) > 0 THEN {w_periph} ELSE 0 END AS INTEGER)
+         AS question_weight_e4
 FROM cand
 JOIN packets p ON p.id = cand.packet_id
 JOIN v_eva_item_consensus c ON c.eva_packet_id = cand.id
+LEFT JOIN q ON q.eva_packet_id = cand.id
 WHERE cand.rn = 1"""
 
 
@@ -309,7 +350,10 @@ SELECT c.packet_id, c.packet_ref, c.packet_version, c.field_name, c.phase, c.kin
        SUM(CASE WHEN c.status = 'accepted' THEN 1 ELSE 0 END) AS accepted_items,
        SUM(CASE WHEN c.status = 'disputed' THEN 1 ELSE 0 END) AS disputed_items,
        MIN(c.confidence) AS min_confidence,
-       MAX(c.eva_packet_id) AS eva_packet_id
+       MAX(c.eva_packet_id) AS eva_packet_id,
+       MAX(c.question_context) AS question_context,
+       MAX(c.question_context_count) AS question_context_count,
+       MAX(c.question_weight_e4) AS question_weight_e4
 FROM v_field_consensus c
 GROUP BY c.packet_id, c.packet_ref, c.packet_version, c.field_name, c.phase, c.kind"""
 
@@ -465,101 +509,6 @@ WHERE req.phase = 'pre'
 GROUP BY h.id, h.ref, h.version, h.status"""
 
 
-def queue_select(dialect: str, now: str) -> str:
-    """The ``v_queue`` query with ``now`` as an SQL expression (``CURRENT_TIMESTAMP`` in the view,
-    a bound ``:now`` in ``orchestrator.sql.queries.queue_rows`` for simulated time)."""
-    d = _DIALECT[dialect]
-    age = d.hours.format(a=now, b="p.created_at")
-    now_ts = d.ts.format(x=now)
-    max_age = _setting("priority.max_age_hours", "72")
-    budget = _setting("queue.failure_budget", "3")
-    backoff_h = f"({_setting('queue.retry_backoff_minutes', '30')} / 60.0)"
-    last_fail_age = d.hours.format(a=now, b="x.last_failure_at")
-    active = (
-        "NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'override' "
-        "AND rv.target_id = o.id) AND (o.scope = 'lineage' OR o.target_version = p.version)"
-    )
-    w = {
-        k: _setting(f"priority.w_{k}", v)
-        for k, v in (
-            ("objective", "0.30"),
-            ("age", "0.25"),
-            ("ambiguity", "0.15"),
-            ("boost", "0.20"),
-            ("failures", "0.10"),
-        )
-    }
-    return f"""WITH x AS (
-  SELECT p.id AS packet_id, p.ref AS packet_ref, p.version AS packet_version, p.status,
-         p.created_at, p.claimed_by, p.lease_expires_at,
-         COALESCE(o.priority_level, 5) AS objective_priority,
-         COALESCE((SELECT CAST(c.final_value AS NUMERIC) FROM v_field_consensus c
-                   WHERE c.packet_id = p.id AND c.field_name = 'ambiguity_quotient'
-                     AND c.phase = 'pre' AND c.status = 'accepted'), 5) AS ambiguity,
-         CASE WHEN p.manual_boost < 0 THEN 0 WHEN p.manual_boost > 10 THEN 10
-              ELSE p.manual_boost END AS boost,
-         (SELECT COUNT(*) FROM channel_runs r WHERE r.packet_id = p.id AND r.status = 'failed'
-            AND r.channel IN ('local_generation', 'workbench_production')
-            AND NOT EXISTS (SELECT 1 FROM confirmations cf WHERE cf.entity_id = p.id
-                              AND cf.entity_type = 'failure_budget' AND cf.status = 'approved'
-                              AND {d.ts.format(x="cf.decided_at")}
-                                  >= {d.ts.format(x="r.finished_at")})) AS failed_runs,
-         (SELECT MAX(r.finished_at) FROM channel_runs r WHERE r.packet_id = p.id
-            AND r.status = 'failed'
-            AND r.channel IN ('local_generation', 'workbench_production')) AS last_failure_at,
-         {age} AS age_hours,
-         (SELECT MIN(CASE o.kind WHEN 'block' THEN 1 WHEN 'hold' THEN 2 WHEN 'force' THEN 3
-                                 WHEN 'pin' THEN 4 ELSE 5 END)
-            FROM queue_overrides o WHERE o.packet_ref = p.ref AND {active}) AS override_rank,
-         COALESCE((SELECT SUM(o.value) FROM queue_overrides o WHERE o.packet_ref = p.ref
-                     AND o.kind = 'reorder' AND {active}), 0) AS reorder_delta,
-         (SELECT COUNT(*) FROM confirmations cf WHERE cf.entity_id = p.id
-            AND cf.status = 'pending') AS pending_approvals
-  FROM packets p
-  LEFT JOIN objectives o ON o.id = p.objective_id
-  WHERE p.status IN ('ready', 'queued')
-    AND NOT EXISTS (SELECT 1 FROM packets s WHERE s.supersedes_id = p.id)
-),
-y AS (
-  SELECT x.*,
-    CASE WHEN x.override_rank = 1 THEN 'blocked'
-         WHEN x.override_rank = 2 THEN 'held'
-         WHEN x.pending_approvals > 0 THEN 'awaiting_approval'
-         WHEN x.failed_runs >= {budget} THEN 'failure_budget'
-         WHEN x.last_failure_at IS NOT NULL AND {last_fail_age} < {backoff_h} THEN 'backoff'
-         WHEN x.claimed_by IS NOT NULL AND x.lease_expires_at IS NOT NULL
-              AND {d.ts.format(x="x.lease_expires_at")} > {now_ts} THEN 'claimed'
-         ELSE NULL END AS ineligible_reason,
-    CASE WHEN x.override_rank = 3 THEN 1
-         WHEN x.override_rank = 4 THEN 2
-         WHEN x.age_hours >= {_setting("queue.max_wait_hours", "48")} THEN 3
-         ELSE 4 END AS queue_class,
-    ROUND(CAST(
-        {w["objective"]} * x.objective_priority / 10.0
-      + {w["age"]} * (CASE WHEN x.age_hours < 0 THEN 0
-                           WHEN x.age_hours > {max_age} THEN {max_age}
-                           ELSE x.age_hours END) / {max_age}
-      + {w["ambiguity"]} * (10 - x.ambiguity) / 10.0
-      + {w["boost"]} * x.boost / 10.0
-      - {w["failures"]} * (CASE WHEN x.failed_runs > {budget} THEN {budget}
-                                ELSE x.failed_runs END) / {budget}
-      + x.reorder_delta AS NUMERIC), 6) AS priority
-  FROM x
-)
-SELECT y.packet_id, y.packet_ref, y.packet_version, y.status, y.created_at,
-       CASE WHEN y.ineligible_reason IS NULL THEN 1 ELSE 0 END AS eligible,
-       y.ineligible_reason, y.queue_class, y.priority, y.age_hours, y.failed_runs,
-       CASE WHEN y.ineligible_reason IS NULL THEN ROW_NUMBER() OVER (
-              PARTITION BY CASE WHEN y.ineligible_reason IS NULL THEN 0 ELSE 1 END
-              ORDER BY y.queue_class, y.priority DESC, y.created_at, y.packet_ref)
-            ELSE NULL END AS position
-FROM y"""
-
-
-def _queue(dialect: str) -> str:
-    return "CREATE VIEW v_queue AS\n" + queue_select(dialect, "CURRENT_TIMESTAMP")
-
-
 # --------------------------------------------------------------------------- entry points
 
 
@@ -569,6 +518,7 @@ def view_statements(dialect: str) -> list[str]:
     return [
         _eva_progress(),
         _eva_item_consensus(d),
+        _context_link_status(),
         _field_consensus(),
         _field_status(),
         _packet_stats(d),
@@ -576,7 +526,7 @@ def view_statements(dialect: str) -> list[str]:
         _branch_model_usage(),
         _branch_triggers(),
         _ready_candidates(),
-        _queue(dialect),
+        *genqueue.statements(dialect),
     ]
 
 
@@ -626,7 +576,7 @@ RUN_VIEWS: dict[str, str] = {
 }
 
 #: every view of the schema, in creation order
-ALL_VIEW_NAMES: tuple[str, ...] = (*HEAD_VIEWS, *VIEW_NAMES, *RUN_VIEWS)
+ALL_VIEW_NAMES: tuple[str, ...] = (*HEAD_VIEWS, *VIEW_NAMES, *genqueue.VIEW_NAMES, *RUN_VIEWS)
 
 
 def all_view_statements(dialect: str) -> list[str]:

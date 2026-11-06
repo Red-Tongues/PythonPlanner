@@ -28,9 +28,6 @@ from orchestrator.repository import (
     objectives_of,
     packets_of,
     set_setting,
-    supersede_objective,
-    supersede_packet,
-    supersede_project,
     update_packet,
 )
 from tests.conftest import KERNEL, USER
@@ -41,6 +38,7 @@ from tests.dbhelpers import (
     row_of,
 )
 from tests.evafixtures import complete_with_evidence
+from tests.legacy import supersede_objective, supersede_packet, supersede_project
 
 
 def _row(session: Session, packet_id: str) -> dict:
@@ -200,9 +198,11 @@ def test_superseding_versions_and_rows_with_dependents_cannot_be_deleted(
 
     # a child packet makes its parent undeletable (DB and repository)
     parent = tree.packets[0]
+    child_id = new_id()
     child = {
         **row_of(engine, "packets", parent.id),
-        "id": new_id(),
+        "id": child_id,
+        "lineage_key": child_id,  # a split child starts its own lineage (Argon K1)
         "ref": "PP-900001",
         "parent_id": parent.id,
         "root_id": parent.root_id,

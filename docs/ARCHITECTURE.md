@@ -168,9 +168,11 @@ unlisted pair for every actor kind. Starting point: `docs/reviews/D8_state_machi
 errata E1–E11 (binding). Actor *kernel* = a `system` actor (D8's kernel and governor); *user* =
 a `user` actor (an owner decision); `llm` actors never move a packet or a run.
 
-**Notation** (as D8): `G` gate revision, `F` fencing token, `H` input hash (context
-fingerprint), `M` manifest hash. A core edit, interrupt supersession or locked-match supersede
-never moves a row: it creates a new version row, and the old row keeps its state.
+**Notation** (as D8): `G` gate revision, `F` fencing token, `H` input hash, `M` manifest hash;
+M3a adds `C` content revision. Since M3a (R6 OQ21, OQ26, OQ33) a core edit is **in place**: it
+never moves a row's status; it bumps `C` (trigger-captured into `field_revisions`) and `H` is
+intra-packet only (title, prompt, response contract, repo path). `G` moves only with status,
+holds, approvals and routes. Upstream edits raise `question_context`; they never move a packet.
 
 **States.** Packets: C11's set plus `waiting_for_children`, `awaiting_confirmation` and
 `closed_unverified` (terminal, locked, never a success, never satisfies a dependency, needs a
@@ -192,7 +194,7 @@ change (DB-enforced).
 | `awaiting_confirmation` → `evaluating_post` | user | repo_write / optional-scan approval | E4: repo_write needs the full publication guard of running → evaluating_post (R1 for the targeted run); a mismatch stales the run |  |
 | `awaiting_confirmation` → `evaluating_pre` | kernel / user | approval but H stale (C25); candidate-promotion approval (E1) | targets the current version and context; promotion and C25 gate bump atomic; readiness recomputed; a stale approval does not apply |  |
 | `awaiting_confirmation` → `held` | kernel / user | rejection (any type); HOLD (user) or alignment hold (governor) | reason required; E2: an exit-3 rejection keeps the run parked |  |
-| `awaiting_confirmation` → `queued` | user | failure-budget or 48 h approval | H current |  |
+| `awaiting_confirmation` → `queued` | user | 48 h approval | readiness re-checked |  |
 | `awaiting_confirmation` → `running` | user | exit-3 approval | R1; then the shared dispatch guard (E3); resumes the same conversation exactly once |  |
 | `awaiting_confirmation` → `waiting_for_children` | user | split approval | E10 split guard; the confirmation is validated and C25 applied |  |
 | `blocked` → `closed_unverified` | user | explicit owner close (branch kill is a BLOCK, not a close: D9-R1) | reason required; locks; in-flight runs staled |  |
@@ -203,14 +205,15 @@ change (DB-enforced).
 | `draft` → `closed_unverified` | user | explicit owner close (branch kill is a BLOCK, not a close: D9-R1) | reason required; locks; in-flight runs staled |  |
 | `draft` → `evaluating_pre` | kernel | tick step 2 | H = current fingerprint (B9, C25) |  |
 | `draft` → `held` | kernel / user | HOLD (user) or alignment hold (governor) | no active BLOCK |  |
+| `draft` → `ready` | kernel | child genPacket whose carried fields satisfy the mandatory sets (M3a, R6 OQ27) | the full readiness predicate at spawn |  |
 | `evaluating` → `closed_unverified` | user | explicit owner close (branch kill is a BLOCK, not a close: D9-R1) | reason required; locks; in-flight runs staled |  |
 | `evaluating` → `evaluating_pre` | kernel | legacy M1 row re-enters evaluation | — | P3 |
 | `evaluating_post` → `awaiting_confirmation` | kernel | optional-scan ERROR | — |  |
 | `evaluating_post` → `blocked` | kernel | required scanner unavailable, or execution/report retrieval failed | E6 |  |
 | `evaluating_post` → `closed_unverified` | user | explicit owner close (branch kill is a BLOCK, not a close: D9-R1) | reason required; locks; in-flight runs staled |  |
-| `evaluating_post` → `completed` | kernel / user | completion | E5: every required post field complete, accepted and current for M from C29-verified evaluators; scan bound to the commit SHA; quality policy (C30); all hard gates; no hold or block; locks | P2 |
 | `evaluating_post` → `held` | kernel | alignment < 7,500 (governor) | — |  |
 | `evaluating_post` → `needs_review` | kernel | post-eval failed / returned required-scan gate ERROR | E6: a gate ERROR bound to the commit SHA also raises a confirmation |  |
+| `evaluating_post` → `sealed` | kernel | gen_eva seal (M3a, R6 OQ13) | a gen_eva grade; outbox drained; one sealed_bundles row (UNIQUE packet_id) from the claim-time content revision; locks; exactly one child genPacket spawned |  |
 | `evaluating_pre` → `awaiting_confirmation` | kernel | promotion/branch | scope = confirm |  |
 | `evaluating_pre` → `blocked` | user | BLOCK, incl. branch kill (D9-R1: a branch-scope BLOCK, reversible) | G bumped in scope (C35) |  |
 | `evaluating_pre` → `closed_unverified` | user | explicit owner close (branch kill is a BLOCK, not a close: D9-R1) | reason required; locks; in-flight runs staled |  |
@@ -218,12 +221,11 @@ change (DB-enforced).
 | `evaluating_pre` → `needs_review` | kernel | evaluation | tier-1 dispute, B12, ambiguity |  |
 | `evaluating_pre` → `ready` | kernel | readiness | required tiers accepted or soft-waived; no hard failure; dependencies; approvals; ambiguity ≤ 4,000; H current |  |
 | `evaluating_pre` → `waiting_for_children` | kernel | split | E10: depth < 2; descendant and fan-out caps; atomic capacity reservation (C36); B5 idempotency on (packet id + version, rule id, rule version); branching scope auto |  |
-| `failed` → `awaiting_confirmation` | kernel | failure budget exhausted | one confirmation |  |
 | `failed` → `blocked` | user | BLOCK, incl. branch kill (D9-R1: a branch-scope BLOCK, reversible) | G bumped in scope (C35) |  |
 | `failed` → `closed_unverified` | user | explicit owner close (branch kill is a BLOCK, not a close: D9-R1) | reason required; locks; in-flight runs staled |  |
-| `failed` → `evaluating_pre` | kernel | fingerprint or readiness changed | H ≠ current or not ready; the kernel commits (M2.1 ruling 4) |  |
+| `failed` → `evaluating_pre` | kernel | readiness changed | not ready; the kernel commits (M2.1 ruling 4) |  |
 | `failed` → `held` | kernel / user | HOLD (user) or alignment hold (governor) | no active BLOCK |  |
-| `failed` → `queued` | kernel | retry | within budget and backoff, or config changed; H current |  |
+| `failed` → `queued` | kernel | retry | config changed; readiness re-checked |  |
 | `held` → `blocked` | user | BLOCK, incl. branch kill (D9-R1: a branch-scope BLOCK, reversible) | G bumped in scope (C35) |  |
 | `held` → `closed_unverified` | user | explicit owner close (branch kill is a BLOCK, not a close: D9-R1) | reason required; locks; in-flight runs staled |  |
 | `held` → `evaluating_pre` | user | last HOLD revoked / owner clears hold | never automatic |  |
@@ -236,16 +238,15 @@ change (DB-enforced).
 | `needs_review` → `held` | kernel / user | HOLD (user) or alignment hold (governor) | no active BLOCK |  |
 | `processed` → `closed_unverified` | user | explicit owner close (branch kill is a BLOCK, not a close: D9-R1) | reason required; locks; in-flight runs staled |  |
 | `processed` → `evaluating_pre` | kernel | legacy M1 row re-enters evaluation | — | P3 |
-| `queued` → `awaiting_confirmation` | kernel | failure budget / 48 h touch | one confirmation |  |
+| `queued` → `awaiting_confirmation` | kernel | 48 h touch | one confirmation |  |
 | `queued` → `blocked` | kernel / user | WP routing with no consumer (C5); BLOCK, incl. branch kill (D9-R1: a branch-scope BLOCK, reversible) | G bumped in scope (C35) |  |
 | `queued` → `closed_unverified` | user | explicit owner close (branch kill is a BLOCK, not a close: D9-R1) | reason required; locks; in-flight runs staled |  |
-| `queued` → `evaluating_pre` | kernel | fingerprint or readiness changed | H ≠ current or not ready; the kernel commits (M2.1 ruling 4) |  |
 | `queued` → `held` | kernel / user | HOLD (user) or alignment hold (governor) | no active BLOCK |  |
+| `queued` → `ready` | kernel | admission tick: score below the floor (M3a, R6 OQ12) | not running; guarded UPDATE on status and G |  |
 | `queued` → `running` | kernel | claim | E9: H recomputed, then the full readiness predicate; guarded UPDATE (status, version, H, G, lease); not paused (C26); budget reserved (C36); snapshot written and F incremented in the same transaction |  |
-| `ready` → `awaiting_confirmation` | kernel | branch split confirmation; failure budget | one version-bound approval | P1 |
+| `ready` → `awaiting_confirmation` | kernel | branch split confirmation | one version-bound approval |  |
 | `ready` → `blocked` | user | BLOCK, incl. branch kill (D9-R1: a branch-scope BLOCK, reversible) | G bumped in scope (C35) |  |
 | `ready` → `closed_unverified` | user | explicit owner close (branch kill is a BLOCK, not a close: D9-R1) | reason required; locks; in-flight runs staled |  |
-| `ready` → `evaluating_pre` | kernel | fingerprint or readiness changed | H ≠ current or not ready; the kernel commits (M2.1 ruling 4) |  |
 | `ready` → `held` | kernel / user | HOLD (user) or alignment hold (governor) | no active BLOCK |  |
 | `ready` → `queued` | kernel | admit_next | E9: H recomputed, then the full readiness predicate (C12); guarded UPDATE on status, version, H, G; no BLOCK/HOLD; within failure budget |  |
 | `ready` → `waiting_for_children` | kernel | split | E10: depth < 2; descendant and fan-out caps; atomic capacity reservation (C36); B5 idempotency on (packet id + version, rule id, rule version); branching scope auto |  |
@@ -254,7 +255,7 @@ change (DB-enforced).
 | `running` → `closed_unverified` | user | explicit owner close (branch kill is a BLOCK, not a close: D9-R1) | reason required; locks; in-flight runs staled |  |
 | `running` → `evaluating_post` | kernel | write + commit | publication guard: run accepted; run F = packet F; G, H match; expected HEAD; C32 ownership and base hash; write authorised; idempotent write + commit; M and commit SHA recorded first |  |
 | `running` → `evaluating_pre` | kernel | stale run | E7: only if the packet's active run ID and F match this run, it is still running, and no hold, block, pause or confirmation applies (V2) |  |
-| `running` → `failed` | kernel | run failed | F matches |  |
+| `running` → `queued` | kernel | crash with no gradable output (cooldown), hard halt or stale run (M3a, R6 OQ18/OQ19) | the run is crashed or stale; ownership and lease released in the same CAS |  |
 | `waiting_for_children` → `closed_unverified` | user | explicit owner close (branch kill is a BLOCK, not a close: D9-R1) | reason required; locks; in-flight runs staled |  |
 | `waiting_for_children` → `completed` | kernel / user | roll-up | ≥ 1 child and all children completed (closed_unverified does not count); locks | P2 |
 
@@ -262,26 +263,30 @@ change (DB-enforced).
 
 | From → To | Actor | Trigger | Guard | Dev. |
 |---|---|---|---|---|
-| `accepted` → `stale` | kernel | F/G/H change (E8), superseded version (E8), HEAD moved, modifies base mismatch | only before the commit is recorded (R4); publication prohibited; only unused reservations released |  |
+| `accepted` → `stale` | kernel | F superseded, owner BLOCK/close (E8 as amended by R6 OQ19), superseded legacy version, HEAD moved, modifies base mismatch | only before the commit is recorded (R4); publication prohibited; only unused reservations released |  |
+| `accepted` → `succeeded` | kernel | gen_eva sealed the output (M3a, R6 OQ13/OQ15) | one sealed_bundles row for the packet; final |  |
 | `awaiting_confirmation` → `dispatched` | user | approval | R1 (run G = packet G, both + 1), then the E3 dispatch guard; resumes once |  |
 | `awaiting_confirmation` → `failed` | user | cancellation after rejection | no budget charge |  |
-| `awaiting_confirmation` → `stale` | kernel | non-approval governance change or H change | E2: the rejection of this run's own exit-3 confirmation is excluded (the run stays parked); later unrelated changes still stale it |  |
+| `awaiting_confirmation` → `stale` | kernel | owner BLOCK/close, superseded F, GLOBAL_PAUSE (M3a, R6 OQ19: not a G/H change) | E2: the rejection of this run's own exit-3 confirmation is excluded (the run stays parked); later unrelated changes still stale it |  |
 | `awaiting_result` → `awaiting_confirmation` | kernel | exit 3 | resume identity; no counters |  |
 | `awaiting_result` → `awaiting_result` | kernel | exit 1/4 or deadline expiry (E11) with attempts left | E3 dispatch guard before the retry effect; new channel_runs row |  |
+| `awaiting_result` → `crashed` | kernel | no gradable output: timeout, disconnect, adapter fault (M3a, R6 OQ18) | crash_count + 1; never a grade; packet running → queued with cooldown |  |
 | `awaiting_result` → `failed` | kernel | exit 2; or exit 1/4 / deadline expiry (E11) on the last attempt | exit 2: channel paused, no charge; E11: failed_runs + 1 exactly once per operation ID |  |
-| `awaiting_result` → `stale` | kernel | F superseded, G or H mismatch, packet closed/held/blocked | releases unused reservations |  |
+| `awaiting_result` → `stale` | kernel | F superseded, lease expired, packet closed/blocked, GLOBAL_PAUSE or CFO_ABORT (M3a, R6 OQ19: never a G/H change or a soft HOLD) | releases unused reservations |  |
 | `awaiting_result` → `validating` | kernel | exit 0 before the deadline | F and lease valid |  |
 | `claimed` → `stale` | kernel | legacy M2 claim (no fencing token) | — | R1 |
 | `dispatched` → `awaiting_result` | kernel | payload written / process launched | deadline |  |
+| `dispatched` → `crashed` | kernel | no gradable output: timeout, disconnect, adapter fault (M3a, R6 OQ18) | crash_count + 1; never a grade; packet running → queued with cooldown |  |
 | `dispatched` → `dispatched` | kernel | deadline expiry (E11) with attempts left | timeout recorded once per operation ID; the retry goes only through the E3 guard |  |
 | `dispatched` → `failed` | kernel | exit 2; or exit 1/4 / deadline expiry (E11) on the last attempt | exit 2: channel paused, no charge; E11: failed_runs + 1 exactly once per operation ID |  |
-| `dispatched` → `stale` | kernel | F superseded, G or H mismatch, packet closed/held/blocked | releases unused reservations |  |
+| `dispatched` → `stale` | kernel | F superseded, lease expired, packet closed/blocked, GLOBAL_PAUSE or CFO_ABORT (M3a, R6 OQ19: never a G/H change or a soft HOLD) | releases unused reservations |  |
 | `planned` → `dispatched` | kernel | adapter dispatch | dispatch guard (E3): version, F, G, H and lease revalidated; authorised atomically against pauses (C26); capacity reserved (C36); operation ID and first channel_runs row before any effect |  |
-| `planned` → `stale` | kernel | F superseded, G or H mismatch, packet closed/held/blocked | releases unused reservations |  |
-| `validating` → `accepted` | kernel | checks pass | F, G, H match; compute M |  |
+| `planned` → `stale` | kernel | F superseded, lease expired, packet closed/blocked, GLOBAL_PAUSE or CFO_ABORT (M3a, R6 OQ19: never a G/H change or a soft HOLD) | releases unused reservations |  |
+| `validating` → `accepted` | kernel | checks pass | F and ownership match; compute M |  |
 | `validating` → `awaiting_result` | kernel | validation failed, attempts left | error fed back; E3 dispatch guard before the retry effect |  |
+| `validating` → `crashed` | kernel | no gradable output: timeout, disconnect, adapter fault (M3a, R6 OQ18) | crash_count + 1; never a grade; packet running → queued with cooldown |  |
 | `validating` → `failed` | kernel | last attempt failed, or NoRunner gate | — |  |
-| `validating` → `stale` | kernel | F superseded, G or H mismatch, packet closed/held/blocked | releases unused reservations |  |
+| `validating` → `stale` | kernel | F superseded, lease expired, packet closed/blocked, GLOBAL_PAUSE or CFO_ABORT (M3a, R6 OQ19: never a G/H change or a soft HOLD) | releases unused reservations |  |
 
 <!-- transition-tables:end -->
 
@@ -289,14 +294,29 @@ change (DB-enforced).
 
 | # | Deviation | Reason |
 |---|---|---|
-| P1 | `ready → awaiting_confirmation` (kernel) is kept, for the failure budget and for a branch-split confirmation (D8 gap-fills) | **Failure budget:** M2.1 #12's sweep parks exhausted packets found in `ready` or `queued`. A packet can reach `ready` with an exhausted budget (`failed → evaluating_pre → ready`); without this row it would sit in `ready`, never admitted and never surfaced to the owner. **Split confirmation (R4):** split triggers fire on `ready` packets, and D8's split approval row (`awaiting_confirmation → waiting_for_children`) needs the packet in `awaiting_confirmation`; D8 lists only `evaluating_pre → awaiting_confirmation`. Either way it only parks; it never advances. A rejected split goes to `held` (D8 row 61), never straight back to `ready` |
-| P2 | `evaluating_post → completed` and `waiting_for_children → completed` also allow a **user** actor | Keeps M2.1 fix 5's `orchestrator packet complete`: the identical completion gate applies to users, so this grants no extra authority. Completing from any other status (M2.1 allowed it from any non-terminal status with evidence) is now rejected, per D8 §4 #3 |
+| P1 | `ready → awaiting_confirmation` (kernel) is kept for a branch-split confirmation (D8 gap-fill; its failure-budget half is retired in M3a) | **Failure budget:** M2.1 #12's sweep parks exhausted packets found in `ready` or `queued`. A packet can reach `ready` with an exhausted budget (`failed → evaluating_pre → ready`); without this row it would sit in `ready`, never admitted and never surfaced to the owner. **Split confirmation (R4):** split triggers fire on `ready` packets, and D8's split approval row (`awaiting_confirmation → waiting_for_children`) needs the packet in `awaiting_confirmation`; D8 lists only `evaluating_pre → awaiting_confirmation`. Either way it only parks; it never advances. A rejected split goes to `held` (D8 row 61), never straight back to `ready` |
+| P2 | `waiting_for_children → completed` also allows a **user** actor (`evaluating_post → completed` is retired in M3a: genPackets seal) | Keeps M2.1 fix 5's `orchestrator packet complete`: the identical completion gate applies to users, so this grants no extra authority. Completing from any other status (M2.1 allowed it from any non-terminal status with evidence) is now rejected, per D8 §4 #3 |
 | P3 | Legacy M1 statuses `evaluating`, `in_progress`, `processed` keep one exit, `→ evaluating_pre` (kernel), plus `→ closed_unverified` (user) | Old rows must stay valid (C22) and must be able to re-enter the governed pipeline. They re-enter from scratch rather than resuming (`in_progress → running` would bypass the claim and fencing) |
 | P4 | `archived` is terminal with **no entries** | D8 has no `archived`; `closed_unverified` (with a reason) replaces it. Existing archived rows stay valid and locked |
-| P5 | New version rows start in `draft`, not `evaluating_pre` | M2 behaviour (`supersede_packet`); `draft → evaluating_pre` follows on the next tick under the same guard (H current), so nothing is evaluated earlier or skipped |
+| P5 | *(retired in M3a)* New version rows started in `draft` | `supersede_packet` is retired (R6 OQ21); developing genPackets are edited in place |
 | P6 | `blocked → evaluating_post` (kernel) when the required scanner is available again | D10 ruling Q14: recovery from the E6 post-phase blocker. Only a scanner blocker qualifies; the recorded manifest and commit are unchanged, so post-evaluation resumes for the same M |
 | R1 | Legacy run state `claimed` may only go `stale` | An M2 claim has no fencing token or operation ID, so it can never dispatch or publish under C26 |
 | — | `dispatched → dispatched` (E11) is listed as a self-transition | A deadline expiry with attempts left is a new attempt row, not a state change; the row documents that the retry passes the E3 guard |
+
+**M3a changes (R6 Transitions, OQ12-OQ19, OQ27; each test-covered in `tests/test_m3a_*`).**
+
+| Change | Row(s) | Reason |
+|---|---|---|
+| added | `evaluating_post → sealed` (kernel) | OQ13: a graded generation is frozen into `sealed_bundles` and locks; `sealed` is terminal |
+| added | `draft → ready` (kernel) | OQ27: a re-imagined child whose carried fields satisfy readiness |
+| added | `queued → ready` (kernel) | OQ12: the admission tick demotes a queued packet whose score fell below the floor |
+| added | `running → queued` (kernel) | OQ18/OQ19: a crash (with cooldown), a hard halt (GLOBAL_PAUSE, CFO_ABORT) or a stale run revokes the lease; a running genPacket is never demoted to `evaluating_pre` |
+| added | run `dispatched/awaiting_result/validating → crashed`, `accepted → succeeded` | OQ18 crash ≠ grade; `succeeded` is the sealed run's terminal state |
+| removed | `evaluating_post → completed` | OQ13: genPackets seal; a completed/archived split parent no longer satisfies an edge (Argon K1) |
+| removed | `ready → evaluating_pre`, `queued → evaluating_pre` | OQ12: enrichment never demotes; upstream edits raise `question_context` |
+| removed | `running → failed` | OQ18: no gradable output is a crash, requeued; `failed` keeps its exits for older rows only |
+| removed | failure-budget rows (`queued/ready/failed → awaiting_confirmation` for a budget) | `enforce_failure_budgets` retired (T1-C v3 §3) |
+| changed | run `→ stale` triggers | Q7/OQ19: G and H mismatches no longer stale a run; F, lease, owner close/BLOCK and GLOBAL_PAUSE still do; a soft HOLD does not |
 
 **D10 rulings that shape these tables.** Q4: pause/resume are controls serialised through the
 scope rows (C26), not C25 governance writes, so they never bump G. Q5: rejecting an exit-3

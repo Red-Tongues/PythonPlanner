@@ -282,16 +282,23 @@ def oracle_inputs(
 def accept_all(
     session: Session, packet: Packet, *, skip: set[str] | frozenset[str] = frozenset()
 ) -> None:
-    """Accepted consensus for every required pre-phase field (a ready evaluation set)."""
-    from orchestrator.evaluation.readiness import current_presets_by_field
+    """Accepted consensus for every required and every mandatory pre-phase field (a ready
+    evaluation set; M3a R6 OQ10/OQ11). Scores are 3 so the ambiguity bound (≤ 4,000) holds."""
+    from orchestrator.evaluation.readiness import (
+        current_presets_by_field,
+        mandatory_fields_for_packet,
+    )
 
     eights = {3: 8, 4: 8, 5: 8, 6: 8}
     support = {4: (1, 0, 0), 5: (1, 0, 0)}
+    mandatory = mandatory_fields_for_packet(session, packet)
     for name, preset in current_presets_by_field(session, EvaPhase.PRE).items():
-        if name in skip or not preset.required or preset.tier == 3:
+        if name in skip:
+            continue
+        if name not in mandatory and (not preset.required or preset.tier == 3):
             continue
         kind = kind_of(session, name)
-        value = {FieldKind.SCORE: "5", FieldKind.BOOL: "true", FieldKind.TEXT: "x"}.get(kind)
+        value = {FieldKind.SCORE: "3", FieldKind.BOOL: "true", FieldKind.TEXT: "x"}.get(kind)
         key = "other" if kind is FieldKind.TAGSET else ""
         seed_eva(session, packet, name, {key: Item(value or "on", value or "on", eights, support)})
 
@@ -341,15 +348,36 @@ def accept_post(session: Session, packet: Packet, artifact) -> None:  # type: ig
         )
 
 
-def complete_with_evidence(session: Session, packet: Packet, actor) -> None:  # type: ignore[no-untyped-def]
-    """Complete ``packet`` the only way the gate allows: an artifact plus accepted post-phase
-    evaluations of exactly that artifact (M2.1 fixes 3 and 5)."""
+def complete_with_evidence(session: Session, packet: Packet, actor, grade_e4: int = 8000):  # type: ignore[no-untyped-def]
+    """Finish ``packet`` the only way M3a allows a genPacket to finish: an artifact, accepted
+    post-phase evaluations of exactly that artifact, and a seal (R6 OQ13 — ``evaluating_post →
+    completed`` is retired). ``actor`` is kept for call-site compatibility; the seal is a kernel
+    move. Returns the bundle."""
     from orchestrator.contracts import PacketStatus
+    from orchestrator.db.models import SealedBundle
     from orchestrator.lifecycle import transition
+    from orchestrator.revisions import store_blob
 
     drive_to(packet, PacketStatus.EVALUATING_POST)
-    accept_post(session, packet, add_artifact(session, packet))
-    transition(packet, PacketStatus.COMPLETED, actor, "accepted with post-evaluation evidence")
+    artifact = add_artifact(session, packet)
+    accept_post(session, packet, artifact)
+    blob = store_blob(session, f"snapshot {packet.id}")
+    bundle = SealedBundle(
+        id=new_id(),
+        packet_id=packet.id,
+        claim_content_revision=packet.content_revision,
+        snapshot_hash=blob,
+        bundle_hash=blob,
+        composite_grade_e4=grade_e4,
+        artifact_hash=artifact.sha256,
+    )
+    session.add(bundle)
+    record_event(
+        session, actor=FIXTURE, action="test.seal", entity_type="sealed_bundle", entity_id=bundle.id
+    )
+    session.flush()
+    transition(packet, PacketStatus.SEALED, FIXTURE, f"sealed with evidence ({actor})")
+    return bundle
 
 
 def drive_to(packet: Packet, target) -> None:  # type: ignore[no-untyped-def]

@@ -245,3 +245,29 @@ fields:
     kind: score
     scale: "0-10"
     prompt_hint: "Dependencies or incorporated material lack acceptable origin, licence or attribution evidence."
+
+  # --------------------------------------------------------------- M3a relational fields (R6 OQ10)
+  - name: risk_assessment
+    label: Risk assessment
+    level: task
+    kind: score
+    scale: "0-10"
+    prompt_hint: "The blast radius and regression risk of the work are understood and contained (10 = low, well-contained risk)."
+  - name: interface_stability
+    label: Interface stability
+    level: task
+    kind: score
+    scale: "0-10"
+    prompt_hint: "The interfaces this work consumes from its dependencies are stable and clearly specified."
+  - name: downstream_contract_clarity
+    label: Downstream contract clarity
+    level: task
+    kind: score
+    scale: "0-10"
+    prompt_hint: "The contract this work exposes to the work that depends on it is explicit and unambiguous."
+  - name: sonar_hotspot_alignment
+    label: Sonar hotspot alignment
+    level: task
+    kind: score
+    scale: "0-10"
+    prompt_hint: "The work avoids or explicitly addresses the code-quality and security hotspots a static scan would flag in its target files."

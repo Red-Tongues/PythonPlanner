@@ -51,7 +51,7 @@ from orchestrator.gates import note_confirmation
 from orchestrator.governance import add_override, grant_waiver, revoke
 from orchestrator.lifecycle import transition
 from orchestrator.queue import ClaimError, admit_next, claim
-from orchestrator.repository import get_packet, supersede_objective
+from orchestrator.repository import get_packet
 from orchestrator.runs import (
     LostRace,
     StaleRun,
@@ -69,6 +69,7 @@ from tests.govfixtures import (
     queued_ref,
     ready_packet,
 )
+from tests.legacy import supersede_objective
 from tests.runfixtures import attempts, claimed_run, held, queued_packet
 
 R, S = GenerationRunState, PacketStatus
@@ -355,7 +356,8 @@ def test_dispatch_budget_and_acceptance_guards_prevent_unapproved_effects(
 
     with factory() as s:
         packet = get_packet(s, ref_a)
-        grant_waiver(s, packet.ref, "tools_needed", actor=USER, reason="gate changed")
+        # M3a (R6 OQ19): a gate change no longer stales a run; an owner BLOCK does
+        add_override(s, packet.ref, OverrideKind.BLOCK, actor=USER, reason="stop it")
         s.commit()
 
     with factory() as s:
@@ -778,15 +780,15 @@ def test_concurrent_ticks_admit_once(factory: sessionmaker[Session]) -> None:
 def test_a_governance_write_after_the_binding_check_stops_the_dispatch(
     factory: sessionmaker[Session],
 ) -> None:
-    """R4 MR1: session A has read and checked the bindings; session B commits a waiver (a gate
-    bump) before A writes. A's binding guard is part of the write, so A dispatches nothing."""
-    from orchestrator.governance import grant_waiver
-    from orchestrator.runs import StaleRun
+    """R4 MR1: session A has read and checked the bindings; session B commits an owner abort
+    (CFO_ABORT revokes the lease; since M3a a waiver's gate bump is no longer a run binding,
+    R6 OQ19) before A writes. A's binding guard is part of the write, so A dispatches nothing."""
+    from orchestrator.runs import StaleRun, abort_run
 
     with factory() as s:
         packet, run = claimed_run(s)
         s.commit()
-        ref, run_id = packet.ref, run.id
+        run_id = run.id
     checked, written = threading.Event(), threading.Event()
     outcome: list[str] = []
 
@@ -816,7 +818,7 @@ def test_a_governance_write_after_the_binding_check_stops_the_dispatch(
         assert checked.wait(15)
         try:
             with factory() as b:
-                grant_waiver(b, ref, "tools_needed", actor=USER, reason="changed meanwhile")
+                abort_run(b, run_id, actor=USER, reason="changed meanwhile")
                 b.commit()
                 wrote.append("committed")
         except OperationalError:  # SQLite: A's fence already holds the single write lock
@@ -828,10 +830,10 @@ def test_a_governance_write_after_the_binding_check_stops_the_dispatch(
     with factory() as s:
         run = s.get(GenerationRun, run_id)
         assert run is not None
-        if wrote == ["committed"]:  # the gate moved after A's check: A must dispatch nothing
+        if wrote == ["committed"]:  # the abort landed after A's check: A dispatches nothing
             assert outcome in (["stale"], ["locked"]), outcome
-            assert _effects(factory) == 0 and run.state is R.PLANNED
-        else:  # SQLite serialised the writer behind A: A's dispatch stands, the waiver never was
+            assert _effects(factory) == 0 and run.state is R.STALE  # the abort's own disposition
+        else:  # SQLite serialised the writer behind A: A's dispatch stands, the abort never was
             assert wrote == ["locked"] and outcome == ["dispatched"], (wrote, outcome)
             assert _effects(factory) == 1 and run.state is R.DISPATCHED
             assert s.get_bind().dialect.name == "sqlite"

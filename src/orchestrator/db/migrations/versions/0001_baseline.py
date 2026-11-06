@@ -64,6 +64,7 @@ TABLES: tuple[str, ...] = (
     "budget_topups",
     "candidate_field_definitions",
     "confirmations",
+    "content_blobs",
     "control_state",
     "eva_presets",
     "events",
@@ -73,23 +74,32 @@ TABLES: tuple[str, ...] = (
     "governor_states",
     "kernel_leases",
     "projects",
+    "raw_revision_outbox",
     "ref_counters",
     "revocations",
+    "route_health",
     "settings",
     "thresholds",
+    "field_revisions",
     "objectives",
     "packets",
     "branch_applications",
     "evaluation_cycles",
+    "feedback_events",
     "generation_runs",
     "packet_dependencies",
     "queue_admissions",
+    "queue_epoch_snapshot",
     "queue_overrides",
     "waivers",
     "budget_reservations",
+    "crash_events",
+    "eva_discard_log",
     "eva_packets",
+    "sealed_bundles",
     "budget_reconciliations",
     "channel_runs",
+    "eva_context_links",
     "evaluation_passes",
     "artifacts",
     "channel_run_outcomes",
@@ -103,6 +113,7 @@ VIEWS: tuple[str, ...] = (
     "v_packet_heads",
     "v_eva_progress",
     "v_eva_item_consensus",
+    "v_context_link_status",
     "v_field_consensus",
     "v_field_status",
     "v_packet_stats",
@@ -110,7 +121,13 @@ VIEWS: tuple[str, ...] = (
     "v_branch_model_usage",
     "v_branch_triggers",
     "v_ready_candidates",
-    "v_queue",
+    "v_packet_mandatory_fields",
+    "v_packet_field_health",
+    "v_packet_relational_centrality",
+    "v_packet_user_feedback",
+    "v_packet_queue_score",
+    "v_gen_queue",
+    "v_eva_queue",
     "v_run_attempts",
 )
 
@@ -118,6 +135,7 @@ FUNCTIONS: tuple[str, ...] = (
     "orch_append_only_guard",
     "orch_artifacts_guard",
     "orch_autonomy_fixed_guard",
+    "orch_eva_context_links_guard",
     "orch_eva_packets_guard",
     "orch_eva_packets_identity_guard",
     "orch_evaluation_cycles_guard",
@@ -127,13 +145,19 @@ FUNCTIONS: tuple[str, ...] = (
     "orch_kernel_leases_guard",
     "orch_locked_guard",
     "orch_no_delete_guard",
+    "orch_objectives_content_revision",
     "orch_objectives_lineage_guard",
+    "orch_objectives_outbox",
     "orch_packets_closed_guard",
     "orch_packets_completion_guard",
+    "orch_packets_content_revision",
     "orch_packets_kind_guard",
     "orch_packets_lineage_guard",
+    "orch_packets_outbox",
     "orch_packets_transition_guard",
+    "orch_projects_content_revision",
     "orch_projects_lineage_guard",
+    "orch_projects_outbox",
 )
 
 STATEMENTS: dict[str, list[str]] = {
@@ -221,6 +245,12 @@ STATEMENTS: dict[str, list[str]] = {
 )""",
         """CREATE INDEX ix_confirmations_status ON confirmations (status)""",
         """CREATE UNIQUE INDEX uq_confirmations_pending_entity ON confirmations (stage, entity_type, entity_id) WHERE status = 'pending'""",
+        """CREATE TABLE content_blobs (
+	hash VARCHAR(64) NOT NULL,
+	body TEXT,
+	created_at DATETIME NOT NULL,
+	CONSTRAINT pk_content_blobs PRIMARY KEY (hash)
+)""",
         """CREATE TABLE control_state (
 	id INTEGER NOT NULL,
 	paused BOOLEAN NOT NULL,
@@ -346,6 +376,8 @@ STATEMENTS: dict[str, list[str]] = {
 	source_path TEXT,
 	source_sha256 VARCHAR(64),
 	tree_contract VARCHAR(64),
+	content_revision INTEGER DEFAULT 0 NOT NULL,
+	last_producer VARCHAR(64) DEFAULT 'kernel' NOT NULL,
 	version INTEGER NOT NULL,
 	supersedes_id VARCHAR(36),
 	locked BOOLEAN NOT NULL,
@@ -357,6 +389,21 @@ STATEMENTS: dict[str, list[str]] = {
 	CONSTRAINT fk_projects_supersedes_id_projects FOREIGN KEY(supersedes_id) REFERENCES projects (id)
 )""",
         """CREATE INDEX ix_projects_ref ON projects (ref)""",
+        """CREATE TABLE raw_revision_outbox (
+	id INTEGER NOT NULL,
+	tx_id VARCHAR(64) NOT NULL,
+	entity_type VARCHAR(16) NOT NULL,
+	entity_id VARCHAR(36) NOT NULL,
+	field_name VARCHAR(64) NOT NULL,
+	old_value TEXT,
+	new_value TEXT,
+	producer VARCHAR(64) NOT NULL,
+	content_revision INTEGER NOT NULL,
+	captured_at DATETIME NOT NULL,
+	CONSTRAINT pk_raw_revision_outbox PRIMARY KEY (id)
+)""",
+        """CREATE INDEX ix_raw_revision_outbox_entity_id ON raw_revision_outbox (entity_id)""",
+        """CREATE INDEX ix_raw_revision_outbox_entity_type ON raw_revision_outbox (entity_type)""",
         """CREATE TABLE ref_counters (
 	name VARCHAR(64) NOT NULL,
 	value INTEGER NOT NULL,
@@ -372,6 +419,13 @@ STATEMENTS: dict[str, list[str]] = {
 	CONSTRAINT pk_revocations PRIMARY KEY (id),
 	CONSTRAINT uq_revocations_target_type UNIQUE (target_type, target_id),
 	CONSTRAINT ck_revocations_target_type CHECK (target_type IN ('waiver', 'override', 'dependency'))
+)""",
+        """CREATE TABLE route_health (
+	channel VARCHAR(32) NOT NULL,
+	unhealthy_until DATETIME,
+	crashes INTEGER NOT NULL,
+	updated_at DATETIME NOT NULL,
+	CONSTRAINT pk_route_health PRIMARY KEY (channel)
 )""",
         """CREATE TABLE settings (
 	"key" VARCHAR(128) NOT NULL,
@@ -400,6 +454,24 @@ STATEMENTS: dict[str, list[str]] = {
 	CONSTRAINT ck_thresholds_thresholdoperator CHECK (operator IN ('>=', '>', '<=', '<', '=', '!=', 'has_tag', 'status_is')),
 	CONSTRAINT ck_thresholds_thresholdaction CHECK (action IN ('require_approval', 'split', 'route_workbench_production', 'route_local_generation'))
 )""",
+        """CREATE TABLE field_revisions (
+	id VARCHAR(36) NOT NULL,
+	entity_type VARCHAR(16) NOT NULL,
+	entity_id VARCHAR(36) NOT NULL,
+	field_name VARCHAR(64) NOT NULL,
+	old_hash VARCHAR(64) NOT NULL,
+	new_hash VARCHAR(64) NOT NULL,
+	based_on_hash VARCHAR(64),
+	producer VARCHAR(64) NOT NULL,
+	content_revision INTEGER NOT NULL,
+	revision_group_id VARCHAR(64) NOT NULL,
+	manifest_hash VARCHAR(64) NOT NULL,
+	created_at DATETIME NOT NULL,
+	CONSTRAINT pk_field_revisions PRIMARY KEY (id),
+	CONSTRAINT fk_field_revisions_old_hash_content_blobs FOREIGN KEY(old_hash) REFERENCES content_blobs (hash),
+	CONSTRAINT fk_field_revisions_new_hash_content_blobs FOREIGN KEY(new_hash) REFERENCES content_blobs (hash)
+)""",
+        """CREATE INDEX ix_field_revisions_entity_id ON field_revisions (entity_id)""",
         """CREATE TABLE objectives (
 	id VARCHAR(36) NOT NULL,
 	ref VARCHAR(16) NOT NULL,
@@ -411,6 +483,8 @@ STATEMENTS: dict[str, list[str]] = {
 	tags JSON NOT NULL,
 	scores JSON NOT NULL,
 	source VARCHAR(64) NOT NULL,
+	content_revision INTEGER DEFAULT 0 NOT NULL,
+	last_producer VARCHAR(64) DEFAULT 'kernel' NOT NULL,
 	version INTEGER NOT NULL,
 	supersedes_id VARCHAR(36),
 	locked BOOLEAN NOT NULL,
@@ -460,6 +534,17 @@ STATEMENTS: dict[str, list[str]] = {
 	fencing_token INTEGER DEFAULT 0 NOT NULL,
 	active_run_id VARCHAR(36),
 	recovery_pending BOOLEAN DEFAULT 0 NOT NULL,
+	content_revision INTEGER DEFAULT 0 NOT NULL,
+	last_producer VARCHAR(64) DEFAULT 'kernel' NOT NULL,
+	crash_count INTEGER DEFAULT 0 NOT NULL,
+	cooldown_until DATETIME,
+	hold_reason VARCHAR(32),
+	ready_since DATETIME,
+	lineage_depth INTEGER DEFAULT 0 NOT NULL,
+	lineage_key VARCHAR(36) NOT NULL,
+	parent_bundle_id VARCHAR(36),
+	parent_bundle_hash VARCHAR(64),
+	examples_hash VARCHAR(64),
 	created_at DATETIME NOT NULL,
 	updated_at DATETIME NOT NULL,
 	CONSTRAINT pk_packets PRIMARY KEY (id),
@@ -468,18 +553,22 @@ STATEMENTS: dict[str, list[str]] = {
 	CONSTRAINT fk_packets_objective_id_objectives FOREIGN KEY(objective_id) REFERENCES objectives (id),
 	CONSTRAINT ck_packets_packetkind CHECK (packet_kind IN ('task', 'content_eval')),
 	CONSTRAINT ck_packets_channel CHECK (channel IN ('quickfire_evaluation', 'local_generation', 'workbench_production')),
-	CONSTRAINT ck_packets_packetstatus CHECK (status IN ('draft', 'evaluating_pre', 'ready', 'queued', 'running', 'evaluating_post', 'completed', 'needs_review', 'held', 'blocked', 'failed', 'awaiting_confirmation', 'waiting_for_children', 'archived', 'closed_unverified', 'evaluating', 'in_progress', 'processed')),
+	CONSTRAINT ck_packets_packetstatus CHECK (status IN ('draft', 'evaluating_pre', 'ready', 'queued', 'running', 'evaluating_post', 'completed', 'needs_review', 'held', 'blocked', 'failed', 'awaiting_confirmation', 'waiting_for_children', 'archived', 'closed_unverified', 'sealed', 'evaluating', 'in_progress', 'processed')),
 	CONSTRAINT uq_packets_supersedes_id UNIQUE (supersedes_id),
 	CONSTRAINT fk_packets_supersedes_id_packets FOREIGN KEY(supersedes_id) REFERENCES packets (id),
 	CONSTRAINT fk_packets_parent_id_packets FOREIGN KEY(parent_id) REFERENCES packets (id),
-	CONSTRAINT fk_packets_root_id_packets FOREIGN KEY(root_id) REFERENCES packets (id)
+	CONSTRAINT fk_packets_root_id_packets FOREIGN KEY(root_id) REFERENCES packets (id),
+	CONSTRAINT fk_packets_parent_bundle_id_sealed_bundles FOREIGN KEY(parent_bundle_id) REFERENCES sealed_bundles (id),
+	CONSTRAINT fk_packets_examples_hash_content_blobs FOREIGN KEY(examples_hash) REFERENCES content_blobs (hash)
 )""",
+        """CREATE INDEX ix_packets_lineage_key ON packets (lineage_key)""",
         """CREATE INDEX ix_packets_objective_id ON packets (objective_id)""",
         """CREATE INDEX ix_packets_parent_id ON packets (parent_id)""",
         """CREATE INDEX ix_packets_project_id ON packets (project_id)""",
         """CREATE INDEX ix_packets_ref ON packets (ref)""",
         """CREATE INDEX ix_packets_root_id ON packets (root_id)""",
         """CREATE INDEX ix_packets_status ON packets (status)""",
+        """CREATE UNIQUE INDEX uq_packets_lineage_step ON packets (objective_id, lineage_key, lineage_depth) WHERE supersedes_id IS NULL""",
         """CREATE TABLE branch_applications (
 	id VARCHAR(36) NOT NULL,
 	packet_id VARCHAR(36) NOT NULL,
@@ -519,6 +608,18 @@ STATEMENTS: dict[str, list[str]] = {
 	CONSTRAINT ck_evaluation_cycles_cyclestate CHECK (state IN ('open', 'complete', 'superseded', 'legacy'))
 )""",
         """CREATE INDEX ix_evaluation_cycles_packet_id ON evaluation_cycles (packet_id)""",
+        """CREATE TABLE feedback_events (
+	id VARCHAR(36) NOT NULL,
+	packet_id VARCHAR(36) NOT NULL,
+	actor VARCHAR(64) NOT NULL,
+	kind VARCHAR(16) NOT NULL,
+	reason TEXT NOT NULL,
+	created_at DATETIME NOT NULL,
+	CONSTRAINT pk_feedback_events PRIMARY KEY (id),
+	CONSTRAINT ck_feedback_events_kind CHECK (kind IN ('boost', 'nudge', 'demote', 'pin')),
+	CONSTRAINT fk_feedback_events_packet_id_packets FOREIGN KEY(packet_id) REFERENCES packets (id)
+)""",
+        """CREATE INDEX ix_feedback_events_packet_id ON feedback_events (packet_id)""",
         """CREATE TABLE generation_runs (
 	id VARCHAR(36) NOT NULL,
 	packet_id VARCHAR(36) NOT NULL,
@@ -548,10 +649,11 @@ STATEMENTS: dict[str, list[str]] = {
 	charged BOOLEAN DEFAULT 0 NOT NULL,
 	stale_reason TEXT,
 	finished_at DATETIME,
+	claim_content_revision INTEGER,
 	CONSTRAINT pk_generation_runs PRIMARY KEY (id),
 	CONSTRAINT fk_generation_runs_packet_id_packets FOREIGN KEY(packet_id) REFERENCES packets (id),
 	CONSTRAINT fk_generation_runs_channel_run_id_channel_runs FOREIGN KEY(channel_run_id) REFERENCES channel_runs (id),
-	CONSTRAINT ck_generation_runs_generationrunstate CHECK (state IN ('planned', 'dispatched', 'awaiting_result', 'validating', 'accepted', 'failed', 'stale', 'awaiting_confirmation', 'claimed', 'succeeded', 'abandoned')),
+	CONSTRAINT ck_generation_runs_generationrunstate CHECK (state IN ('planned', 'dispatched', 'awaiting_result', 'validating', 'accepted', 'failed', 'stale', 'awaiting_confirmation', 'crashed', 'claimed', 'succeeded', 'abandoned')),
 	CONSTRAINT ck_generation_runs_channel CHECK (channel IN ('quickfire_evaluation', 'local_generation', 'workbench_production'))
 )""",
         """CREATE INDEX ix_generation_runs_packet_id ON generation_runs (packet_id)""",
@@ -579,6 +681,21 @@ STATEMENTS: dict[str, list[str]] = {
 	CONSTRAINT fk_queue_admissions_packet_id_packets FOREIGN KEY(packet_id) REFERENCES packets (id)
 )""",
         """CREATE INDEX ix_queue_admissions_packet_id ON queue_admissions (packet_id)""",
+        """CREATE TABLE queue_epoch_snapshot (
+	id VARCHAR(36) NOT NULL,
+	epoch_id INTEGER NOT NULL,
+	packet_id VARCHAR(36) NOT NULL,
+	status VARCHAR(32) NOT NULL,
+	queue_pos INTEGER,
+	is_locked_out BOOLEAN NOT NULL,
+	score_e4 INTEGER,
+	cause VARCHAR(32) NOT NULL,
+	created_at DATETIME NOT NULL,
+	CONSTRAINT pk_queue_epoch_snapshot PRIMARY KEY (id),
+	CONSTRAINT uq_queue_epoch_snapshot_epoch_id UNIQUE (epoch_id, packet_id),
+	CONSTRAINT fk_queue_epoch_snapshot_packet_id_packets FOREIGN KEY(packet_id) REFERENCES packets (id)
+)""",
+        """CREATE INDEX ix_queue_epoch_snapshot_epoch_id ON queue_epoch_snapshot (epoch_id)""",
         """CREATE TABLE queue_overrides (
 	id VARCHAR(36) NOT NULL,
 	packet_id VARCHAR(36) NOT NULL,
@@ -629,6 +746,33 @@ STATEMENTS: dict[str, list[str]] = {
 	CONSTRAINT fk_budget_reservations_generation_run_id_generation_runs FOREIGN KEY(generation_run_id) REFERENCES generation_runs (id)
 )""",
         """CREATE INDEX ix_budget_reservations_operation_id ON budget_reservations (operation_id)""",
+        """CREATE TABLE crash_events (
+	id VARCHAR(36) NOT NULL,
+	packet_id VARCHAR(36) NOT NULL,
+	run_id VARCHAR(36) NOT NULL,
+	channel VARCHAR(32),
+	reason TEXT NOT NULL,
+	created_at DATETIME NOT NULL,
+	CONSTRAINT pk_crash_events PRIMARY KEY (id),
+	CONSTRAINT fk_crash_events_packet_id_packets FOREIGN KEY(packet_id) REFERENCES packets (id),
+	CONSTRAINT fk_crash_events_run_id_generation_runs FOREIGN KEY(run_id) REFERENCES generation_runs (id)
+)""",
+        """CREATE INDEX ix_crash_events_packet_id ON crash_events (packet_id)""",
+        """CREATE TABLE eva_discard_log (
+	id VARCHAR(36) NOT NULL,
+	packet_id VARCHAR(36) NOT NULL,
+	cycle_id VARCHAR(36),
+	epoch_id INTEGER,
+	expected_content_revision INTEGER NOT NULL,
+	actual_content_revision INTEGER NOT NULL,
+	locked_out BOOLEAN NOT NULL,
+	reason TEXT NOT NULL,
+	created_at DATETIME NOT NULL,
+	CONSTRAINT pk_eva_discard_log PRIMARY KEY (id),
+	CONSTRAINT fk_eva_discard_log_packet_id_packets FOREIGN KEY(packet_id) REFERENCES packets (id),
+	CONSTRAINT fk_eva_discard_log_cycle_id_evaluation_cycles FOREIGN KEY(cycle_id) REFERENCES evaluation_cycles (id)
+)""",
+        """CREATE INDEX ix_eva_discard_log_packet_id ON eva_discard_log (packet_id)""",
         """CREATE TABLE eva_packets (
 	id VARCHAR(36) NOT NULL,
 	packet_id VARCHAR(36) NOT NULL,
@@ -666,6 +810,23 @@ STATEMENTS: dict[str, list[str]] = {
         """CREATE INDEX ix_eva_packets_content_address ON eva_packets (content_address)""",
         """CREATE INDEX ix_eva_packets_cycle_id ON eva_packets (cycle_id)""",
         """CREATE INDEX ix_eva_packets_packet_id ON eva_packets (packet_id)""",
+        """CREATE TABLE sealed_bundles (
+	id VARCHAR(36) NOT NULL,
+	packet_id VARCHAR(36) NOT NULL,
+	run_id VARCHAR(36),
+	claim_content_revision INTEGER NOT NULL,
+	snapshot_hash VARCHAR(64) NOT NULL,
+	bundle_hash VARCHAR(64) NOT NULL,
+	composite_grade_e4 INTEGER NOT NULL,
+	artifact_hash VARCHAR(64),
+	output_ref VARCHAR(200),
+	created_at DATETIME NOT NULL,
+	CONSTRAINT pk_sealed_bundles PRIMARY KEY (id),
+	CONSTRAINT uq_sealed_bundles_packet_id UNIQUE (packet_id),
+	CONSTRAINT fk_sealed_bundles_packet_id_packets FOREIGN KEY(packet_id) REFERENCES packets (id),
+	CONSTRAINT fk_sealed_bundles_run_id_generation_runs FOREIGN KEY(run_id) REFERENCES generation_runs (id),
+	CONSTRAINT fk_sealed_bundles_snapshot_hash_content_blobs FOREIGN KEY(snapshot_hash) REFERENCES content_blobs (hash)
+)""",
         """CREATE TABLE budget_reconciliations (
 	id VARCHAR(36) NOT NULL,
 	reservation_id VARCHAR(36) NOT NULL,
@@ -714,6 +875,29 @@ STATEMENTS: dict[str, list[str]] = {
         """CREATE INDEX ix_channel_runs_generation_run_id ON channel_runs (generation_run_id)""",
         """CREATE INDEX ix_channel_runs_packet_id ON channel_runs (packet_id)""",
         """CREATE UNIQUE INDEX uq_channel_runs_operation_id ON channel_runs (operation_id)""",
+        """CREATE TABLE eva_context_links (
+	id VARCHAR(36) NOT NULL,
+	eva_packet_id VARCHAR(36) NOT NULL,
+	packet_id VARCHAR(36) NOT NULL,
+	field_name VARCHAR(64) NOT NULL,
+	source_type VARCHAR(16) NOT NULL,
+	source_id VARCHAR(64) NOT NULL,
+	source_ref VARCHAR(64),
+	source_hash VARCHAR(64) NOT NULL,
+	source_revision INTEGER NOT NULL,
+	link_strength VARCHAR(16) NOT NULL,
+	link_reason VARCHAR(16) NOT NULL,
+	quote TEXT,
+	is_questioned BOOLEAN DEFAULT 0 NOT NULL,
+	created_at DATETIME NOT NULL,
+	CONSTRAINT pk_eva_context_links PRIMARY KEY (id),
+	CONSTRAINT ck_eva_context_links_strength CHECK (link_strength IN ('direct', 'peripheral')),
+	CONSTRAINT ck_eva_context_links_source_type CHECK (source_type IN ('project', 'objective', 'packet', 'definition')),
+	CONSTRAINT fk_eva_context_links_eva_packet_id_eva_packets FOREIGN KEY(eva_packet_id) REFERENCES eva_packets (id),
+	CONSTRAINT fk_eva_context_links_packet_id_packets FOREIGN KEY(packet_id) REFERENCES packets (id)
+)""",
+        """CREATE INDEX ix_eva_context_links_eva_packet_id ON eva_context_links (eva_packet_id)""",
+        """CREATE INDEX ix_eva_context_links_packet_id ON eva_context_links (packet_id)""",
         """CREATE TABLE evaluation_passes (
 	id VARCHAR(36) NOT NULL,
 	packet_id VARCHAR(36) NOT NULL,
@@ -819,9 +1003,9 @@ STATEMENTS: dict[str, list[str]] = {
         """CREATE TRIGGER trg_objectives_locked_no_delete BEFORE DELETE ON objectives FOR EACH ROW WHEN OLD.locked = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: locked row in objectives cannot be deleted'); END""",
         """CREATE TRIGGER trg_packets_locked_no_update BEFORE UPDATE ON packets FOR EACH ROW WHEN OLD.locked = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: locked row in packets cannot be updated'); END""",
         """CREATE TRIGGER trg_packets_locked_no_delete BEFORE DELETE ON packets FOR EACH ROW WHEN OLD.locked = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: locked row in packets cannot be deleted'); END""",
-        """CREATE TRIGGER trg_packets_completion_locks_insert BEFORE INSERT ON packets FOR EACH ROW WHEN NEW.status IN ('archived', 'completed') AND (NEW.locked IS NOT 1 OR NEW.completed_at IS NULL) BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: completed/archived packets must be locked with completed_at set'); END""",
+        """CREATE TRIGGER trg_packets_completion_locks_insert BEFORE INSERT ON packets FOR EACH ROW WHEN NEW.status IN ('archived', 'completed', 'sealed') AND (NEW.locked IS NOT 1 OR NEW.completed_at IS NULL) BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: completed/archived/sealed packets must be locked with completed_at set'); END""",
         """CREATE TRIGGER trg_artifacts_accepted_at_insert BEFORE INSERT ON artifacts FOR EACH ROW WHEN NEW.accepted = 1 AND NEW.accepted_at IS NULL BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: accepted artifacts must have accepted_at set'); END""",
-        """CREATE TRIGGER trg_packets_completion_locks_update BEFORE UPDATE ON packets FOR EACH ROW WHEN NEW.status IN ('archived', 'completed') AND (NEW.locked IS NOT 1 OR NEW.completed_at IS NULL) BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: completed/archived packets must be locked with completed_at set'); END""",
+        """CREATE TRIGGER trg_packets_completion_locks_update BEFORE UPDATE ON packets FOR EACH ROW WHEN NEW.status IN ('archived', 'completed', 'sealed') AND (NEW.locked IS NOT 1 OR NEW.completed_at IS NULL) BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: completed/archived/sealed packets must be locked with completed_at set'); END""",
         """CREATE TRIGGER trg_artifacts_accepted_at_update BEFORE UPDATE ON artifacts FOR EACH ROW WHEN NEW.accepted = 1 AND NEW.accepted_at IS NULL BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: accepted artifacts must have accepted_at set'); END""",
         """CREATE TRIGGER trg_artifacts_accepted_no_update BEFORE UPDATE ON artifacts FOR EACH ROW WHEN OLD.accepted = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: accepted artifact cannot be updated'); END""",
         """CREATE TRIGGER trg_artifacts_accepted_no_delete BEFORE DELETE ON artifacts FOR EACH ROW WHEN OLD.accepted = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: accepted artifact cannot be deleted'); END""",
@@ -851,9 +1035,9 @@ STATEMENTS: dict[str, list[str]] = {
         """CREATE TRIGGER trg_packets_superseded_no_delete BEFORE DELETE ON packets FOR EACH ROW WHEN EXISTS (SELECT 1 FROM packets s WHERE s.supersedes_id = OLD.id) BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: superseded row in packets is history and cannot be deleted'); END""",
         """CREATE TRIGGER trg_packets_successor_no_delete BEFORE DELETE ON packets FOR EACH ROW WHEN OLD.supersedes_id IS NOT NULL BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: a superseding version in packets cannot be deleted; archive instead'); END""",
         """CREATE TRIGGER trg_packets_dependents_no_delete BEFORE DELETE ON packets FOR EACH ROW WHEN EXISTS (SELECT 1 FROM packets d WHERE d.id <> OLD.id AND (d.parent_id = OLD.id OR d.root_id = OLD.id)) OR EXISTS (SELECT 1 FROM evaluation_passes d WHERE d.packet_id = OLD.id) OR EXISTS (SELECT 1 FROM artifacts d WHERE d.packet_id = OLD.id) OR EXISTS (SELECT 1 FROM channel_runs d WHERE d.packet_id = OLD.id) OR EXISTS (SELECT 1 FROM quality_reports d WHERE d.packet_id = OLD.id) BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: row in packets has dependents and cannot be deleted; archive instead'); END""",
-        """CREATE TRIGGER trg_packets_lineage_no_rewrite BEFORE UPDATE ON packets FOR EACH ROW WHEN NEW.ref IS NOT OLD.ref OR NEW.version IS NOT OLD.version OR NEW.supersedes_id IS NOT OLD.supersedes_id OR NEW.project_id IS NOT OLD.project_id OR NEW.objective_id IS NOT OLD.objective_id OR NEW.parent_id IS NOT OLD.parent_id OR NEW.root_id IS NOT OLD.root_id BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: lineage fields of packets (ref, version, supersedes_id, ancestry) are immutable'); END""",
+        """CREATE TRIGGER trg_packets_lineage_no_rewrite BEFORE UPDATE ON packets FOR EACH ROW WHEN NEW.ref IS NOT OLD.ref OR NEW.version IS NOT OLD.version OR NEW.supersedes_id IS NOT OLD.supersedes_id OR NEW.project_id IS NOT OLD.project_id OR NEW.objective_id IS NOT OLD.objective_id OR NEW.parent_id IS NOT OLD.parent_id OR NEW.root_id IS NOT OLD.root_id OR NEW.lineage_key IS NOT OLD.lineage_key BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: lineage fields of packets (ref, version, supersedes_id, ancestry) are immutable'); END""",
         """CREATE TRIGGER trg_packets_lineage_start BEFORE INSERT ON packets FOR EACH ROW WHEN NEW.supersedes_id IS NULL AND NEW.version <> 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: a new lineage in packets starts at version 1'); END""",
-        """CREATE TRIGGER trg_packets_lineage_successor BEFORE INSERT ON packets FOR EACH ROW WHEN NEW.supersedes_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM packets p WHERE p.id = NEW.supersedes_id AND p.ref = NEW.ref AND p.version + 1 = NEW.version AND p.project_id IS NEW.project_id AND p.objective_id IS NEW.objective_id AND p.parent_id IS NEW.parent_id AND p.root_id IS NEW.root_id) BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: a successor in packets must keep the ref, have version = predecessor + 1 and the same ancestry'); END""",
+        """CREATE TRIGGER trg_packets_lineage_successor BEFORE INSERT ON packets FOR EACH ROW WHEN NEW.supersedes_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM packets p WHERE p.id = NEW.supersedes_id AND p.ref = NEW.ref AND p.version + 1 = NEW.version AND p.project_id IS NEW.project_id AND p.objective_id IS NEW.objective_id AND p.parent_id IS NEW.parent_id AND p.root_id IS NEW.root_id AND p.lineage_key IS NEW.lineage_key) BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: a successor in packets must keep the ref, have version = predecessor + 1 and the same ancestry'); END""",
         """CREATE TRIGGER trg_evaluation_pass_items_append_only_update BEFORE UPDATE ON evaluation_pass_items FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: evaluation_pass_items is append-only (update rejected)'); END""",
         """CREATE TRIGGER trg_evaluation_pass_items_append_only_delete BEFORE DELETE ON evaluation_pass_items FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: evaluation_pass_items is append-only (delete rejected)'); END""",
         """CREATE TRIGGER trg_eva_presets_append_only_update BEFORE UPDATE ON eva_presets FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: eva_presets is append-only (update rejected)'); END""",
@@ -880,10 +1064,10 @@ STATEMENTS: dict[str, list[str]] = {
         """CREATE TRIGGER trg_eva_packets_identity_frozen BEFORE UPDATE ON eva_packets FOR EACH ROW WHEN NEW.packet_id IS NOT OLD.packet_id OR NEW.packet_version IS NOT OLD.packet_version OR NEW.cycle_id IS NOT OLD.cycle_id OR NEW.preset_id IS NOT OLD.preset_id OR NEW.field_name IS NOT OLD.field_name OR NEW.definition_version IS NOT OLD.definition_version OR NEW.phase IS NOT OLD.phase OR NEW.plan IS NOT OLD.plan OR NEW.item_keys IS NOT OLD.item_keys OR NEW.target_hash IS NOT OLD.target_hash OR NEW.model_config IS NOT OLD.model_config OR NEW.model_config_hash IS NOT OLD.model_config_hash OR NEW.content_address IS NOT OLD.content_address OR NEW.idempotency_key IS NOT OLD.idempotency_key OR NEW.escalation IS NOT OLD.escalation OR NEW.escalated_from_id IS NOT OLD.escalated_from_id OR NEW.reused_from_id IS NOT OLD.reused_from_id OR NEW.created_at IS NOT OLD.created_at BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: evaPacket identity columns are frozen from insert'); END""",
         """CREATE TRIGGER trg_packet_dependencies_append_only_update BEFORE UPDATE ON packet_dependencies FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: packet_dependencies is append-only (update rejected)'); END""",
         """CREATE TRIGGER trg_packet_dependencies_append_only_delete BEFORE DELETE ON packet_dependencies FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: packet_dependencies is append-only (delete rejected)'); END""",
-        """CREATE TRIGGER trg_packets_transition_table BEFORE UPDATE ON packets FOR EACH ROW WHEN NEW.status IS NOT OLD.status AND (OLD.status || '>' || NEW.status) NOT IN ('awaiting_confirmation>blocked', 'awaiting_confirmation>closed_unverified', 'awaiting_confirmation>completed', 'awaiting_confirmation>evaluating_post', 'awaiting_confirmation>evaluating_pre', 'awaiting_confirmation>held', 'awaiting_confirmation>queued', 'awaiting_confirmation>running', 'awaiting_confirmation>waiting_for_children', 'blocked>closed_unverified', 'blocked>evaluating_post', 'blocked>evaluating_pre', 'blocked>held', 'draft>blocked', 'draft>closed_unverified', 'draft>evaluating_pre', 'draft>held', 'evaluating>closed_unverified', 'evaluating>evaluating_pre', 'evaluating_post>awaiting_confirmation', 'evaluating_post>blocked', 'evaluating_post>closed_unverified', 'evaluating_post>completed', 'evaluating_post>held', 'evaluating_post>needs_review', 'evaluating_pre>awaiting_confirmation', 'evaluating_pre>blocked', 'evaluating_pre>closed_unverified', 'evaluating_pre>held', 'evaluating_pre>needs_review', 'evaluating_pre>ready', 'evaluating_pre>waiting_for_children', 'failed>awaiting_confirmation', 'failed>blocked', 'failed>closed_unverified', 'failed>evaluating_pre', 'failed>held', 'failed>queued', 'held>blocked', 'held>closed_unverified', 'held>evaluating_pre', 'in_progress>closed_unverified', 'in_progress>evaluating_pre', 'needs_review>blocked', 'needs_review>closed_unverified', 'needs_review>evaluating_post', 'needs_review>evaluating_pre', 'needs_review>held', 'processed>closed_unverified', 'processed>evaluating_pre', 'queued>awaiting_confirmation', 'queued>blocked', 'queued>closed_unverified', 'queued>evaluating_pre', 'queued>held', 'queued>running', 'ready>awaiting_confirmation', 'ready>blocked', 'ready>closed_unverified', 'ready>evaluating_pre', 'ready>held', 'ready>queued', 'ready>waiting_for_children', 'running>awaiting_confirmation', 'running>blocked', 'running>closed_unverified', 'running>evaluating_post', 'running>evaluating_pre', 'running>failed', 'waiting_for_children>closed_unverified', 'waiting_for_children>completed') BEGIN SELECT RAISE(ABORT, 'orchestrator-transition: packet status change is not in the M3 transition table'); END""",
-        """CREATE TRIGGER trg_generation_runs_transition_table BEFORE UPDATE ON generation_runs FOR EACH ROW WHEN NEW.state IS NOT OLD.state AND (OLD.state || '>' || NEW.state) NOT IN ('accepted>stale', 'awaiting_confirmation>dispatched', 'awaiting_confirmation>failed', 'awaiting_confirmation>stale', 'awaiting_result>awaiting_confirmation', 'awaiting_result>failed', 'awaiting_result>stale', 'awaiting_result>validating', 'claimed>stale', 'dispatched>awaiting_result', 'dispatched>failed', 'dispatched>stale', 'planned>dispatched', 'planned>stale', 'validating>accepted', 'validating>awaiting_result', 'validating>failed', 'validating>stale') BEGIN SELECT RAISE(ABORT, 'orchestrator-transition: run state change is not in the M3 transition table'); END""",
-        """CREATE TRIGGER trg_generation_runs_final BEFORE UPDATE ON generation_runs FOR EACH ROW WHEN OLD.state IN ('failed', 'stale', 'succeeded', 'abandoned') OR (OLD.state = 'accepted' AND OLD.commit_sha IS NOT NULL) BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: a finished generation run cannot be changed'); END""",
-        """CREATE TRIGGER trg_generation_runs_bindings_frozen BEFORE UPDATE ON generation_runs FOR EACH ROW WHEN NEW.claimed_by IS NOT OLD.claimed_by OR NEW.channel IS NOT OLD.channel OR NEW.fencing_token IS NOT OLD.fencing_token OR NEW.created_at IS NOT OLD.created_at OR (OLD.manifest_hash IS NOT NULL AND NEW.manifest_hash IS NOT OLD.manifest_hash) OR (OLD.commit_sha IS NOT NULL AND NEW.commit_sha IS NOT OLD.commit_sha) OR (NEW.gate_revision IS NOT OLD.gate_revision AND (OLD.gate_revision IS NULL OR NEW.gate_revision IS NOT OLD.gate_revision + 1)) BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: generation run bindings are frozen (gate revision moves by +1 only)'); END""",
+        """CREATE TRIGGER trg_packets_transition_table BEFORE UPDATE ON packets FOR EACH ROW WHEN NEW.status IS NOT OLD.status AND (OLD.status || '>' || NEW.status) NOT IN ('awaiting_confirmation>blocked', 'awaiting_confirmation>closed_unverified', 'awaiting_confirmation>completed', 'awaiting_confirmation>evaluating_post', 'awaiting_confirmation>evaluating_pre', 'awaiting_confirmation>held', 'awaiting_confirmation>queued', 'awaiting_confirmation>running', 'awaiting_confirmation>waiting_for_children', 'blocked>closed_unverified', 'blocked>evaluating_post', 'blocked>evaluating_pre', 'blocked>held', 'draft>blocked', 'draft>closed_unverified', 'draft>evaluating_pre', 'draft>held', 'draft>ready', 'evaluating>closed_unverified', 'evaluating>evaluating_pre', 'evaluating_post>awaiting_confirmation', 'evaluating_post>blocked', 'evaluating_post>closed_unverified', 'evaluating_post>held', 'evaluating_post>needs_review', 'evaluating_post>sealed', 'evaluating_pre>awaiting_confirmation', 'evaluating_pre>blocked', 'evaluating_pre>closed_unverified', 'evaluating_pre>held', 'evaluating_pre>needs_review', 'evaluating_pre>ready', 'evaluating_pre>waiting_for_children', 'failed>blocked', 'failed>closed_unverified', 'failed>evaluating_pre', 'failed>held', 'failed>queued', 'held>blocked', 'held>closed_unverified', 'held>evaluating_pre', 'in_progress>closed_unverified', 'in_progress>evaluating_pre', 'needs_review>blocked', 'needs_review>closed_unverified', 'needs_review>evaluating_post', 'needs_review>evaluating_pre', 'needs_review>held', 'processed>closed_unverified', 'processed>evaluating_pre', 'queued>awaiting_confirmation', 'queued>blocked', 'queued>closed_unverified', 'queued>held', 'queued>ready', 'queued>running', 'ready>awaiting_confirmation', 'ready>blocked', 'ready>closed_unverified', 'ready>held', 'ready>queued', 'ready>waiting_for_children', 'running>awaiting_confirmation', 'running>blocked', 'running>closed_unverified', 'running>evaluating_post', 'running>evaluating_pre', 'running>queued', 'waiting_for_children>closed_unverified', 'waiting_for_children>completed') BEGIN SELECT RAISE(ABORT, 'orchestrator-transition: packet status change is not in the M3 transition table'); END""",
+        """CREATE TRIGGER trg_generation_runs_transition_table BEFORE UPDATE ON generation_runs FOR EACH ROW WHEN NEW.state IS NOT OLD.state AND (OLD.state || '>' || NEW.state) NOT IN ('accepted>stale', 'accepted>succeeded', 'awaiting_confirmation>dispatched', 'awaiting_confirmation>failed', 'awaiting_confirmation>stale', 'awaiting_result>awaiting_confirmation', 'awaiting_result>crashed', 'awaiting_result>failed', 'awaiting_result>stale', 'awaiting_result>validating', 'claimed>stale', 'dispatched>awaiting_result', 'dispatched>crashed', 'dispatched>failed', 'dispatched>stale', 'planned>dispatched', 'planned>stale', 'validating>accepted', 'validating>awaiting_result', 'validating>crashed', 'validating>failed', 'validating>stale') BEGIN SELECT RAISE(ABORT, 'orchestrator-transition: run state change is not in the M3 transition table'); END""",
+        """CREATE TRIGGER trg_generation_runs_final BEFORE UPDATE ON generation_runs FOR EACH ROW WHEN OLD.state IN ('failed', 'stale', 'succeeded', 'abandoned', 'crashed') OR (OLD.state = 'accepted' AND OLD.commit_sha IS NOT NULL) BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: a finished generation run cannot be changed'); END""",
+        """CREATE TRIGGER trg_generation_runs_bindings_frozen BEFORE UPDATE ON generation_runs FOR EACH ROW WHEN NEW.claimed_by IS NOT OLD.claimed_by OR NEW.channel IS NOT OLD.channel OR NEW.fencing_token IS NOT OLD.fencing_token OR NEW.claim_content_revision IS NOT OLD.claim_content_revision OR NEW.created_at IS NOT OLD.created_at OR (OLD.manifest_hash IS NOT NULL AND NEW.manifest_hash IS NOT OLD.manifest_hash) OR (OLD.commit_sha IS NOT NULL AND NEW.commit_sha IS NOT OLD.commit_sha) OR (NEW.gate_revision IS NOT OLD.gate_revision AND (OLD.gate_revision IS NULL OR NEW.gate_revision IS NOT OLD.gate_revision + 1)) BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: generation run bindings are frozen (gate revision moves by +1 only)'); END""",
         """CREATE TRIGGER trg_kernel_leases_epoch BEFORE UPDATE ON kernel_leases FOR EACH ROW WHEN NEW.epoch < OLD.epoch OR NEW.name IS NOT OLD.name BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: the kernel lease epoch never decreases'); END""",
         """CREATE TRIGGER trg_governor_states_revision BEFORE UPDATE ON governor_states FOR EACH ROW WHEN NEW.revision <= OLD.revision OR NEW.scope_type IS NOT OLD.scope_type OR NEW.scope_id IS NOT OLD.scope_id BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: a governor state change must increase its revision and keep its scope'); END""",
         """CREATE TRIGGER trg_channel_runs_append_only_update BEFORE UPDATE ON channel_runs FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: channel_runs is append-only (update rejected)'); END""",
@@ -901,6 +1085,66 @@ STATEMENTS: dict[str, list[str]] = {
         """CREATE TRIGGER trg_kernel_leases_no_delete BEFORE DELETE ON kernel_leases FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: kernel_leases rows cannot be deleted'); END""",
         """CREATE TRIGGER trg_governor_states_no_delete BEFORE DELETE ON governor_states FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: governor_states rows cannot be deleted'); END""",
         """CREATE TRIGGER trg_budget_counters_no_delete BEFORE DELETE ON budget_counters FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: budget_counters rows cannot be deleted'); END""",
+        """CREATE TRIGGER trg_content_blobs_append_only_update BEFORE UPDATE ON content_blobs FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: content_blobs is append-only (update rejected)'); END""",
+        """CREATE TRIGGER trg_content_blobs_append_only_delete BEFORE DELETE ON content_blobs FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: content_blobs is append-only (delete rejected)'); END""",
+        """CREATE TRIGGER trg_field_revisions_append_only_update BEFORE UPDATE ON field_revisions FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: field_revisions is append-only (update rejected)'); END""",
+        """CREATE TRIGGER trg_field_revisions_append_only_delete BEFORE DELETE ON field_revisions FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: field_revisions is append-only (delete rejected)'); END""",
+        """CREATE TRIGGER trg_sealed_bundles_append_only_update BEFORE UPDATE ON sealed_bundles FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: sealed_bundles is append-only (update rejected)'); END""",
+        """CREATE TRIGGER trg_sealed_bundles_append_only_delete BEFORE DELETE ON sealed_bundles FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: sealed_bundles is append-only (delete rejected)'); END""",
+        """CREATE TRIGGER trg_eva_discard_log_append_only_update BEFORE UPDATE ON eva_discard_log FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: eva_discard_log is append-only (update rejected)'); END""",
+        """CREATE TRIGGER trg_eva_discard_log_append_only_delete BEFORE DELETE ON eva_discard_log FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: eva_discard_log is append-only (delete rejected)'); END""",
+        """CREATE TRIGGER trg_queue_epoch_snapshot_append_only_update BEFORE UPDATE ON queue_epoch_snapshot FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: queue_epoch_snapshot is append-only (update rejected)'); END""",
+        """CREATE TRIGGER trg_queue_epoch_snapshot_append_only_delete BEFORE DELETE ON queue_epoch_snapshot FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: queue_epoch_snapshot is append-only (delete rejected)'); END""",
+        """CREATE TRIGGER trg_feedback_events_append_only_update BEFORE UPDATE ON feedback_events FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: feedback_events is append-only (update rejected)'); END""",
+        """CREATE TRIGGER trg_feedback_events_append_only_delete BEFORE DELETE ON feedback_events FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: feedback_events is append-only (delete rejected)'); END""",
+        """CREATE TRIGGER trg_crash_events_append_only_update BEFORE UPDATE ON crash_events FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: crash_events is append-only (update rejected)'); END""",
+        """CREATE TRIGGER trg_crash_events_append_only_delete BEFORE DELETE ON crash_events FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: crash_events is append-only (delete rejected)'); END""",
+        """CREATE TRIGGER trg_route_health_no_delete BEFORE DELETE ON route_health FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: route_health rows cannot be deleted'); END""",
+        """CREATE TRIGGER trg_eva_context_links_no_delete BEFORE DELETE ON eva_context_links FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: eva_context_links rows cannot be deleted'); END""",
+        """CREATE TRIGGER trg_eva_context_links_frozen BEFORE UPDATE ON eva_context_links FOR EACH ROW WHEN NEW.id IS NOT OLD.id OR NEW.eva_packet_id IS NOT OLD.eva_packet_id OR NEW.packet_id IS NOT OLD.packet_id OR NEW.field_name IS NOT OLD.field_name OR NEW.source_type IS NOT OLD.source_type OR NEW.source_id IS NOT OLD.source_id OR NEW.source_ref IS NOT OLD.source_ref OR NEW.source_hash IS NOT OLD.source_hash OR NEW.source_revision IS NOT OLD.source_revision OR NEW.link_strength IS NOT OLD.link_strength OR NEW.link_reason IS NOT OLD.link_reason OR NEW.quote IS NOT OLD.quote OR NEW.created_at IS NOT OLD.created_at OR (OLD.is_questioned = 1 AND NEW.is_questioned IS NOT 1) BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: eva_context_links are append-only; only is_questioned may go from false to true'); END""",
+        """CREATE TRIGGER trg_packets_content_revision AFTER UPDATE OF title, prompt_description, response_structure, response_contract, repo_target_path, priority_level, manual_boost ON packets FOR EACH ROW WHEN (OLD.title IS NOT NEW.title OR OLD.prompt_description IS NOT NEW.prompt_description OR OLD.response_structure IS NOT NEW.response_structure OR OLD.response_contract IS NOT NEW.response_contract OR OLD.repo_target_path IS NOT NEW.repo_target_path OR OLD.priority_level IS NOT NEW.priority_level OR OLD.manual_boost IS NOT NEW.manual_boost) AND OLD.content_revision = NEW.content_revision BEGIN UPDATE packets SET content_revision = OLD.content_revision + 1, last_producer = 'user_sql' WHERE id = NEW.id; END""",
+        """CREATE TRIGGER trg_packets_outbox AFTER UPDATE OF title, prompt_description, response_structure, response_contract, repo_target_path, priority_level, manual_boost ON packets FOR EACH ROW WHEN OLD.title IS NOT NEW.title OR OLD.prompt_description IS NOT NEW.prompt_description OR OLD.response_structure IS NOT NEW.response_structure OR OLD.response_contract IS NOT NEW.response_contract OR OLD.repo_target_path IS NOT NEW.repo_target_path OR OLD.priority_level IS NOT NEW.priority_level OR OLD.manual_boost IS NOT NEW.manual_boost
+BEGIN
+INSERT INTO raw_revision_outbox (tx_id, entity_type, entity_id, field_name, old_value, new_value, producer, content_revision, captured_at)
+WITH ctx AS (SELECT lower(hex(randomblob(8))) AS tx)
+SELECT ctx.tx, 'packet', NEW.id, 'title', CAST(OLD.title AS TEXT), CAST(NEW.title AS TEXT), CASE WHEN OLD.content_revision = NEW.content_revision THEN 'user_sql' ELSE NEW.last_producer END, CASE WHEN OLD.content_revision = NEW.content_revision THEN OLD.content_revision + 1 ELSE NEW.content_revision END, CURRENT_TIMESTAMP FROM ctx WHERE OLD.title IS NOT NEW.title
+UNION ALL
+SELECT ctx.tx, 'packet', NEW.id, 'prompt_description', CAST(OLD.prompt_description AS TEXT), CAST(NEW.prompt_description AS TEXT), CASE WHEN OLD.content_revision = NEW.content_revision THEN 'user_sql' ELSE NEW.last_producer END, CASE WHEN OLD.content_revision = NEW.content_revision THEN OLD.content_revision + 1 ELSE NEW.content_revision END, CURRENT_TIMESTAMP FROM ctx WHERE OLD.prompt_description IS NOT NEW.prompt_description
+UNION ALL
+SELECT ctx.tx, 'packet', NEW.id, 'response_structure', CAST(OLD.response_structure AS TEXT), CAST(NEW.response_structure AS TEXT), CASE WHEN OLD.content_revision = NEW.content_revision THEN 'user_sql' ELSE NEW.last_producer END, CASE WHEN OLD.content_revision = NEW.content_revision THEN OLD.content_revision + 1 ELSE NEW.content_revision END, CURRENT_TIMESTAMP FROM ctx WHERE OLD.response_structure IS NOT NEW.response_structure
+UNION ALL
+SELECT ctx.tx, 'packet', NEW.id, 'response_contract', CAST(OLD.response_contract AS TEXT), CAST(NEW.response_contract AS TEXT), CASE WHEN OLD.content_revision = NEW.content_revision THEN 'user_sql' ELSE NEW.last_producer END, CASE WHEN OLD.content_revision = NEW.content_revision THEN OLD.content_revision + 1 ELSE NEW.content_revision END, CURRENT_TIMESTAMP FROM ctx WHERE OLD.response_contract IS NOT NEW.response_contract
+UNION ALL
+SELECT ctx.tx, 'packet', NEW.id, 'repo_target_path', CAST(OLD.repo_target_path AS TEXT), CAST(NEW.repo_target_path AS TEXT), CASE WHEN OLD.content_revision = NEW.content_revision THEN 'user_sql' ELSE NEW.last_producer END, CASE WHEN OLD.content_revision = NEW.content_revision THEN OLD.content_revision + 1 ELSE NEW.content_revision END, CURRENT_TIMESTAMP FROM ctx WHERE OLD.repo_target_path IS NOT NEW.repo_target_path
+UNION ALL
+SELECT ctx.tx, 'packet', NEW.id, 'priority_level', CAST(OLD.priority_level AS TEXT), CAST(NEW.priority_level AS TEXT), CASE WHEN OLD.content_revision = NEW.content_revision THEN 'user_sql' ELSE NEW.last_producer END, CASE WHEN OLD.content_revision = NEW.content_revision THEN OLD.content_revision + 1 ELSE NEW.content_revision END, CURRENT_TIMESTAMP FROM ctx WHERE OLD.priority_level IS NOT NEW.priority_level
+UNION ALL
+SELECT ctx.tx, 'packet', NEW.id, 'manual_boost', CAST(OLD.manual_boost AS TEXT), CAST(NEW.manual_boost AS TEXT), CASE WHEN OLD.content_revision = NEW.content_revision THEN 'user_sql' ELSE NEW.last_producer END, CASE WHEN OLD.content_revision = NEW.content_revision THEN OLD.content_revision + 1 ELSE NEW.content_revision END, CURRENT_TIMESTAMP FROM ctx WHERE OLD.manual_boost IS NOT NEW.manual_boost;
+END""",
+        """CREATE TRIGGER trg_projects_content_revision AFTER UPDATE OF name, brief, industry, scope ON projects FOR EACH ROW WHEN (OLD.name IS NOT NEW.name OR OLD.brief IS NOT NEW.brief OR OLD.industry IS NOT NEW.industry OR OLD.scope IS NOT NEW.scope) AND OLD.content_revision = NEW.content_revision BEGIN UPDATE projects SET content_revision = OLD.content_revision + 1, last_producer = 'user_sql' WHERE id = NEW.id; END""",
+        """CREATE TRIGGER trg_projects_outbox AFTER UPDATE OF name, brief, industry, scope ON projects FOR EACH ROW WHEN OLD.name IS NOT NEW.name OR OLD.brief IS NOT NEW.brief OR OLD.industry IS NOT NEW.industry OR OLD.scope IS NOT NEW.scope
+BEGIN
+INSERT INTO raw_revision_outbox (tx_id, entity_type, entity_id, field_name, old_value, new_value, producer, content_revision, captured_at)
+WITH ctx AS (SELECT lower(hex(randomblob(8))) AS tx)
+SELECT ctx.tx, 'project', NEW.id, 'name', CAST(OLD.name AS TEXT), CAST(NEW.name AS TEXT), CASE WHEN OLD.content_revision = NEW.content_revision THEN 'user_sql' ELSE NEW.last_producer END, CASE WHEN OLD.content_revision = NEW.content_revision THEN OLD.content_revision + 1 ELSE NEW.content_revision END, CURRENT_TIMESTAMP FROM ctx WHERE OLD.name IS NOT NEW.name
+UNION ALL
+SELECT ctx.tx, 'project', NEW.id, 'brief', CAST(OLD.brief AS TEXT), CAST(NEW.brief AS TEXT), CASE WHEN OLD.content_revision = NEW.content_revision THEN 'user_sql' ELSE NEW.last_producer END, CASE WHEN OLD.content_revision = NEW.content_revision THEN OLD.content_revision + 1 ELSE NEW.content_revision END, CURRENT_TIMESTAMP FROM ctx WHERE OLD.brief IS NOT NEW.brief
+UNION ALL
+SELECT ctx.tx, 'project', NEW.id, 'industry', CAST(OLD.industry AS TEXT), CAST(NEW.industry AS TEXT), CASE WHEN OLD.content_revision = NEW.content_revision THEN 'user_sql' ELSE NEW.last_producer END, CASE WHEN OLD.content_revision = NEW.content_revision THEN OLD.content_revision + 1 ELSE NEW.content_revision END, CURRENT_TIMESTAMP FROM ctx WHERE OLD.industry IS NOT NEW.industry
+UNION ALL
+SELECT ctx.tx, 'project', NEW.id, 'scope', CAST(OLD.scope AS TEXT), CAST(NEW.scope AS TEXT), CASE WHEN OLD.content_revision = NEW.content_revision THEN 'user_sql' ELSE NEW.last_producer END, CASE WHEN OLD.content_revision = NEW.content_revision THEN OLD.content_revision + 1 ELSE NEW.content_revision END, CURRENT_TIMESTAMP FROM ctx WHERE OLD.scope IS NOT NEW.scope;
+END""",
+        """CREATE TRIGGER trg_objectives_content_revision AFTER UPDATE OF name, brief, priority_level ON objectives FOR EACH ROW WHEN (OLD.name IS NOT NEW.name OR OLD.brief IS NOT NEW.brief OR OLD.priority_level IS NOT NEW.priority_level) AND OLD.content_revision = NEW.content_revision BEGIN UPDATE objectives SET content_revision = OLD.content_revision + 1, last_producer = 'user_sql' WHERE id = NEW.id; END""",
+        """CREATE TRIGGER trg_objectives_outbox AFTER UPDATE OF name, brief, priority_level ON objectives FOR EACH ROW WHEN OLD.name IS NOT NEW.name OR OLD.brief IS NOT NEW.brief OR OLD.priority_level IS NOT NEW.priority_level
+BEGIN
+INSERT INTO raw_revision_outbox (tx_id, entity_type, entity_id, field_name, old_value, new_value, producer, content_revision, captured_at)
+WITH ctx AS (SELECT lower(hex(randomblob(8))) AS tx)
+SELECT ctx.tx, 'objective', NEW.id, 'name', CAST(OLD.name AS TEXT), CAST(NEW.name AS TEXT), CASE WHEN OLD.content_revision = NEW.content_revision THEN 'user_sql' ELSE NEW.last_producer END, CASE WHEN OLD.content_revision = NEW.content_revision THEN OLD.content_revision + 1 ELSE NEW.content_revision END, CURRENT_TIMESTAMP FROM ctx WHERE OLD.name IS NOT NEW.name
+UNION ALL
+SELECT ctx.tx, 'objective', NEW.id, 'brief', CAST(OLD.brief AS TEXT), CAST(NEW.brief AS TEXT), CASE WHEN OLD.content_revision = NEW.content_revision THEN 'user_sql' ELSE NEW.last_producer END, CASE WHEN OLD.content_revision = NEW.content_revision THEN OLD.content_revision + 1 ELSE NEW.content_revision END, CURRENT_TIMESTAMP FROM ctx WHERE OLD.brief IS NOT NEW.brief
+UNION ALL
+SELECT ctx.tx, 'objective', NEW.id, 'priority_level', CAST(OLD.priority_level AS TEXT), CAST(NEW.priority_level AS TEXT), CASE WHEN OLD.content_revision = NEW.content_revision THEN 'user_sql' ELSE NEW.last_producer END, CASE WHEN OLD.content_revision = NEW.content_revision THEN OLD.content_revision + 1 ELSE NEW.content_revision END, CURRENT_TIMESTAMP FROM ctx WHERE OLD.priority_level IS NOT NEW.priority_level;
+END""",
         """CREATE VIEW v_project_heads AS
 WITH RECURSIVE chain(row_id, current_id) AS (
   SELECT id, id FROM projects
@@ -1054,6 +1298,13 @@ SELECT r.eva_packet_id, r.packet_id, r.packet_version, r.eval_cycle_id, r.field_
             WHEN r.complete = 1 AND r.winner IN ('b', 'both') THEN r.vb
             ELSE NULL END AS winning_value
 FROM r""",
+        """CREATE VIEW v_context_link_status AS
+SELECT l.id AS link_id, l.eva_packet_id, l.packet_id, l.field_name, l.source_type,
+       l.source_id, l.source_ref, l.source_revision, l.link_strength, l.link_reason,
+       CASE l.source_type WHEN 'project' THEN (SELECT x.content_revision FROM projects x WHERE x.id = l.source_id) WHEN 'objective' THEN (SELECT x.content_revision FROM objectives x WHERE x.id = l.source_id) WHEN 'packet' THEN (SELECT x.content_revision FROM packets x WHERE x.id = l.source_id) ELSE COALESCE((SELECT d.version FROM candidate_field_definitions d WHERE d.name = l.source_id), (SELECT MAX(ps.revision) FROM eva_presets ps WHERE 'preset:' || ps.field_name || ':' || ps.phase = l.source_id)) END AS current_revision,
+       CASE WHEN l.is_questioned OR CASE l.source_type WHEN 'project' THEN (SELECT x.content_revision FROM projects x WHERE x.id = l.source_id) WHEN 'objective' THEN (SELECT x.content_revision FROM objectives x WHERE x.id = l.source_id) WHEN 'packet' THEN (SELECT x.content_revision FROM packets x WHERE x.id = l.source_id) ELSE COALESCE((SELECT d.version FROM candidate_field_definitions d WHERE d.name = l.source_id), (SELECT MAX(ps.revision) FROM eva_presets ps WHERE 'preset:' || ps.field_name || ':' || ps.phase = l.source_id)) END > l.source_revision THEN 1 ELSE 0 END
+         AS questioned
+FROM eva_context_links l""",
         """CREATE VIEW v_field_consensus AS
 WITH art AS (
   SELECT a.packet_id, a.sha256,
@@ -1066,11 +1317,7 @@ bound AS (
          CASE WHEN ((e.phase = 'pre' AND e.target_hash = p.input_hash)
                     OR (e.phase = 'post' AND e.target_hash = la.sha256))
                    AND ps.enabled
-                   AND ps.revision = (SELECT MAX(p2.revision) FROM eva_presets p2
-                                      WHERE p2.field_name = e.field_name
-                                        AND p2.phase = e.phase)
                    AND d.enabled
-                   AND e.definition_version = d.version
               THEN 1 ELSE 0 END AS is_current
   FROM eva_packets e
   JOIN packets p ON p.id = e.packet_id
@@ -1089,6 +1336,13 @@ cand AS (
                                      bound.escalation DESC, bound.created_at DESC,
                                      bound.id DESC) AS rn
   FROM bound
+),
+q AS (
+  SELECT ls.eva_packet_id, SUM(ls.questioned) AS qn,
+         MAX(CASE WHEN ls.questioned = 1 AND ls.link_strength = 'direct' THEN 1 ELSE 0 END)
+           AS qd
+  FROM v_context_link_status ls
+  GROUP BY ls.eva_packet_id
 )
 SELECT p.id AS packet_id, p.ref AS packet_ref, p.version AS packet_version,
        c.field_name, c.phase, c.item_key, c.kind,
@@ -1102,10 +1356,17 @@ SELECT p.id AS packet_id, p.ref AS packet_ref, p.version AS packet_version,
        CASE WHEN cand.is_current = 1 AND c.status = 'accepted' THEN c.winning_value
             ELSE NULL END AS final_value,
        c.supports, c.contradictions, c.unverified, c.eva_packet_id, c.eval_cycle_id,
-       cand.is_current
+       cand.is_current,
+       CASE WHEN p.status IN ('waiting_for_children', 'archived') THEN 0 WHEN COALESCE(q.qn, 0) > 0 THEN 1 ELSE 0 END
+         AS question_context,
+       CASE WHEN p.status IN ('waiting_for_children', 'archived') THEN 0 ELSE COALESCE(q.qn, 0) END AS question_context_count,
+       CAST(CASE WHEN p.status IN ('waiting_for_children', 'archived') THEN 0 WHEN q.qd = 1 THEN COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'qctx.w_direct_e4'), 750)
+                 WHEN COALESCE(q.qn, 0) > 0 THEN COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'qctx.w_periph_e4'), 250) ELSE 0 END AS INTEGER)
+         AS question_weight_e4
 FROM cand
 JOIN packets p ON p.id = cand.packet_id
 JOIN v_eva_item_consensus c ON c.eva_packet_id = cand.id
+LEFT JOIN q ON q.eva_packet_id = cand.id
 WHERE cand.rn = 1""",
         """CREATE VIEW v_field_status AS
 SELECT c.packet_id, c.packet_ref, c.packet_version, c.field_name, c.phase, c.kind,
@@ -1117,7 +1378,10 @@ SELECT c.packet_id, c.packet_ref, c.packet_version, c.field_name, c.phase, c.kin
        SUM(CASE WHEN c.status = 'accepted' THEN 1 ELSE 0 END) AS accepted_items,
        SUM(CASE WHEN c.status = 'disputed' THEN 1 ELSE 0 END) AS disputed_items,
        MIN(c.confidence) AS min_confidence,
-       MAX(c.eva_packet_id) AS eva_packet_id
+       MAX(c.eva_packet_id) AS eva_packet_id,
+       MAX(c.question_context) AS question_context,
+       MAX(c.question_context_count) AS question_context_count,
+       MAX(c.question_weight_e4) AS question_weight_e4
 FROM v_field_consensus c
 GROUP BY c.packet_id, c.packet_ref, c.packet_version, c.field_name, c.phase, c.kind""",
         """CREATE VIEW v_packet_stats AS
@@ -1238,72 +1502,335 @@ LEFT JOIN v_field_status fs ON fs.packet_id = h.id AND fs.field_name = req.field
   AND fs.phase = req.phase
 WHERE req.phase = 'pre'
 GROUP BY h.id, h.ref, h.version, h.status""",
-        """CREATE VIEW v_queue AS
-WITH x AS (
-  SELECT p.id AS packet_id, p.ref AS packet_ref, p.version AS packet_version, p.status,
-         p.created_at, p.claimed_by, p.lease_expires_at,
-         COALESCE(o.priority_level, 5) AS objective_priority,
-         COALESCE((SELECT CAST(c.final_value AS NUMERIC) FROM v_field_consensus c
-                   WHERE c.packet_id = p.id AND c.field_name = 'ambiguity_quotient'
-                     AND c.phase = 'pre' AND c.status = 'accepted'), 5) AS ambiguity,
-         CASE WHEN p.manual_boost < 0 THEN 0 WHEN p.manual_boost > 10 THEN 10
-              ELSE p.manual_boost END AS boost,
-         (SELECT COUNT(*) FROM channel_runs r WHERE r.packet_id = p.id AND r.status = 'failed'
-            AND r.channel IN ('local_generation', 'workbench_production')
-            AND NOT EXISTS (SELECT 1 FROM confirmations cf WHERE cf.entity_id = p.id
-                              AND cf.entity_type = 'failure_budget' AND cf.status = 'approved'
-                              AND julianday(cf.decided_at)
-                                  >= julianday(r.finished_at))) AS failed_runs,
-         (SELECT MAX(r.finished_at) FROM channel_runs r WHERE r.packet_id = p.id
-            AND r.status = 'failed'
-            AND r.channel IN ('local_generation', 'workbench_production')) AS last_failure_at,
-         ((julianday(CURRENT_TIMESTAMP) - julianday(p.created_at)) * 24.0) AS age_hours,
-         (SELECT MIN(CASE o.kind WHEN 'block' THEN 1 WHEN 'hold' THEN 2 WHEN 'force' THEN 3
-                                 WHEN 'pin' THEN 4 ELSE 5 END)
-            FROM queue_overrides o WHERE o.packet_ref = p.ref AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'override' AND rv.target_id = o.id) AND (o.scope = 'lineage' OR o.target_version = p.version)) AS override_rank,
-         COALESCE((SELECT SUM(o.value) FROM queue_overrides o WHERE o.packet_ref = p.ref
-                     AND o.kind = 'reorder' AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'override' AND rv.target_id = o.id) AND (o.scope = 'lineage' OR o.target_version = p.version)), 0) AS reorder_delta,
-         (SELECT COUNT(*) FROM confirmations cf WHERE cf.entity_id = p.id
-            AND cf.status = 'pending') AS pending_approvals
-  FROM packets p
-  LEFT JOIN objectives o ON o.id = p.objective_id
-  WHERE p.status IN ('ready', 'queued')
-    AND NOT EXISTS (SELECT 1 FROM packets s WHERE s.supersedes_id = p.id)
-),
-y AS (
-  SELECT x.*,
-    CASE WHEN x.override_rank = 1 THEN 'blocked'
-         WHEN x.override_rank = 2 THEN 'held'
-         WHEN x.pending_approvals > 0 THEN 'awaiting_approval'
-         WHEN x.failed_runs >= COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'queue.failure_budget'), 3) THEN 'failure_budget'
-         WHEN x.last_failure_at IS NOT NULL AND ((julianday(CURRENT_TIMESTAMP) - julianday(x.last_failure_at)) * 24.0) < (COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'queue.retry_backoff_minutes'), 30) / 60.0) THEN 'backoff'
-         WHEN x.claimed_by IS NOT NULL AND x.lease_expires_at IS NOT NULL
-              AND julianday(x.lease_expires_at) > julianday(CURRENT_TIMESTAMP) THEN 'claimed'
-         ELSE NULL END AS ineligible_reason,
-    CASE WHEN x.override_rank = 3 THEN 1
-         WHEN x.override_rank = 4 THEN 2
-         WHEN x.age_hours >= COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'queue.max_wait_hours'), 48) THEN 3
-         ELSE 4 END AS queue_class,
-    ROUND(CAST(
-        COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'priority.w_objective'), 0.30) * x.objective_priority / 10.0
-      + COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'priority.w_age'), 0.25) * (CASE WHEN x.age_hours < 0 THEN 0
-                           WHEN x.age_hours > COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'priority.max_age_hours'), 72) THEN COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'priority.max_age_hours'), 72)
-                           ELSE x.age_hours END) / COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'priority.max_age_hours'), 72)
-      + COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'priority.w_ambiguity'), 0.15) * (10 - x.ambiguity) / 10.0
-      + COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'priority.w_boost'), 0.20) * x.boost / 10.0
-      - COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'priority.w_failures'), 0.10) * (CASE WHEN x.failed_runs > COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'queue.failure_budget'), 3) THEN COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'queue.failure_budget'), 3)
-                                ELSE x.failed_runs END) / COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'queue.failure_budget'), 3)
-      + x.reorder_delta AS NUMERIC), 6) AS priority
-  FROM x
+        """CREATE VIEW v_packet_mandatory_fields AS
+WITH pk AS (SELECT p.id, p.lineage_key, p.repo_target_path FROM packets p WHERE NOT p.locked)
+SELECT pk.id AS packet_id, u.field_name, 'universal' AS reason
+FROM pk CROSS JOIN (SELECT 'requirement_alignment' AS field_name UNION ALL SELECT 'testability' AS field_name UNION ALL SELECT 'acceptance_criteria_coverage' AS field_name) u
+UNION
+SELECT pk.id, u.field_name, 'has_dependencies'
+FROM pk CROSS JOIN (SELECT 'dependency_validity' AS field_name UNION ALL SELECT 'interface_stability' AS field_name) u WHERE EXISTS (SELECT 1 FROM packet_dependencies e WHERE e.packet_id = pk.id AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = e.id))
+UNION
+SELECT pk.id, u.field_name, 'has_dependents'
+FROM pk CROSS JOIN (SELECT 'downstream_contract_clarity' AS field_name UNION ALL SELECT 'risk_assessment' AS field_name) u WHERE EXISTS (SELECT 1 FROM packet_dependencies e JOIN packets dx ON dx.id = e.packet_id WHERE e.depends_on_id = pk.lineage_key AND dx.lineage_key <> pk.lineage_key AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = e.id))
+UNION
+SELECT pk.id, u.field_name, 'charted_repo_target'
+FROM pk CROSS JOIN (SELECT 'risk_assessment' AS field_name UNION ALL SELECT 'sonar_hotspot_alignment' AS field_name) u WHERE pk.repo_target_path IS NOT NULL
+UNION
+SELECT pk.id, ps.field_name, 'preset_required'
+FROM pk CROSS JOIN eva_presets ps
+WHERE ps.phase = 'pre' AND ps.enabled AND ps.required AND ps.tier IN (1, 2)
+  AND ps.revision = (SELECT MAX(p2.revision) FROM eva_presets p2
+                     WHERE p2.field_name = ps.field_name AND p2.phase = ps.phase)""",
+        """CREATE VIEW v_packet_field_health AS
+SELECT p.id AS packet_id,
+       (SELECT COUNT(DISTINCT m.field_name) FROM v_packet_mandatory_fields m
+          LEFT JOIN v_field_status fs ON fs.packet_id = p.id AND fs.field_name = m.field_name
+           AND fs.phase = 'pre'
+         WHERE m.packet_id = p.id AND (fs.status IS NULL OR fs.status = 'pending')) AS missing_mandatory_fields,
+       (SELECT COUNT(*) FROM eva_presets ps
+          LEFT JOIN v_field_status fs ON fs.packet_id = p.id AND fs.field_name = ps.field_name
+           AND fs.phase = 'pre'
+         WHERE ps.phase = 'pre' AND ps.enabled AND ps.revision = (SELECT MAX(p2.revision) FROM eva_presets p2 WHERE p2.field_name = ps.field_name AND p2.phase = ps.phase) AND (fs.status IS NULL OR fs.status = 'pending')
+           AND ps.field_name NOT IN (SELECT m.field_name FROM v_packet_mandatory_fields m
+                                     WHERE m.packet_id = p.id)) AS missing_optional_fields,
+       -- @ORCHESTRATOR:PLACEHOLDER (M3b: wire the local-drafts trigger). Reported only: it is
+       -- not a v_eva_queue need condition until a drafting channel exists.
+       CASE WHEN p.examples_hash IS NULL THEN 1 ELSE 0 END AS missing_local_drafts,
+       COALESCE((SELECT SUM(fs.question_context_count) FROM v_field_status fs
+                 WHERE fs.packet_id = p.id AND fs.phase = 'pre'), 0) AS question_context_total,
+       (CASE WHEN (COALESCE((SELECT SUM(fs.question_weight_e4) FROM v_field_status fs WHERE fs.packet_id = p.id AND fs.phase = 'pre'), 0)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'qctx.cap_e4'), 2250) AS INTEGER)) THEN (COALESCE((SELECT SUM(fs.question_weight_e4) FROM v_field_status fs WHERE fs.packet_id = p.id AND fs.phase = 'pre'), 0)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'qctx.cap_e4'), 2250) AS INTEGER)) END) AS question_score_e4
+FROM packets p
+WHERE NOT p.locked""",
+        """CREATE VIEW v_packet_relational_centrality AS
+WITH c AS (
+  SELECT p.id AS packet_id, (SELECT COUNT(DISTINCT d1.lineage_key) FROM packets d1 JOIN packet_dependencies ed1 ON ed1.packet_id = d1.id WHERE ed1.depends_on_id = p.lineage_key AND d1.lineage_key <> p.lineage_key AND NOT d1.locked AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = ed1.id) AND NOT EXISTS (SELECT 1 FROM sealed_bundles sx JOIN packets mx ON mx.id = sx.packet_id WHERE mx.lineage_key = d1.lineage_key AND sx.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER))) AS direct_dependents, (SELECT COUNT(DISTINCT d2.lineage_key) FROM packets h JOIN packet_dependencies eh ON eh.depends_on_id = h.lineage_key JOIN packets d2 ON d2.id = eh.packet_id WHERE h.id IN (SELECT d1.id FROM packets d1 JOIN packet_dependencies ed1 ON ed1.packet_id = d1.id WHERE ed1.depends_on_id = p.lineage_key AND d1.lineage_key <> p.lineage_key AND NOT d1.locked AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = ed1.id) AND NOT EXISTS (SELECT 1 FROM sealed_bundles sx JOIN packets mx ON mx.id = sx.packet_id WHERE mx.lineage_key = d1.lineage_key AND sx.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER))) AND d2.lineage_key <> p.lineage_key AND d2.lineage_key <> h.lineage_key AND NOT d2.locked AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = eh.id) AND d2.lineage_key NOT IN (SELECT d1.lineage_key FROM packets d1 JOIN packet_dependencies ed1 ON ed1.packet_id = d1.id WHERE ed1.depends_on_id = p.lineage_key AND d1.lineage_key <> p.lineage_key AND NOT d1.locked AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = ed1.id) AND NOT EXISTS (SELECT 1 FROM sealed_bundles sx JOIN packets mx ON mx.id = sx.packet_id WHERE mx.lineage_key = d1.lineage_key AND sx.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER)))) AS two_hop_dependents,
+         (CASE WHEN COALESCE((SELECT o.priority_level FROM objectives o WHERE o.id = p.objective_id), 0) >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.critical_priority'), 8) AS INTEGER) THEN 1 ELSE 0 END) AS is_critical
+  FROM packets p WHERE NOT p.locked
 )
-SELECT y.packet_id, y.packet_ref, y.packet_version, y.status, y.created_at,
-       CASE WHEN y.ineligible_reason IS NULL THEN 1 ELSE 0 END AS eligible,
-       y.ineligible_reason, y.queue_class, y.priority, y.age_hours, y.failed_runs,
-       CASE WHEN y.ineligible_reason IS NULL THEN ROW_NUMBER() OVER (
-              PARTITION BY CASE WHEN y.ineligible_reason IS NULL THEN 0 ELSE 1 END
-              ORDER BY y.queue_class, y.priority DESC, y.created_at, y.packet_ref)
-            ELSE NULL END AS position
-FROM y""",
+SELECT c.*, (CASE WHEN (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.direct_e4'), 3000) AS INTEGER) * c.direct_dependents + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.two_hop_e4'), 1500) AS INTEGER) * c.two_hop_dependents + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.critical_e4'), 2500) AS INTEGER) * c.is_critical) < (10000) THEN (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.direct_e4'), 3000) AS INTEGER) * c.direct_dependents + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.two_hop_e4'), 1500) AS INTEGER) * c.two_hop_dependents + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.critical_e4'), 2500) AS INTEGER) * c.is_critical) ELSE (10000) END) AS centrality_e4 FROM c""",
+        """CREATE VIEW v_packet_user_feedback AS
+WITH latest AS (
+  SELECT f.packet_id, f.kind, (CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER) - CAST(strftime('%s', f.created_at) AS INTEGER)) AS age_sec, CASE f.kind WHEN 'boost' THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.boost_e4'), 1500) AS INTEGER) WHEN 'nudge' THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.nudge_e4'), 500) AS INTEGER) WHEN 'demote' THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.demote_e4'), -1500) AS INTEGER) ELSE CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.pin_e4'), 3000) AS INTEGER) END AS w
+  FROM feedback_events f
+  WHERE NOT EXISTS (SELECT 1 FROM feedback_events g WHERE g.packet_id = f.packet_id
+                    AND g.actor = f.actor AND (g.created_at > f.created_at
+                         OR (g.created_at = f.created_at AND g.id > f.id)))
+),
+decayed AS (
+  SELECT latest.packet_id,
+         CASE WHEN latest.age_sec < 86400 THEN latest.w
+              WHEN latest.age_sec < 259200 THEN (CASE WHEN (latest.w) >= 0 THEN (latest.w) / 2 ELSE -((1 - (latest.w)) / 2) END)
+              ELSE 0 END AS v
+  FROM latest
+),
+s AS (SELECT decayed.packet_id, SUM(decayed.v) AS total FROM decayed GROUP BY decayed.packet_id)
+SELECT s.packet_id,
+       CASE WHEN s.total > CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.clamp_e4'), 3000) AS INTEGER) THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.clamp_e4'), 3000) AS INTEGER) WHEN s.total < -CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.clamp_e4'), 3000) AS INTEGER) THEN -CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.clamp_e4'), 3000) AS INTEGER)
+            ELSE s.total END AS feedback_e4
+FROM s""",
+        """CREATE VIEW v_packet_queue_score AS
+WITH x AS (
+  SELECT p.id AS packet_id, p.ref AS packet_ref, p.status, p.channel, p.root_id,
+         p.lineage_key,
+         p.repo_target_path, p.created_at, p.ready_since, p.crash_count,
+         CAST(strftime('%s', COALESCE(p.ready_since, p.created_at)) AS INTEGER) AS ready_epoch,
+         CASE WHEN (CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER) - CAST(strftime('%s', COALESCE(p.ready_since, p.created_at)) AS INTEGER)) < 0 THEN 0 ELSE (CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER) - CAST(strftime('%s', COALESCE(p.ready_since, p.created_at)) AS INTEGER)) END AS wait_sec,
+         CASE WHEN p.parent_bundle_id IS NULL
+              THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.root_parent_grade_e4'), 5000) AS INTEGER)
+              ELSE COALESCE((SELECT sb.composite_grade_e4 FROM sealed_bundles sb
+                             WHERE sb.id = p.parent_bundle_id),
+                            CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.root_parent_grade_e4'), 5000) AS INTEGER)) END
+           AS parent_grade_e4,
+         COALESCE(c.centrality_e4, 0) AS centrality_e4,
+         COALESCE(fh.question_score_e4, 0) AS question_score_e4,
+         COALESCE(fh.question_context_total, 0) AS question_context_count,
+         COALESCE(fh.missing_mandatory_fields, 0) AS missing_mandatory_fields,
+         COALESCE(fh.missing_optional_fields, 0) AS missing_optional_fields,
+         COALESCE(fh.missing_local_drafts, 0) AS missing_local_drafts,
+         COALESCE(uf.feedback_e4, 0) AS feedback_e4,
+         CASE WHEN p.status = 'held' OR EXISTS (SELECT 1 FROM queue_overrides o WHERE o.packet_ref = p.ref AND o.kind IN ('block', 'hold') AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'override' AND rv.target_id = o.id) AND (o.scope = 'lineage' OR o.target_version = p.version)) THEN 1 ELSE 0 END AS is_held,
+         CASE WHEN EXISTS (SELECT 1 FROM packet_dependencies e WHERE e.packet_id = p.id AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = e.id) AND NOT EXISTS (SELECT 1 FROM packets m JOIN sealed_bundles sb ON sb.packet_id = m.id WHERE m.lineage_key = e.depends_on_id AND m.status = 'sealed' AND sb.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER))) THEN 0 ELSE 1 END AS deps_satisfied,
+         CASE WHEN EXISTS (SELECT 1 FROM route_health rh WHERE rh.channel = p.channel AND rh.unhealthy_until IS NOT NULL AND CAST(strftime('%s', rh.unhealthy_until) AS INTEGER) > CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER)) THEN 0 ELSE 1 END AS route_healthy,
+         CASE WHEN (p.cooldown_until IS NOT NULL AND CAST(strftime('%s', p.cooldown_until) AS INTEGER) > CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER)) THEN 1 ELSE 0 END AS cooling
+  FROM packets p
+  LEFT JOIN v_packet_relational_centrality c ON c.packet_id = p.id
+  LEFT JOIN v_packet_field_health fh ON fh.packet_id = p.id
+  LEFT JOIN (WITH latest AS (
+  SELECT f.packet_id, f.kind, (CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER) - CAST(strftime('%s', f.created_at) AS INTEGER)) AS age_sec, CASE f.kind WHEN 'boost' THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.boost_e4'), 1500) AS INTEGER) WHEN 'nudge' THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.nudge_e4'), 500) AS INTEGER) WHEN 'demote' THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.demote_e4'), -1500) AS INTEGER) ELSE CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.pin_e4'), 3000) AS INTEGER) END AS w
+  FROM feedback_events f
+  WHERE NOT EXISTS (SELECT 1 FROM feedback_events g WHERE g.packet_id = f.packet_id
+                    AND g.actor = f.actor AND (g.created_at > f.created_at
+                         OR (g.created_at = f.created_at AND g.id > f.id)))
+),
+decayed AS (
+  SELECT latest.packet_id,
+         CASE WHEN latest.age_sec < 86400 THEN latest.w
+              WHEN latest.age_sec < 259200 THEN (CASE WHEN (latest.w) >= 0 THEN (latest.w) / 2 ELSE -((1 - (latest.w)) / 2) END)
+              ELSE 0 END AS v
+  FROM latest
+),
+s AS (SELECT decayed.packet_id, SUM(decayed.v) AS total FROM decayed GROUP BY decayed.packet_id)
+SELECT s.packet_id,
+       CASE WHEN s.total > CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.clamp_e4'), 3000) AS INTEGER) THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.clamp_e4'), 3000) AS INTEGER) WHEN s.total < -CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.clamp_e4'), 3000) AS INTEGER) THEN -CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.clamp_e4'), 3000) AS INTEGER)
+            ELSE s.total END AS feedback_e4
+FROM s) uf ON uf.packet_id = p.id
+  WHERE NOT p.locked AND p.status IN ('draft', 'evaluating_pre', 'ready', 'queued', 'running')
+    AND NOT EXISTS (SELECT 1 FROM packets s WHERE s.supersedes_id = p.id)
+)
+SELECT x.*, (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS ageing_e4, ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) AS base_score_e4,
+       ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) - x.question_score_e4 + x.feedback_e4 + (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS score_e4,
+       ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) + 2 * x.question_score_e4 + x.feedback_e4 + (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS eva_priority_e4
+FROM x""",
+        """CREATE VIEW v_gen_queue AS
+WITH s AS (WITH x AS (
+  SELECT p.id AS packet_id, p.ref AS packet_ref, p.status, p.channel, p.root_id,
+         p.lineage_key,
+         p.repo_target_path, p.created_at, p.ready_since, p.crash_count,
+         CAST(strftime('%s', COALESCE(p.ready_since, p.created_at)) AS INTEGER) AS ready_epoch,
+         CASE WHEN (CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER) - CAST(strftime('%s', COALESCE(p.ready_since, p.created_at)) AS INTEGER)) < 0 THEN 0 ELSE (CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER) - CAST(strftime('%s', COALESCE(p.ready_since, p.created_at)) AS INTEGER)) END AS wait_sec,
+         CASE WHEN p.parent_bundle_id IS NULL
+              THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.root_parent_grade_e4'), 5000) AS INTEGER)
+              ELSE COALESCE((SELECT sb.composite_grade_e4 FROM sealed_bundles sb
+                             WHERE sb.id = p.parent_bundle_id),
+                            CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.root_parent_grade_e4'), 5000) AS INTEGER)) END
+           AS parent_grade_e4,
+         COALESCE(c.centrality_e4, 0) AS centrality_e4,
+         COALESCE(fh.question_score_e4, 0) AS question_score_e4,
+         COALESCE(fh.question_context_total, 0) AS question_context_count,
+         COALESCE(fh.missing_mandatory_fields, 0) AS missing_mandatory_fields,
+         COALESCE(fh.missing_optional_fields, 0) AS missing_optional_fields,
+         COALESCE(fh.missing_local_drafts, 0) AS missing_local_drafts,
+         COALESCE(uf.feedback_e4, 0) AS feedback_e4,
+         CASE WHEN p.status = 'held' OR EXISTS (SELECT 1 FROM queue_overrides o WHERE o.packet_ref = p.ref AND o.kind IN ('block', 'hold') AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'override' AND rv.target_id = o.id) AND (o.scope = 'lineage' OR o.target_version = p.version)) THEN 1 ELSE 0 END AS is_held,
+         CASE WHEN EXISTS (SELECT 1 FROM packet_dependencies e WHERE e.packet_id = p.id AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = e.id) AND NOT EXISTS (SELECT 1 FROM packets m JOIN sealed_bundles sb ON sb.packet_id = m.id WHERE m.lineage_key = e.depends_on_id AND m.status = 'sealed' AND sb.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER))) THEN 0 ELSE 1 END AS deps_satisfied,
+         CASE WHEN EXISTS (SELECT 1 FROM route_health rh WHERE rh.channel = p.channel AND rh.unhealthy_until IS NOT NULL AND CAST(strftime('%s', rh.unhealthy_until) AS INTEGER) > CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER)) THEN 0 ELSE 1 END AS route_healthy,
+         CASE WHEN (p.cooldown_until IS NOT NULL AND CAST(strftime('%s', p.cooldown_until) AS INTEGER) > CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER)) THEN 1 ELSE 0 END AS cooling
+  FROM packets p
+  LEFT JOIN v_packet_relational_centrality c ON c.packet_id = p.id
+  LEFT JOIN v_packet_field_health fh ON fh.packet_id = p.id
+  LEFT JOIN (WITH latest AS (
+  SELECT f.packet_id, f.kind, (CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER) - CAST(strftime('%s', f.created_at) AS INTEGER)) AS age_sec, CASE f.kind WHEN 'boost' THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.boost_e4'), 1500) AS INTEGER) WHEN 'nudge' THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.nudge_e4'), 500) AS INTEGER) WHEN 'demote' THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.demote_e4'), -1500) AS INTEGER) ELSE CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.pin_e4'), 3000) AS INTEGER) END AS w
+  FROM feedback_events f
+  WHERE NOT EXISTS (SELECT 1 FROM feedback_events g WHERE g.packet_id = f.packet_id
+                    AND g.actor = f.actor AND (g.created_at > f.created_at
+                         OR (g.created_at = f.created_at AND g.id > f.id)))
+),
+decayed AS (
+  SELECT latest.packet_id,
+         CASE WHEN latest.age_sec < 86400 THEN latest.w
+              WHEN latest.age_sec < 259200 THEN (CASE WHEN (latest.w) >= 0 THEN (latest.w) / 2 ELSE -((1 - (latest.w)) / 2) END)
+              ELSE 0 END AS v
+  FROM latest
+),
+s AS (SELECT decayed.packet_id, SUM(decayed.v) AS total FROM decayed GROUP BY decayed.packet_id)
+SELECT s.packet_id,
+       CASE WHEN s.total > CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.clamp_e4'), 3000) AS INTEGER) THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.clamp_e4'), 3000) AS INTEGER) WHEN s.total < -CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.clamp_e4'), 3000) AS INTEGER) THEN -CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.clamp_e4'), 3000) AS INTEGER)
+            ELSE s.total END AS feedback_e4
+FROM s) uf ON uf.packet_id = p.id
+  WHERE NOT p.locked AND p.status IN ('draft', 'evaluating_pre', 'ready', 'queued', 'running')
+    AND NOT EXISTS (SELECT 1 FROM packets s WHERE s.supersedes_id = p.id)
+)
+SELECT x.*, (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS ageing_e4, ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) AS base_score_e4,
+       ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) - x.question_score_e4 + x.feedback_e4 + (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS score_e4,
+       ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) + 2 * x.question_score_e4 + x.feedback_e4 + (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS eva_priority_e4
+FROM x),
+g AS (
+  SELECT s.* FROM s
+  WHERE s.status = 'running'
+     OR (s.status IN ('queued', 'ready') AND s.is_held = 0 AND s.deps_satisfied = 1
+         AND s.route_healthy = 1 AND s.cooling = 0)
+),
+d AS (SELECT COUNT(*) AS queued_depth FROM g WHERE g.status = 'queued')
+SELECT g.*, d.queued_depth,
+       CASE WHEN d.queued_depth < CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'admission.low_depth'), 3) AS INTEGER) THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'admission.low_floor_e4'), 2500) AS INTEGER) ELSE CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'admission.floor_e4'), 3500) AS INTEGER) END AS floor_e4,
+       CASE WHEN g.status = 'running' THEN 1
+            WHEN g.wait_sec >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'admission.bypass_wait_sec'), 7200) AS INTEGER) THEN 1
+            WHEN g.score_e4 >= CASE WHEN d.queued_depth < CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'admission.low_depth'), 3) AS INTEGER) THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'admission.low_floor_e4'), 2500) AS INTEGER) ELSE CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'admission.floor_e4'), 3500) AS INTEGER) END
+            THEN 1 ELSE 0 END AS admissible,
+       CASE WHEN g.status = 'running' THEN 0
+            ELSE ROW_NUMBER() OVER (
+              PARTITION BY CASE WHEN g.status = 'running' THEN 1 ELSE 0 END
+              ORDER BY CASE WHEN g.status = 'queued' THEN 0 ELSE 1 END,
+                       g.score_e4 DESC, g.ready_epoch ASC, g.packet_id ASC)
+       END AS gen_position
+FROM g CROSS JOIN d""",
+        """CREATE VIEW v_eva_queue AS
+WITH s AS (WITH x AS (
+  SELECT p.id AS packet_id, p.ref AS packet_ref, p.status, p.channel, p.root_id,
+         p.lineage_key,
+         p.repo_target_path, p.created_at, p.ready_since, p.crash_count,
+         CAST(strftime('%s', COALESCE(p.ready_since, p.created_at)) AS INTEGER) AS ready_epoch,
+         CASE WHEN (CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER) - CAST(strftime('%s', COALESCE(p.ready_since, p.created_at)) AS INTEGER)) < 0 THEN 0 ELSE (CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER) - CAST(strftime('%s', COALESCE(p.ready_since, p.created_at)) AS INTEGER)) END AS wait_sec,
+         CASE WHEN p.parent_bundle_id IS NULL
+              THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.root_parent_grade_e4'), 5000) AS INTEGER)
+              ELSE COALESCE((SELECT sb.composite_grade_e4 FROM sealed_bundles sb
+                             WHERE sb.id = p.parent_bundle_id),
+                            CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.root_parent_grade_e4'), 5000) AS INTEGER)) END
+           AS parent_grade_e4,
+         COALESCE(c.centrality_e4, 0) AS centrality_e4,
+         COALESCE(fh.question_score_e4, 0) AS question_score_e4,
+         COALESCE(fh.question_context_total, 0) AS question_context_count,
+         COALESCE(fh.missing_mandatory_fields, 0) AS missing_mandatory_fields,
+         COALESCE(fh.missing_optional_fields, 0) AS missing_optional_fields,
+         COALESCE(fh.missing_local_drafts, 0) AS missing_local_drafts,
+         COALESCE(uf.feedback_e4, 0) AS feedback_e4,
+         CASE WHEN p.status = 'held' OR EXISTS (SELECT 1 FROM queue_overrides o WHERE o.packet_ref = p.ref AND o.kind IN ('block', 'hold') AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'override' AND rv.target_id = o.id) AND (o.scope = 'lineage' OR o.target_version = p.version)) THEN 1 ELSE 0 END AS is_held,
+         CASE WHEN EXISTS (SELECT 1 FROM packet_dependencies e WHERE e.packet_id = p.id AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = e.id) AND NOT EXISTS (SELECT 1 FROM packets m JOIN sealed_bundles sb ON sb.packet_id = m.id WHERE m.lineage_key = e.depends_on_id AND m.status = 'sealed' AND sb.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER))) THEN 0 ELSE 1 END AS deps_satisfied,
+         CASE WHEN EXISTS (SELECT 1 FROM route_health rh WHERE rh.channel = p.channel AND rh.unhealthy_until IS NOT NULL AND CAST(strftime('%s', rh.unhealthy_until) AS INTEGER) > CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER)) THEN 0 ELSE 1 END AS route_healthy,
+         CASE WHEN (p.cooldown_until IS NOT NULL AND CAST(strftime('%s', p.cooldown_until) AS INTEGER) > CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER)) THEN 1 ELSE 0 END AS cooling
+  FROM packets p
+  LEFT JOIN v_packet_relational_centrality c ON c.packet_id = p.id
+  LEFT JOIN v_packet_field_health fh ON fh.packet_id = p.id
+  LEFT JOIN (WITH latest AS (
+  SELECT f.packet_id, f.kind, (CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER) - CAST(strftime('%s', f.created_at) AS INTEGER)) AS age_sec, CASE f.kind WHEN 'boost' THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.boost_e4'), 1500) AS INTEGER) WHEN 'nudge' THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.nudge_e4'), 500) AS INTEGER) WHEN 'demote' THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.demote_e4'), -1500) AS INTEGER) ELSE CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.pin_e4'), 3000) AS INTEGER) END AS w
+  FROM feedback_events f
+  WHERE NOT EXISTS (SELECT 1 FROM feedback_events g WHERE g.packet_id = f.packet_id
+                    AND g.actor = f.actor AND (g.created_at > f.created_at
+                         OR (g.created_at = f.created_at AND g.id > f.id)))
+),
+decayed AS (
+  SELECT latest.packet_id,
+         CASE WHEN latest.age_sec < 86400 THEN latest.w
+              WHEN latest.age_sec < 259200 THEN (CASE WHEN (latest.w) >= 0 THEN (latest.w) / 2 ELSE -((1 - (latest.w)) / 2) END)
+              ELSE 0 END AS v
+  FROM latest
+),
+s AS (SELECT decayed.packet_id, SUM(decayed.v) AS total FROM decayed GROUP BY decayed.packet_id)
+SELECT s.packet_id,
+       CASE WHEN s.total > CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.clamp_e4'), 3000) AS INTEGER) THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.clamp_e4'), 3000) AS INTEGER) WHEN s.total < -CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.clamp_e4'), 3000) AS INTEGER) THEN -CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.clamp_e4'), 3000) AS INTEGER)
+            ELSE s.total END AS feedback_e4
+FROM s) uf ON uf.packet_id = p.id
+  WHERE NOT p.locked AND p.status IN ('draft', 'evaluating_pre', 'ready', 'queued', 'running')
+    AND NOT EXISTS (SELECT 1 FROM packets s WHERE s.supersedes_id = p.id)
+)
+SELECT x.*, (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS ageing_e4, ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) AS base_score_e4,
+       ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) - x.question_score_e4 + x.feedback_e4 + (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS score_e4,
+       ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) + 2 * x.question_score_e4 + x.feedback_e4 + (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS eva_priority_e4
+FROM x),
+g AS (WITH s AS (WITH x AS (
+  SELECT p.id AS packet_id, p.ref AS packet_ref, p.status, p.channel, p.root_id,
+         p.lineage_key,
+         p.repo_target_path, p.created_at, p.ready_since, p.crash_count,
+         CAST(strftime('%s', COALESCE(p.ready_since, p.created_at)) AS INTEGER) AS ready_epoch,
+         CASE WHEN (CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER) - CAST(strftime('%s', COALESCE(p.ready_since, p.created_at)) AS INTEGER)) < 0 THEN 0 ELSE (CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER) - CAST(strftime('%s', COALESCE(p.ready_since, p.created_at)) AS INTEGER)) END AS wait_sec,
+         CASE WHEN p.parent_bundle_id IS NULL
+              THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.root_parent_grade_e4'), 5000) AS INTEGER)
+              ELSE COALESCE((SELECT sb.composite_grade_e4 FROM sealed_bundles sb
+                             WHERE sb.id = p.parent_bundle_id),
+                            CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.root_parent_grade_e4'), 5000) AS INTEGER)) END
+           AS parent_grade_e4,
+         COALESCE(c.centrality_e4, 0) AS centrality_e4,
+         COALESCE(fh.question_score_e4, 0) AS question_score_e4,
+         COALESCE(fh.question_context_total, 0) AS question_context_count,
+         COALESCE(fh.missing_mandatory_fields, 0) AS missing_mandatory_fields,
+         COALESCE(fh.missing_optional_fields, 0) AS missing_optional_fields,
+         COALESCE(fh.missing_local_drafts, 0) AS missing_local_drafts,
+         COALESCE(uf.feedback_e4, 0) AS feedback_e4,
+         CASE WHEN p.status = 'held' OR EXISTS (SELECT 1 FROM queue_overrides o WHERE o.packet_ref = p.ref AND o.kind IN ('block', 'hold') AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'override' AND rv.target_id = o.id) AND (o.scope = 'lineage' OR o.target_version = p.version)) THEN 1 ELSE 0 END AS is_held,
+         CASE WHEN EXISTS (SELECT 1 FROM packet_dependencies e WHERE e.packet_id = p.id AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = e.id) AND NOT EXISTS (SELECT 1 FROM packets m JOIN sealed_bundles sb ON sb.packet_id = m.id WHERE m.lineage_key = e.depends_on_id AND m.status = 'sealed' AND sb.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER))) THEN 0 ELSE 1 END AS deps_satisfied,
+         CASE WHEN EXISTS (SELECT 1 FROM route_health rh WHERE rh.channel = p.channel AND rh.unhealthy_until IS NOT NULL AND CAST(strftime('%s', rh.unhealthy_until) AS INTEGER) > CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER)) THEN 0 ELSE 1 END AS route_healthy,
+         CASE WHEN (p.cooldown_until IS NOT NULL AND CAST(strftime('%s', p.cooldown_until) AS INTEGER) > CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER)) THEN 1 ELSE 0 END AS cooling
+  FROM packets p
+  LEFT JOIN v_packet_relational_centrality c ON c.packet_id = p.id
+  LEFT JOIN v_packet_field_health fh ON fh.packet_id = p.id
+  LEFT JOIN (WITH latest AS (
+  SELECT f.packet_id, f.kind, (CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER) - CAST(strftime('%s', f.created_at) AS INTEGER)) AS age_sec, CASE f.kind WHEN 'boost' THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.boost_e4'), 1500) AS INTEGER) WHEN 'nudge' THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.nudge_e4'), 500) AS INTEGER) WHEN 'demote' THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.demote_e4'), -1500) AS INTEGER) ELSE CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.pin_e4'), 3000) AS INTEGER) END AS w
+  FROM feedback_events f
+  WHERE NOT EXISTS (SELECT 1 FROM feedback_events g WHERE g.packet_id = f.packet_id
+                    AND g.actor = f.actor AND (g.created_at > f.created_at
+                         OR (g.created_at = f.created_at AND g.id > f.id)))
+),
+decayed AS (
+  SELECT latest.packet_id,
+         CASE WHEN latest.age_sec < 86400 THEN latest.w
+              WHEN latest.age_sec < 259200 THEN (CASE WHEN (latest.w) >= 0 THEN (latest.w) / 2 ELSE -((1 - (latest.w)) / 2) END)
+              ELSE 0 END AS v
+  FROM latest
+),
+s AS (SELECT decayed.packet_id, SUM(decayed.v) AS total FROM decayed GROUP BY decayed.packet_id)
+SELECT s.packet_id,
+       CASE WHEN s.total > CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.clamp_e4'), 3000) AS INTEGER) THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.clamp_e4'), 3000) AS INTEGER) WHEN s.total < -CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.clamp_e4'), 3000) AS INTEGER) THEN -CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.clamp_e4'), 3000) AS INTEGER)
+            ELSE s.total END AS feedback_e4
+FROM s) uf ON uf.packet_id = p.id
+  WHERE NOT p.locked AND p.status IN ('draft', 'evaluating_pre', 'ready', 'queued', 'running')
+    AND NOT EXISTS (SELECT 1 FROM packets s WHERE s.supersedes_id = p.id)
+)
+SELECT x.*, (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS ageing_e4, ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) AS base_score_e4,
+       ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) - x.question_score_e4 + x.feedback_e4 + (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS score_e4,
+       ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) + 2 * x.question_score_e4 + x.feedback_e4 + (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS eva_priority_e4
+FROM x),
+g AS (
+  SELECT s.* FROM s
+  WHERE s.status = 'running'
+     OR (s.status IN ('queued', 'ready') AND s.is_held = 0 AND s.deps_satisfied = 1
+         AND s.route_healthy = 1 AND s.cooling = 0)
+),
+d AS (SELECT COUNT(*) AS queued_depth FROM g WHERE g.status = 'queued')
+SELECT g.*, d.queued_depth,
+       CASE WHEN d.queued_depth < CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'admission.low_depth'), 3) AS INTEGER) THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'admission.low_floor_e4'), 2500) AS INTEGER) ELSE CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'admission.floor_e4'), 3500) AS INTEGER) END AS floor_e4,
+       CASE WHEN g.status = 'running' THEN 1
+            WHEN g.wait_sec >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'admission.bypass_wait_sec'), 7200) AS INTEGER) THEN 1
+            WHEN g.score_e4 >= CASE WHEN d.queued_depth < CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'admission.low_depth'), 3) AS INTEGER) THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'admission.low_floor_e4'), 2500) AS INTEGER) ELSE CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'admission.floor_e4'), 3500) AS INTEGER) END
+            THEN 1 ELSE 0 END AS admissible,
+       CASE WHEN g.status = 'running' THEN 0
+            ELSE ROW_NUMBER() OVER (
+              PARTITION BY CASE WHEN g.status = 'running' THEN 1 ELSE 0 END
+              ORDER BY CASE WHEN g.status = 'queued' THEN 0 ELSE 1 END,
+                       g.score_e4 DESC, g.ready_epoch ASC, g.packet_id ASC)
+       END AS gen_position
+FROM g CROSS JOIN d),
+latest AS (SELECT MAX(q.epoch_id) AS epoch_id FROM queue_epoch_snapshot q)
+SELECT s.packet_id, s.packet_ref, s.status, s.missing_mandatory_fields,
+       s.missing_optional_fields, s.missing_local_drafts, s.question_context_count,
+       s.question_score_e4, s.score_e4, s.eva_priority_e4, s.ready_epoch
+FROM s
+WHERE s.status IN ('draft', 'evaluating_pre', 'ready', 'queued')
+  AND (s.missing_mandatory_fields > 0 OR s.missing_optional_fields > 0
+       OR s.question_context_count > 0)
+  AND (s.status IN ('draft', 'evaluating_pre')
+       OR s.packet_id IN (SELECT g.packet_id FROM g))
+  AND NOT EXISTS (SELECT 1 FROM queue_epoch_snapshot q JOIN latest ON q.epoch_id = latest.epoch_id
+                  WHERE q.packet_id = s.packet_id AND q.is_locked_out)""",
         """CREATE VIEW v_run_attempts AS
 SELECT r.id AS generation_run_id, r.packet_id, r.packet_version, r.state, r.channel,
        r.fencing_token, r.attempts, r.max_attempts, c.id AS channel_run_id, c.run_id,
@@ -1399,6 +1926,12 @@ LEFT JOIN channel_run_outcomes o ON o.channel_run_id = c.id""",
 )""",
         """CREATE INDEX ix_confirmations_status ON confirmations (status)""",
         """CREATE UNIQUE INDEX uq_confirmations_pending_entity ON confirmations (stage, entity_type, entity_id) WHERE status = 'pending'""",
+        """CREATE TABLE content_blobs (
+	hash VARCHAR(64) NOT NULL,
+	body TEXT,
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	CONSTRAINT pk_content_blobs PRIMARY KEY (hash)
+)""",
         """CREATE TABLE control_state (
 	id INTEGER NOT NULL,
 	paused BOOLEAN NOT NULL,
@@ -1524,6 +2057,8 @@ LEFT JOIN channel_run_outcomes o ON o.channel_run_id = c.id""",
 	source_path TEXT,
 	source_sha256 VARCHAR(64),
 	tree_contract VARCHAR(64),
+	content_revision INTEGER DEFAULT 0 NOT NULL,
+	last_producer VARCHAR(64) DEFAULT 'kernel' NOT NULL,
 	version INTEGER NOT NULL,
 	supersedes_id VARCHAR(36),
 	locked BOOLEAN NOT NULL,
@@ -1535,6 +2070,21 @@ LEFT JOIN channel_run_outcomes o ON o.channel_run_id = c.id""",
 	CONSTRAINT fk_projects_supersedes_id_projects FOREIGN KEY(supersedes_id) REFERENCES projects (id)
 )""",
         """CREATE INDEX ix_projects_ref ON projects (ref)""",
+        """CREATE TABLE raw_revision_outbox (
+	id SERIAL NOT NULL,
+	tx_id VARCHAR(64) NOT NULL,
+	entity_type VARCHAR(16) NOT NULL,
+	entity_id VARCHAR(36) NOT NULL,
+	field_name VARCHAR(64) NOT NULL,
+	old_value TEXT,
+	new_value TEXT,
+	producer VARCHAR(64) NOT NULL,
+	content_revision INTEGER NOT NULL,
+	captured_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	CONSTRAINT pk_raw_revision_outbox PRIMARY KEY (id)
+)""",
+        """CREATE INDEX ix_raw_revision_outbox_entity_id ON raw_revision_outbox (entity_id)""",
+        """CREATE INDEX ix_raw_revision_outbox_entity_type ON raw_revision_outbox (entity_type)""",
         """CREATE TABLE ref_counters (
 	name VARCHAR(64) NOT NULL,
 	value INTEGER NOT NULL,
@@ -1550,6 +2100,13 @@ LEFT JOIN channel_run_outcomes o ON o.channel_run_id = c.id""",
 	CONSTRAINT pk_revocations PRIMARY KEY (id),
 	CONSTRAINT uq_revocations_target_type UNIQUE (target_type, target_id),
 	CONSTRAINT ck_revocations_target_type CHECK (target_type IN ('waiver', 'override', 'dependency'))
+)""",
+        """CREATE TABLE route_health (
+	channel VARCHAR(32) NOT NULL,
+	unhealthy_until TIMESTAMP WITH TIME ZONE,
+	crashes INTEGER NOT NULL,
+	updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	CONSTRAINT pk_route_health PRIMARY KEY (channel)
 )""",
         """CREATE TABLE settings (
 	key VARCHAR(128) NOT NULL,
@@ -1578,6 +2135,24 @@ LEFT JOIN channel_run_outcomes o ON o.channel_run_id = c.id""",
 	CONSTRAINT ck_thresholds_thresholdoperator CHECK (operator IN ('>=', '>', '<=', '<', '=', '!=', 'has_tag', 'status_is')),
 	CONSTRAINT ck_thresholds_thresholdaction CHECK (action IN ('require_approval', 'split', 'route_workbench_production', 'route_local_generation'))
 )""",
+        """CREATE TABLE field_revisions (
+	id VARCHAR(36) NOT NULL,
+	entity_type VARCHAR(16) NOT NULL,
+	entity_id VARCHAR(36) NOT NULL,
+	field_name VARCHAR(64) NOT NULL,
+	old_hash VARCHAR(64) NOT NULL,
+	new_hash VARCHAR(64) NOT NULL,
+	based_on_hash VARCHAR(64),
+	producer VARCHAR(64) NOT NULL,
+	content_revision INTEGER NOT NULL,
+	revision_group_id VARCHAR(64) NOT NULL,
+	manifest_hash VARCHAR(64) NOT NULL,
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	CONSTRAINT pk_field_revisions PRIMARY KEY (id),
+	CONSTRAINT fk_field_revisions_old_hash_content_blobs FOREIGN KEY(old_hash) REFERENCES content_blobs (hash),
+	CONSTRAINT fk_field_revisions_new_hash_content_blobs FOREIGN KEY(new_hash) REFERENCES content_blobs (hash)
+)""",
+        """CREATE INDEX ix_field_revisions_entity_id ON field_revisions (entity_id)""",
         """CREATE TABLE objectives (
 	id VARCHAR(36) NOT NULL,
 	ref VARCHAR(16) NOT NULL,
@@ -1589,6 +2164,8 @@ LEFT JOIN channel_run_outcomes o ON o.channel_run_id = c.id""",
 	tags JSON NOT NULL,
 	scores JSON NOT NULL,
 	source VARCHAR(64) NOT NULL,
+	content_revision INTEGER DEFAULT 0 NOT NULL,
+	last_producer VARCHAR(64) DEFAULT 'kernel' NOT NULL,
 	version INTEGER NOT NULL,
 	supersedes_id VARCHAR(36),
 	locked BOOLEAN NOT NULL,
@@ -1638,6 +2215,17 @@ LEFT JOIN channel_run_outcomes o ON o.channel_run_id = c.id""",
 	fencing_token INTEGER DEFAULT 0 NOT NULL,
 	active_run_id VARCHAR(36),
 	recovery_pending BOOLEAN DEFAULT false NOT NULL,
+	content_revision INTEGER DEFAULT 0 NOT NULL,
+	last_producer VARCHAR(64) DEFAULT 'kernel' NOT NULL,
+	crash_count INTEGER DEFAULT 0 NOT NULL,
+	cooldown_until TIMESTAMP WITH TIME ZONE,
+	hold_reason VARCHAR(32),
+	ready_since TIMESTAMP WITH TIME ZONE,
+	lineage_depth INTEGER DEFAULT 0 NOT NULL,
+	lineage_key VARCHAR(36) NOT NULL,
+	parent_bundle_id VARCHAR(36),
+	parent_bundle_hash VARCHAR(64),
+	examples_hash VARCHAR(64),
 	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
 	updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
 	CONSTRAINT pk_packets PRIMARY KEY (id),
@@ -1646,18 +2234,20 @@ LEFT JOIN channel_run_outcomes o ON o.channel_run_id = c.id""",
 	CONSTRAINT fk_packets_objective_id_objectives FOREIGN KEY(objective_id) REFERENCES objectives (id),
 	CONSTRAINT ck_packets_packetkind CHECK (packet_kind IN ('task', 'content_eval')),
 	CONSTRAINT ck_packets_channel CHECK (channel IN ('quickfire_evaluation', 'local_generation', 'workbench_production')),
-	CONSTRAINT ck_packets_packetstatus CHECK (status IN ('draft', 'evaluating_pre', 'ready', 'queued', 'running', 'evaluating_post', 'completed', 'needs_review', 'held', 'blocked', 'failed', 'awaiting_confirmation', 'waiting_for_children', 'archived', 'closed_unverified', 'evaluating', 'in_progress', 'processed')),
+	CONSTRAINT ck_packets_packetstatus CHECK (status IN ('draft', 'evaluating_pre', 'ready', 'queued', 'running', 'evaluating_post', 'completed', 'needs_review', 'held', 'blocked', 'failed', 'awaiting_confirmation', 'waiting_for_children', 'archived', 'closed_unverified', 'sealed', 'evaluating', 'in_progress', 'processed')),
 	CONSTRAINT uq_packets_supersedes_id UNIQUE (supersedes_id),
 	CONSTRAINT fk_packets_supersedes_id_packets FOREIGN KEY(supersedes_id) REFERENCES packets (id),
 	CONSTRAINT fk_packets_parent_id_packets FOREIGN KEY(parent_id) REFERENCES packets (id),
 	CONSTRAINT fk_packets_root_id_packets FOREIGN KEY(root_id) REFERENCES packets (id)
 )""",
+        """CREATE INDEX ix_packets_lineage_key ON packets (lineage_key)""",
         """CREATE INDEX ix_packets_objective_id ON packets (objective_id)""",
         """CREATE INDEX ix_packets_parent_id ON packets (parent_id)""",
         """CREATE INDEX ix_packets_project_id ON packets (project_id)""",
         """CREATE INDEX ix_packets_ref ON packets (ref)""",
         """CREATE INDEX ix_packets_root_id ON packets (root_id)""",
         """CREATE INDEX ix_packets_status ON packets (status)""",
+        """CREATE UNIQUE INDEX uq_packets_lineage_step ON packets (objective_id, lineage_key, lineage_depth) WHERE supersedes_id IS NULL""",
         """CREATE TABLE branch_applications (
 	id VARCHAR(36) NOT NULL,
 	packet_id VARCHAR(36) NOT NULL,
@@ -1697,6 +2287,18 @@ LEFT JOIN channel_run_outcomes o ON o.channel_run_id = c.id""",
 	CONSTRAINT ck_evaluation_cycles_cyclestate CHECK (state IN ('open', 'complete', 'superseded', 'legacy'))
 )""",
         """CREATE INDEX ix_evaluation_cycles_packet_id ON evaluation_cycles (packet_id)""",
+        """CREATE TABLE feedback_events (
+	id VARCHAR(36) NOT NULL,
+	packet_id VARCHAR(36) NOT NULL,
+	actor VARCHAR(64) NOT NULL,
+	kind VARCHAR(16) NOT NULL,
+	reason TEXT NOT NULL,
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	CONSTRAINT pk_feedback_events PRIMARY KEY (id),
+	CONSTRAINT ck_feedback_events_kind CHECK (kind IN ('boost', 'nudge', 'demote', 'pin')),
+	CONSTRAINT fk_feedback_events_packet_id_packets FOREIGN KEY(packet_id) REFERENCES packets (id)
+)""",
+        """CREATE INDEX ix_feedback_events_packet_id ON feedback_events (packet_id)""",
         """CREATE TABLE generation_runs (
 	id VARCHAR(36) NOT NULL,
 	packet_id VARCHAR(36) NOT NULL,
@@ -1726,9 +2328,10 @@ LEFT JOIN channel_run_outcomes o ON o.channel_run_id = c.id""",
 	charged BOOLEAN DEFAULT false NOT NULL,
 	stale_reason TEXT,
 	finished_at TIMESTAMP WITH TIME ZONE,
+	claim_content_revision INTEGER,
 	CONSTRAINT pk_generation_runs PRIMARY KEY (id),
 	CONSTRAINT fk_generation_runs_packet_id_packets FOREIGN KEY(packet_id) REFERENCES packets (id),
-	CONSTRAINT ck_generation_runs_generationrunstate CHECK (state IN ('planned', 'dispatched', 'awaiting_result', 'validating', 'accepted', 'failed', 'stale', 'awaiting_confirmation', 'claimed', 'succeeded', 'abandoned')),
+	CONSTRAINT ck_generation_runs_generationrunstate CHECK (state IN ('planned', 'dispatched', 'awaiting_result', 'validating', 'accepted', 'failed', 'stale', 'awaiting_confirmation', 'crashed', 'claimed', 'succeeded', 'abandoned')),
 	CONSTRAINT ck_generation_runs_channel CHECK (channel IN ('quickfire_evaluation', 'local_generation', 'workbench_production'))
 )""",
         """CREATE INDEX ix_generation_runs_packet_id ON generation_runs (packet_id)""",
@@ -1756,6 +2359,21 @@ LEFT JOIN channel_run_outcomes o ON o.channel_run_id = c.id""",
 	CONSTRAINT fk_queue_admissions_packet_id_packets FOREIGN KEY(packet_id) REFERENCES packets (id)
 )""",
         """CREATE INDEX ix_queue_admissions_packet_id ON queue_admissions (packet_id)""",
+        """CREATE TABLE queue_epoch_snapshot (
+	id VARCHAR(36) NOT NULL,
+	epoch_id INTEGER NOT NULL,
+	packet_id VARCHAR(36) NOT NULL,
+	status VARCHAR(32) NOT NULL,
+	queue_pos INTEGER,
+	is_locked_out BOOLEAN NOT NULL,
+	score_e4 INTEGER,
+	cause VARCHAR(32) NOT NULL,
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	CONSTRAINT pk_queue_epoch_snapshot PRIMARY KEY (id),
+	CONSTRAINT uq_queue_epoch_snapshot_epoch_id UNIQUE (epoch_id, packet_id),
+	CONSTRAINT fk_queue_epoch_snapshot_packet_id_packets FOREIGN KEY(packet_id) REFERENCES packets (id)
+)""",
+        """CREATE INDEX ix_queue_epoch_snapshot_epoch_id ON queue_epoch_snapshot (epoch_id)""",
         """CREATE TABLE queue_overrides (
 	id VARCHAR(36) NOT NULL,
 	packet_id VARCHAR(36) NOT NULL,
@@ -1806,6 +2424,33 @@ LEFT JOIN channel_run_outcomes o ON o.channel_run_id = c.id""",
 	CONSTRAINT fk_budget_reservations_generation_run_id_generation_runs FOREIGN KEY(generation_run_id) REFERENCES generation_runs (id)
 )""",
         """CREATE INDEX ix_budget_reservations_operation_id ON budget_reservations (operation_id)""",
+        """CREATE TABLE crash_events (
+	id VARCHAR(36) NOT NULL,
+	packet_id VARCHAR(36) NOT NULL,
+	run_id VARCHAR(36) NOT NULL,
+	channel VARCHAR(32),
+	reason TEXT NOT NULL,
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	CONSTRAINT pk_crash_events PRIMARY KEY (id),
+	CONSTRAINT fk_crash_events_packet_id_packets FOREIGN KEY(packet_id) REFERENCES packets (id),
+	CONSTRAINT fk_crash_events_run_id_generation_runs FOREIGN KEY(run_id) REFERENCES generation_runs (id)
+)""",
+        """CREATE INDEX ix_crash_events_packet_id ON crash_events (packet_id)""",
+        """CREATE TABLE eva_discard_log (
+	id VARCHAR(36) NOT NULL,
+	packet_id VARCHAR(36) NOT NULL,
+	cycle_id VARCHAR(36),
+	epoch_id INTEGER,
+	expected_content_revision INTEGER NOT NULL,
+	actual_content_revision INTEGER NOT NULL,
+	locked_out BOOLEAN NOT NULL,
+	reason TEXT NOT NULL,
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	CONSTRAINT pk_eva_discard_log PRIMARY KEY (id),
+	CONSTRAINT fk_eva_discard_log_packet_id_packets FOREIGN KEY(packet_id) REFERENCES packets (id),
+	CONSTRAINT fk_eva_discard_log_cycle_id_evaluation_cycles FOREIGN KEY(cycle_id) REFERENCES evaluation_cycles (id)
+)""",
+        """CREATE INDEX ix_eva_discard_log_packet_id ON eva_discard_log (packet_id)""",
         """CREATE TABLE eva_packets (
 	id VARCHAR(36) NOT NULL,
 	packet_id VARCHAR(36) NOT NULL,
@@ -1843,6 +2488,23 @@ LEFT JOIN channel_run_outcomes o ON o.channel_run_id = c.id""",
         """CREATE INDEX ix_eva_packets_content_address ON eva_packets (content_address)""",
         """CREATE INDEX ix_eva_packets_cycle_id ON eva_packets (cycle_id)""",
         """CREATE INDEX ix_eva_packets_packet_id ON eva_packets (packet_id)""",
+        """CREATE TABLE sealed_bundles (
+	id VARCHAR(36) NOT NULL,
+	packet_id VARCHAR(36) NOT NULL,
+	run_id VARCHAR(36),
+	claim_content_revision INTEGER NOT NULL,
+	snapshot_hash VARCHAR(64) NOT NULL,
+	bundle_hash VARCHAR(64) NOT NULL,
+	composite_grade_e4 INTEGER NOT NULL,
+	artifact_hash VARCHAR(64),
+	output_ref VARCHAR(200),
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	CONSTRAINT pk_sealed_bundles PRIMARY KEY (id),
+	CONSTRAINT uq_sealed_bundles_packet_id UNIQUE (packet_id),
+	CONSTRAINT fk_sealed_bundles_packet_id_packets FOREIGN KEY(packet_id) REFERENCES packets (id),
+	CONSTRAINT fk_sealed_bundles_run_id_generation_runs FOREIGN KEY(run_id) REFERENCES generation_runs (id),
+	CONSTRAINT fk_sealed_bundles_snapshot_hash_content_blobs FOREIGN KEY(snapshot_hash) REFERENCES content_blobs (hash)
+)""",
         """CREATE TABLE budget_reconciliations (
 	id VARCHAR(36) NOT NULL,
 	reservation_id VARCHAR(36) NOT NULL,
@@ -1891,6 +2553,29 @@ LEFT JOIN channel_run_outcomes o ON o.channel_run_id = c.id""",
         """CREATE INDEX ix_channel_runs_generation_run_id ON channel_runs (generation_run_id)""",
         """CREATE INDEX ix_channel_runs_packet_id ON channel_runs (packet_id)""",
         """CREATE UNIQUE INDEX uq_channel_runs_operation_id ON channel_runs (operation_id)""",
+        """CREATE TABLE eva_context_links (
+	id VARCHAR(36) NOT NULL,
+	eva_packet_id VARCHAR(36) NOT NULL,
+	packet_id VARCHAR(36) NOT NULL,
+	field_name VARCHAR(64) NOT NULL,
+	source_type VARCHAR(16) NOT NULL,
+	source_id VARCHAR(64) NOT NULL,
+	source_ref VARCHAR(64),
+	source_hash VARCHAR(64) NOT NULL,
+	source_revision INTEGER NOT NULL,
+	link_strength VARCHAR(16) NOT NULL,
+	link_reason VARCHAR(16) NOT NULL,
+	quote TEXT,
+	is_questioned BOOLEAN DEFAULT false NOT NULL,
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	CONSTRAINT pk_eva_context_links PRIMARY KEY (id),
+	CONSTRAINT ck_eva_context_links_strength CHECK (link_strength IN ('direct', 'peripheral')),
+	CONSTRAINT ck_eva_context_links_source_type CHECK (source_type IN ('project', 'objective', 'packet', 'definition')),
+	CONSTRAINT fk_eva_context_links_eva_packet_id_eva_packets FOREIGN KEY(eva_packet_id) REFERENCES eva_packets (id),
+	CONSTRAINT fk_eva_context_links_packet_id_packets FOREIGN KEY(packet_id) REFERENCES packets (id)
+)""",
+        """CREATE INDEX ix_eva_context_links_eva_packet_id ON eva_context_links (eva_packet_id)""",
+        """CREATE INDEX ix_eva_context_links_packet_id ON eva_context_links (packet_id)""",
         """CREATE TABLE evaluation_passes (
 	id VARCHAR(36) NOT NULL,
 	packet_id VARCHAR(36) NOT NULL,
@@ -1991,6 +2676,8 @@ LEFT JOIN channel_run_outcomes o ON o.channel_run_id = c.id""",
         """CREATE INDEX ix_quality_reports_artifact_id ON quality_reports (artifact_id)""",
         """CREATE INDEX ix_quality_reports_packet_id ON quality_reports (packet_id)""",
         """ALTER TABLE generation_runs ADD CONSTRAINT fk_generation_runs_channel_run_id_channel_runs FOREIGN KEY(channel_run_id) REFERENCES channel_runs (id)""",
+        """ALTER TABLE packets ADD CONSTRAINT fk_packets_examples_hash_content_blobs FOREIGN KEY(examples_hash) REFERENCES content_blobs (hash)""",
+        """ALTER TABLE packets ADD CONSTRAINT fk_packets_parent_bundle_id_sealed_bundles FOREIGN KEY(parent_bundle_id) REFERENCES sealed_bundles (id)""",
         """CREATE OR REPLACE FUNCTION orch_locked_guard() RETURNS trigger LANGUAGE plpgsql AS $fn$
 BEGIN
   IF TG_OP IN ('UPDATE', 'DELETE') THEN
@@ -2004,9 +2691,9 @@ END;
 $fn$""",
         """CREATE OR REPLACE FUNCTION orch_packets_completion_guard() RETURNS trigger LANGUAGE plpgsql AS $fn$
 BEGIN
-  IF NEW.status IN ('archived', 'completed')
+  IF NEW.status IN ('archived', 'completed', 'sealed')
      AND (NOT NEW.locked OR NEW.completed_at IS NULL) THEN
-    RAISE EXCEPTION 'orchestrator-immutable: completed/archived packets must be locked with completed_at set' USING ERRCODE = '23001';
+    RAISE EXCEPTION 'orchestrator-immutable: completed/archived/sealed packets must be locked with completed_at set' USING ERRCODE = '23001';
   END IF;
   IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
   RETURN NEW;
@@ -2152,7 +2839,7 @@ BEGIN
     RETURN OLD;
   END IF;
   IF TG_OP = 'UPDATE' THEN
-    IF NEW.ref IS DISTINCT FROM OLD.ref OR NEW.version IS DISTINCT FROM OLD.version OR NEW.supersedes_id IS DISTINCT FROM OLD.supersedes_id OR NEW.project_id IS DISTINCT FROM OLD.project_id OR NEW.objective_id IS DISTINCT FROM OLD.objective_id OR NEW.parent_id IS DISTINCT FROM OLD.parent_id OR NEW.root_id IS DISTINCT FROM OLD.root_id THEN
+    IF NEW.ref IS DISTINCT FROM OLD.ref OR NEW.version IS DISTINCT FROM OLD.version OR NEW.supersedes_id IS DISTINCT FROM OLD.supersedes_id OR NEW.project_id IS DISTINCT FROM OLD.project_id OR NEW.objective_id IS DISTINCT FROM OLD.objective_id OR NEW.parent_id IS DISTINCT FROM OLD.parent_id OR NEW.root_id IS DISTINCT FROM OLD.root_id OR NEW.lineage_key IS DISTINCT FROM OLD.lineage_key THEN
       RAISE EXCEPTION 'orchestrator-immutable: lineage fields of % (ref, version, supersedes_id, ancestry) are immutable', TG_TABLE_NAME USING ERRCODE = '23001';
     END IF;
   END IF;
@@ -2162,7 +2849,7 @@ BEGIN
         RAISE EXCEPTION 'orchestrator-immutable: a new lineage in % starts at version 1', TG_TABLE_NAME USING ERRCODE = '23001';
       END IF;
     ELSIF NOT EXISTS (SELECT 1 FROM packets p WHERE p.id = NEW.supersedes_id
-                      AND p.ref = NEW.ref AND p.version + 1 = NEW.version AND p.project_id IS NOT DISTINCT FROM NEW.project_id AND p.objective_id IS NOT DISTINCT FROM NEW.objective_id AND p.parent_id IS NOT DISTINCT FROM NEW.parent_id AND p.root_id IS NOT DISTINCT FROM NEW.root_id) THEN
+                      AND p.ref = NEW.ref AND p.version + 1 = NEW.version AND p.project_id IS NOT DISTINCT FROM NEW.project_id AND p.objective_id IS NOT DISTINCT FROM NEW.objective_id AND p.parent_id IS NOT DISTINCT FROM NEW.parent_id AND p.root_id IS NOT DISTINCT FROM NEW.root_id AND p.lineage_key IS NOT DISTINCT FROM NEW.lineage_key) THEN
       RAISE EXCEPTION 'orchestrator-immutable: a successor in % must keep the ref, have version = predecessor + 1 and the same ancestry', TG_TABLE_NAME USING ERRCODE = '23001';
     END IF;
   END IF;
@@ -2288,7 +2975,7 @@ $fn$""",
         """CREATE OR REPLACE FUNCTION orch_packets_transition_guard() RETURNS trigger LANGUAGE plpgsql AS $fn$
 BEGIN
   IF NEW.status IS DISTINCT FROM OLD.status
-     AND (OLD.status || '>' || NEW.status) NOT IN ('awaiting_confirmation>blocked', 'awaiting_confirmation>closed_unverified', 'awaiting_confirmation>completed', 'awaiting_confirmation>evaluating_post', 'awaiting_confirmation>evaluating_pre', 'awaiting_confirmation>held', 'awaiting_confirmation>queued', 'awaiting_confirmation>running', 'awaiting_confirmation>waiting_for_children', 'blocked>closed_unverified', 'blocked>evaluating_post', 'blocked>evaluating_pre', 'blocked>held', 'draft>blocked', 'draft>closed_unverified', 'draft>evaluating_pre', 'draft>held', 'evaluating>closed_unverified', 'evaluating>evaluating_pre', 'evaluating_post>awaiting_confirmation', 'evaluating_post>blocked', 'evaluating_post>closed_unverified', 'evaluating_post>completed', 'evaluating_post>held', 'evaluating_post>needs_review', 'evaluating_pre>awaiting_confirmation', 'evaluating_pre>blocked', 'evaluating_pre>closed_unverified', 'evaluating_pre>held', 'evaluating_pre>needs_review', 'evaluating_pre>ready', 'evaluating_pre>waiting_for_children', 'failed>awaiting_confirmation', 'failed>blocked', 'failed>closed_unverified', 'failed>evaluating_pre', 'failed>held', 'failed>queued', 'held>blocked', 'held>closed_unverified', 'held>evaluating_pre', 'in_progress>closed_unverified', 'in_progress>evaluating_pre', 'needs_review>blocked', 'needs_review>closed_unverified', 'needs_review>evaluating_post', 'needs_review>evaluating_pre', 'needs_review>held', 'processed>closed_unverified', 'processed>evaluating_pre', 'queued>awaiting_confirmation', 'queued>blocked', 'queued>closed_unverified', 'queued>evaluating_pre', 'queued>held', 'queued>running', 'ready>awaiting_confirmation', 'ready>blocked', 'ready>closed_unverified', 'ready>evaluating_pre', 'ready>held', 'ready>queued', 'ready>waiting_for_children', 'running>awaiting_confirmation', 'running>blocked', 'running>closed_unverified', 'running>evaluating_post', 'running>evaluating_pre', 'running>failed', 'waiting_for_children>closed_unverified', 'waiting_for_children>completed') THEN
+     AND (OLD.status || '>' || NEW.status) NOT IN ('awaiting_confirmation>blocked', 'awaiting_confirmation>closed_unverified', 'awaiting_confirmation>completed', 'awaiting_confirmation>evaluating_post', 'awaiting_confirmation>evaluating_pre', 'awaiting_confirmation>held', 'awaiting_confirmation>queued', 'awaiting_confirmation>running', 'awaiting_confirmation>waiting_for_children', 'blocked>closed_unverified', 'blocked>evaluating_post', 'blocked>evaluating_pre', 'blocked>held', 'draft>blocked', 'draft>closed_unverified', 'draft>evaluating_pre', 'draft>held', 'draft>ready', 'evaluating>closed_unverified', 'evaluating>evaluating_pre', 'evaluating_post>awaiting_confirmation', 'evaluating_post>blocked', 'evaluating_post>closed_unverified', 'evaluating_post>held', 'evaluating_post>needs_review', 'evaluating_post>sealed', 'evaluating_pre>awaiting_confirmation', 'evaluating_pre>blocked', 'evaluating_pre>closed_unverified', 'evaluating_pre>held', 'evaluating_pre>needs_review', 'evaluating_pre>ready', 'evaluating_pre>waiting_for_children', 'failed>blocked', 'failed>closed_unverified', 'failed>evaluating_pre', 'failed>held', 'failed>queued', 'held>blocked', 'held>closed_unverified', 'held>evaluating_pre', 'in_progress>closed_unverified', 'in_progress>evaluating_pre', 'needs_review>blocked', 'needs_review>closed_unverified', 'needs_review>evaluating_post', 'needs_review>evaluating_pre', 'needs_review>held', 'processed>closed_unverified', 'processed>evaluating_pre', 'queued>awaiting_confirmation', 'queued>blocked', 'queued>closed_unverified', 'queued>held', 'queued>ready', 'queued>running', 'ready>awaiting_confirmation', 'ready>blocked', 'ready>closed_unverified', 'ready>held', 'ready>queued', 'ready>waiting_for_children', 'running>awaiting_confirmation', 'running>blocked', 'running>closed_unverified', 'running>evaluating_post', 'running>evaluating_pre', 'running>queued', 'waiting_for_children>closed_unverified', 'waiting_for_children>completed') THEN
     RAISE EXCEPTION 'orchestrator-transition: packet status change is not in the M3 transition table' USING ERRCODE = '23001';
   END IF;
   IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
@@ -2297,17 +2984,18 @@ END;
 $fn$""",
         """CREATE OR REPLACE FUNCTION orch_generation_runs_m3_guard() RETURNS trigger LANGUAGE plpgsql AS $fn$
 BEGIN
-  IF OLD.state IN ('failed', 'stale', 'succeeded', 'abandoned')
+  IF OLD.state IN ('failed', 'stale', 'succeeded', 'abandoned', 'crashed')
      OR (OLD.state = 'accepted' AND OLD.commit_sha IS NOT NULL) THEN
     RAISE EXCEPTION 'orchestrator-immutable: a finished generation run cannot be changed' USING ERRCODE = '23001';
   END IF;
   IF NEW.state IS DISTINCT FROM OLD.state
-     AND (OLD.state || '>' || NEW.state) NOT IN ('accepted>stale', 'awaiting_confirmation>dispatched', 'awaiting_confirmation>failed', 'awaiting_confirmation>stale', 'awaiting_result>awaiting_confirmation', 'awaiting_result>failed', 'awaiting_result>stale', 'awaiting_result>validating', 'claimed>stale', 'dispatched>awaiting_result', 'dispatched>failed', 'dispatched>stale', 'planned>dispatched', 'planned>stale', 'validating>accepted', 'validating>awaiting_result', 'validating>failed', 'validating>stale') THEN
+     AND (OLD.state || '>' || NEW.state) NOT IN ('accepted>stale', 'accepted>succeeded', 'awaiting_confirmation>dispatched', 'awaiting_confirmation>failed', 'awaiting_confirmation>stale', 'awaiting_result>awaiting_confirmation', 'awaiting_result>crashed', 'awaiting_result>failed', 'awaiting_result>stale', 'awaiting_result>validating', 'claimed>stale', 'dispatched>awaiting_result', 'dispatched>crashed', 'dispatched>failed', 'dispatched>stale', 'planned>dispatched', 'planned>stale', 'validating>accepted', 'validating>awaiting_result', 'validating>crashed', 'validating>failed', 'validating>stale') THEN
     RAISE EXCEPTION 'orchestrator-transition: run state change is not in the M3 transition table' USING ERRCODE = '23001';
   END IF;
   IF NEW.claimed_by IS DISTINCT FROM OLD.claimed_by
      OR NEW.channel IS DISTINCT FROM OLD.channel
      OR NEW.fencing_token IS DISTINCT FROM OLD.fencing_token
+     OR NEW.claim_content_revision IS DISTINCT FROM OLD.claim_content_revision
      OR NEW.created_at IS DISTINCT FROM OLD.created_at
      OR (OLD.manifest_hash IS NOT NULL AND NEW.manifest_hash IS DISTINCT FROM OLD.manifest_hash)
      OR (OLD.commit_sha IS NOT NULL AND NEW.commit_sha IS DISTINCT FROM OLD.commit_sha)
@@ -2372,6 +3060,171 @@ $fn$""",
         """CREATE TRIGGER trg_kernel_leases_no_truncate BEFORE TRUNCATE ON kernel_leases FOR EACH STATEMENT EXECUTE FUNCTION orch_no_delete_guard()""",
         """CREATE TRIGGER trg_governor_states_no_truncate BEFORE TRUNCATE ON governor_states FOR EACH STATEMENT EXECUTE FUNCTION orch_no_delete_guard()""",
         """CREATE TRIGGER trg_budget_counters_no_truncate BEFORE TRUNCATE ON budget_counters FOR EACH STATEMENT EXECUTE FUNCTION orch_no_delete_guard()""",
+        """CREATE OR REPLACE FUNCTION orch_eva_context_links_guard() RETURNS trigger LANGUAGE plpgsql AS $fn$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'orchestrator-immutable: eva_context_links rows cannot be deleted' USING ERRCODE = '23001';
+  END IF;
+  IF NEW.id IS DISTINCT FROM OLD.id
+     OR NEW.eva_packet_id IS DISTINCT FROM OLD.eva_packet_id
+     OR NEW.packet_id IS DISTINCT FROM OLD.packet_id
+     OR NEW.field_name IS DISTINCT FROM OLD.field_name
+     OR NEW.source_type IS DISTINCT FROM OLD.source_type
+     OR NEW.source_id IS DISTINCT FROM OLD.source_id
+     OR NEW.source_ref IS DISTINCT FROM OLD.source_ref
+     OR NEW.source_hash IS DISTINCT FROM OLD.source_hash
+     OR NEW.source_revision IS DISTINCT FROM OLD.source_revision
+     OR NEW.link_strength IS DISTINCT FROM OLD.link_strength
+     OR NEW.link_reason IS DISTINCT FROM OLD.link_reason
+     OR NEW.quote IS DISTINCT FROM OLD.quote
+     OR NEW.created_at IS DISTINCT FROM OLD.created_at
+     OR (OLD.is_questioned AND NOT NEW.is_questioned) THEN
+    RAISE EXCEPTION 'orchestrator-immutable: eva_context_links are append-only; only is_questioned may go from false to true' USING ERRCODE = '23001';
+  END IF;
+  IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+  RETURN NEW;
+END;
+$fn$""",
+        """CREATE OR REPLACE FUNCTION orch_packets_content_revision() RETURNS trigger LANGUAGE plpgsql AS $fn$
+BEGIN
+  IF (OLD.title IS DISTINCT FROM NEW.title
+     OR OLD.prompt_description IS DISTINCT FROM NEW.prompt_description
+     OR OLD.response_structure IS DISTINCT FROM NEW.response_structure
+     OR OLD.response_contract IS DISTINCT FROM NEW.response_contract
+     OR OLD.repo_target_path IS DISTINCT FROM NEW.repo_target_path
+     OR OLD.priority_level IS DISTINCT FROM NEW.priority_level
+     OR OLD.manual_boost IS DISTINCT FROM NEW.manual_boost)
+     AND OLD.content_revision = NEW.content_revision THEN
+    NEW.content_revision := OLD.content_revision + 1;
+    NEW.last_producer := 'user_sql';
+  END IF;
+  IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+  RETURN NEW;
+END;
+$fn$""",
+        """CREATE OR REPLACE FUNCTION orch_packets_outbox() RETURNS trigger LANGUAGE plpgsql AS $fn$
+DECLARE v_tx text := pg_current_xact_id()::text;
+BEGIN
+  IF OLD.title IS DISTINCT FROM NEW.title THEN
+    INSERT INTO raw_revision_outbox (tx_id, entity_type, entity_id, field_name, old_value, new_value, producer, content_revision, captured_at)
+    VALUES (v_tx, 'packet', NEW.id, 'title', OLD.title::text, NEW.title::text, NEW.last_producer, NEW.content_revision, now());
+  END IF;
+  IF OLD.prompt_description IS DISTINCT FROM NEW.prompt_description THEN
+    INSERT INTO raw_revision_outbox (tx_id, entity_type, entity_id, field_name, old_value, new_value, producer, content_revision, captured_at)
+    VALUES (v_tx, 'packet', NEW.id, 'prompt_description', OLD.prompt_description::text, NEW.prompt_description::text, NEW.last_producer, NEW.content_revision, now());
+  END IF;
+  IF OLD.response_structure IS DISTINCT FROM NEW.response_structure THEN
+    INSERT INTO raw_revision_outbox (tx_id, entity_type, entity_id, field_name, old_value, new_value, producer, content_revision, captured_at)
+    VALUES (v_tx, 'packet', NEW.id, 'response_structure', OLD.response_structure::text, NEW.response_structure::text, NEW.last_producer, NEW.content_revision, now());
+  END IF;
+  IF OLD.response_contract IS DISTINCT FROM NEW.response_contract THEN
+    INSERT INTO raw_revision_outbox (tx_id, entity_type, entity_id, field_name, old_value, new_value, producer, content_revision, captured_at)
+    VALUES (v_tx, 'packet', NEW.id, 'response_contract', OLD.response_contract::text, NEW.response_contract::text, NEW.last_producer, NEW.content_revision, now());
+  END IF;
+  IF OLD.repo_target_path IS DISTINCT FROM NEW.repo_target_path THEN
+    INSERT INTO raw_revision_outbox (tx_id, entity_type, entity_id, field_name, old_value, new_value, producer, content_revision, captured_at)
+    VALUES (v_tx, 'packet', NEW.id, 'repo_target_path', OLD.repo_target_path::text, NEW.repo_target_path::text, NEW.last_producer, NEW.content_revision, now());
+  END IF;
+  IF OLD.priority_level IS DISTINCT FROM NEW.priority_level THEN
+    INSERT INTO raw_revision_outbox (tx_id, entity_type, entity_id, field_name, old_value, new_value, producer, content_revision, captured_at)
+    VALUES (v_tx, 'packet', NEW.id, 'priority_level', OLD.priority_level::text, NEW.priority_level::text, NEW.last_producer, NEW.content_revision, now());
+  END IF;
+  IF OLD.manual_boost IS DISTINCT FROM NEW.manual_boost THEN
+    INSERT INTO raw_revision_outbox (tx_id, entity_type, entity_id, field_name, old_value, new_value, producer, content_revision, captured_at)
+    VALUES (v_tx, 'packet', NEW.id, 'manual_boost', OLD.manual_boost::text, NEW.manual_boost::text, NEW.last_producer, NEW.content_revision, now());
+  END IF;
+  RETURN NULL;
+END;
+$fn$""",
+        """CREATE TRIGGER trg_packets_content_revision BEFORE UPDATE OF title, prompt_description, response_structure, response_contract, repo_target_path, priority_level, manual_boost ON packets FOR EACH ROW EXECUTE FUNCTION orch_packets_content_revision()""",
+        """CREATE TRIGGER trg_packets_outbox AFTER UPDATE OF title, prompt_description, response_structure, response_contract, repo_target_path, priority_level, manual_boost ON packets FOR EACH ROW EXECUTE FUNCTION orch_packets_outbox()""",
+        """CREATE OR REPLACE FUNCTION orch_projects_content_revision() RETURNS trigger LANGUAGE plpgsql AS $fn$
+BEGIN
+  IF (OLD.name IS DISTINCT FROM NEW.name
+     OR OLD.brief IS DISTINCT FROM NEW.brief
+     OR OLD.industry IS DISTINCT FROM NEW.industry
+     OR OLD.scope IS DISTINCT FROM NEW.scope)
+     AND OLD.content_revision = NEW.content_revision THEN
+    NEW.content_revision := OLD.content_revision + 1;
+    NEW.last_producer := 'user_sql';
+  END IF;
+  IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+  RETURN NEW;
+END;
+$fn$""",
+        """CREATE OR REPLACE FUNCTION orch_projects_outbox() RETURNS trigger LANGUAGE plpgsql AS $fn$
+DECLARE v_tx text := pg_current_xact_id()::text;
+BEGIN
+  IF OLD.name IS DISTINCT FROM NEW.name THEN
+    INSERT INTO raw_revision_outbox (tx_id, entity_type, entity_id, field_name, old_value, new_value, producer, content_revision, captured_at)
+    VALUES (v_tx, 'project', NEW.id, 'name', OLD.name::text, NEW.name::text, NEW.last_producer, NEW.content_revision, now());
+  END IF;
+  IF OLD.brief IS DISTINCT FROM NEW.brief THEN
+    INSERT INTO raw_revision_outbox (tx_id, entity_type, entity_id, field_name, old_value, new_value, producer, content_revision, captured_at)
+    VALUES (v_tx, 'project', NEW.id, 'brief', OLD.brief::text, NEW.brief::text, NEW.last_producer, NEW.content_revision, now());
+  END IF;
+  IF OLD.industry IS DISTINCT FROM NEW.industry THEN
+    INSERT INTO raw_revision_outbox (tx_id, entity_type, entity_id, field_name, old_value, new_value, producer, content_revision, captured_at)
+    VALUES (v_tx, 'project', NEW.id, 'industry', OLD.industry::text, NEW.industry::text, NEW.last_producer, NEW.content_revision, now());
+  END IF;
+  IF OLD.scope IS DISTINCT FROM NEW.scope THEN
+    INSERT INTO raw_revision_outbox (tx_id, entity_type, entity_id, field_name, old_value, new_value, producer, content_revision, captured_at)
+    VALUES (v_tx, 'project', NEW.id, 'scope', OLD.scope::text, NEW.scope::text, NEW.last_producer, NEW.content_revision, now());
+  END IF;
+  RETURN NULL;
+END;
+$fn$""",
+        """CREATE TRIGGER trg_projects_content_revision BEFORE UPDATE OF name, brief, industry, scope ON projects FOR EACH ROW EXECUTE FUNCTION orch_projects_content_revision()""",
+        """CREATE TRIGGER trg_projects_outbox AFTER UPDATE OF name, brief, industry, scope ON projects FOR EACH ROW EXECUTE FUNCTION orch_projects_outbox()""",
+        """CREATE OR REPLACE FUNCTION orch_objectives_content_revision() RETURNS trigger LANGUAGE plpgsql AS $fn$
+BEGIN
+  IF (OLD.name IS DISTINCT FROM NEW.name
+     OR OLD.brief IS DISTINCT FROM NEW.brief
+     OR OLD.priority_level IS DISTINCT FROM NEW.priority_level)
+     AND OLD.content_revision = NEW.content_revision THEN
+    NEW.content_revision := OLD.content_revision + 1;
+    NEW.last_producer := 'user_sql';
+  END IF;
+  IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+  RETURN NEW;
+END;
+$fn$""",
+        """CREATE OR REPLACE FUNCTION orch_objectives_outbox() RETURNS trigger LANGUAGE plpgsql AS $fn$
+DECLARE v_tx text := pg_current_xact_id()::text;
+BEGIN
+  IF OLD.name IS DISTINCT FROM NEW.name THEN
+    INSERT INTO raw_revision_outbox (tx_id, entity_type, entity_id, field_name, old_value, new_value, producer, content_revision, captured_at)
+    VALUES (v_tx, 'objective', NEW.id, 'name', OLD.name::text, NEW.name::text, NEW.last_producer, NEW.content_revision, now());
+  END IF;
+  IF OLD.brief IS DISTINCT FROM NEW.brief THEN
+    INSERT INTO raw_revision_outbox (tx_id, entity_type, entity_id, field_name, old_value, new_value, producer, content_revision, captured_at)
+    VALUES (v_tx, 'objective', NEW.id, 'brief', OLD.brief::text, NEW.brief::text, NEW.last_producer, NEW.content_revision, now());
+  END IF;
+  IF OLD.priority_level IS DISTINCT FROM NEW.priority_level THEN
+    INSERT INTO raw_revision_outbox (tx_id, entity_type, entity_id, field_name, old_value, new_value, producer, content_revision, captured_at)
+    VALUES (v_tx, 'objective', NEW.id, 'priority_level', OLD.priority_level::text, NEW.priority_level::text, NEW.last_producer, NEW.content_revision, now());
+  END IF;
+  RETURN NULL;
+END;
+$fn$""",
+        """CREATE TRIGGER trg_objectives_content_revision BEFORE UPDATE OF name, brief, priority_level ON objectives FOR EACH ROW EXECUTE FUNCTION orch_objectives_content_revision()""",
+        """CREATE TRIGGER trg_objectives_outbox AFTER UPDATE OF name, brief, priority_level ON objectives FOR EACH ROW EXECUTE FUNCTION orch_objectives_outbox()""",
+        """CREATE TRIGGER trg_content_blobs_append_only BEFORE UPDATE OR DELETE ON content_blobs FOR EACH ROW EXECUTE FUNCTION orch_append_only_guard()""",
+        """CREATE TRIGGER trg_content_blobs_no_truncate BEFORE TRUNCATE ON content_blobs FOR EACH STATEMENT EXECUTE FUNCTION orch_append_only_guard()""",
+        """CREATE TRIGGER trg_field_revisions_append_only BEFORE UPDATE OR DELETE ON field_revisions FOR EACH ROW EXECUTE FUNCTION orch_append_only_guard()""",
+        """CREATE TRIGGER trg_field_revisions_no_truncate BEFORE TRUNCATE ON field_revisions FOR EACH STATEMENT EXECUTE FUNCTION orch_append_only_guard()""",
+        """CREATE TRIGGER trg_sealed_bundles_append_only BEFORE UPDATE OR DELETE ON sealed_bundles FOR EACH ROW EXECUTE FUNCTION orch_append_only_guard()""",
+        """CREATE TRIGGER trg_sealed_bundles_no_truncate BEFORE TRUNCATE ON sealed_bundles FOR EACH STATEMENT EXECUTE FUNCTION orch_append_only_guard()""",
+        """CREATE TRIGGER trg_eva_discard_log_append_only BEFORE UPDATE OR DELETE ON eva_discard_log FOR EACH ROW EXECUTE FUNCTION orch_append_only_guard()""",
+        """CREATE TRIGGER trg_eva_discard_log_no_truncate BEFORE TRUNCATE ON eva_discard_log FOR EACH STATEMENT EXECUTE FUNCTION orch_append_only_guard()""",
+        """CREATE TRIGGER trg_queue_epoch_snapshot_append_only BEFORE UPDATE OR DELETE ON queue_epoch_snapshot FOR EACH ROW EXECUTE FUNCTION orch_append_only_guard()""",
+        """CREATE TRIGGER trg_queue_epoch_snapshot_no_truncate BEFORE TRUNCATE ON queue_epoch_snapshot FOR EACH STATEMENT EXECUTE FUNCTION orch_append_only_guard()""",
+        """CREATE TRIGGER trg_feedback_events_append_only BEFORE UPDATE OR DELETE ON feedback_events FOR EACH ROW EXECUTE FUNCTION orch_append_only_guard()""",
+        """CREATE TRIGGER trg_feedback_events_no_truncate BEFORE TRUNCATE ON feedback_events FOR EACH STATEMENT EXECUTE FUNCTION orch_append_only_guard()""",
+        """CREATE TRIGGER trg_crash_events_append_only BEFORE UPDATE OR DELETE ON crash_events FOR EACH ROW EXECUTE FUNCTION orch_append_only_guard()""",
+        """CREATE TRIGGER trg_crash_events_no_truncate BEFORE TRUNCATE ON crash_events FOR EACH STATEMENT EXECUTE FUNCTION orch_append_only_guard()""",
+        """CREATE TRIGGER trg_route_health_no_delete BEFORE DELETE ON route_health FOR EACH ROW EXECUTE FUNCTION orch_no_delete_guard()""",
+        """CREATE TRIGGER trg_eva_context_links_guard BEFORE UPDATE OR DELETE ON eva_context_links FOR EACH ROW EXECUTE FUNCTION orch_eva_context_links_guard()""",
         """CREATE VIEW v_project_heads AS
 WITH RECURSIVE chain(row_id, current_id) AS (
   SELECT id, id FROM projects
@@ -2525,6 +3378,13 @@ SELECT r.eva_packet_id, r.packet_id, r.packet_version, r.eval_cycle_id, r.field_
             WHEN r.complete = 1 AND r.winner IN ('b', 'both') THEN r.vb
             ELSE NULL END AS winning_value
 FROM r""",
+        """CREATE VIEW v_context_link_status AS
+SELECT l.id AS link_id, l.eva_packet_id, l.packet_id, l.field_name, l.source_type,
+       l.source_id, l.source_ref, l.source_revision, l.link_strength, l.link_reason,
+       CASE l.source_type WHEN 'project' THEN (SELECT x.content_revision FROM projects x WHERE x.id = l.source_id) WHEN 'objective' THEN (SELECT x.content_revision FROM objectives x WHERE x.id = l.source_id) WHEN 'packet' THEN (SELECT x.content_revision FROM packets x WHERE x.id = l.source_id) ELSE COALESCE((SELECT d.version FROM candidate_field_definitions d WHERE d.name = l.source_id), (SELECT MAX(ps.revision) FROM eva_presets ps WHERE 'preset:' || ps.field_name || ':' || ps.phase = l.source_id)) END AS current_revision,
+       CASE WHEN l.is_questioned OR CASE l.source_type WHEN 'project' THEN (SELECT x.content_revision FROM projects x WHERE x.id = l.source_id) WHEN 'objective' THEN (SELECT x.content_revision FROM objectives x WHERE x.id = l.source_id) WHEN 'packet' THEN (SELECT x.content_revision FROM packets x WHERE x.id = l.source_id) ELSE COALESCE((SELECT d.version FROM candidate_field_definitions d WHERE d.name = l.source_id), (SELECT MAX(ps.revision) FROM eva_presets ps WHERE 'preset:' || ps.field_name || ':' || ps.phase = l.source_id)) END > l.source_revision THEN 1 ELSE 0 END
+         AS questioned
+FROM eva_context_links l""",
         """CREATE VIEW v_field_consensus AS
 WITH art AS (
   SELECT a.packet_id, a.sha256,
@@ -2537,11 +3397,7 @@ bound AS (
          CASE WHEN ((e.phase = 'pre' AND e.target_hash = p.input_hash)
                     OR (e.phase = 'post' AND e.target_hash = la.sha256))
                    AND ps.enabled
-                   AND ps.revision = (SELECT MAX(p2.revision) FROM eva_presets p2
-                                      WHERE p2.field_name = e.field_name
-                                        AND p2.phase = e.phase)
                    AND d.enabled
-                   AND e.definition_version = d.version
               THEN 1 ELSE 0 END AS is_current
   FROM eva_packets e
   JOIN packets p ON p.id = e.packet_id
@@ -2560,6 +3416,13 @@ cand AS (
                                      bound.escalation DESC, bound.created_at DESC,
                                      bound.id DESC) AS rn
   FROM bound
+),
+q AS (
+  SELECT ls.eva_packet_id, SUM(ls.questioned) AS qn,
+         MAX(CASE WHEN ls.questioned = 1 AND ls.link_strength = 'direct' THEN 1 ELSE 0 END)
+           AS qd
+  FROM v_context_link_status ls
+  GROUP BY ls.eva_packet_id
 )
 SELECT p.id AS packet_id, p.ref AS packet_ref, p.version AS packet_version,
        c.field_name, c.phase, c.item_key, c.kind,
@@ -2573,10 +3436,17 @@ SELECT p.id AS packet_id, p.ref AS packet_ref, p.version AS packet_version,
        CASE WHEN cand.is_current = 1 AND c.status = 'accepted' THEN c.winning_value
             ELSE NULL END AS final_value,
        c.supports, c.contradictions, c.unverified, c.eva_packet_id, c.eval_cycle_id,
-       cand.is_current
+       cand.is_current,
+       CASE WHEN p.status IN ('waiting_for_children', 'archived') THEN 0 WHEN COALESCE(q.qn, 0) > 0 THEN 1 ELSE 0 END
+         AS question_context,
+       CASE WHEN p.status IN ('waiting_for_children', 'archived') THEN 0 ELSE COALESCE(q.qn, 0) END AS question_context_count,
+       CAST(CASE WHEN p.status IN ('waiting_for_children', 'archived') THEN 0 WHEN q.qd = 1 THEN COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'qctx.w_direct_e4'), 750)
+                 WHEN COALESCE(q.qn, 0) > 0 THEN COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'qctx.w_periph_e4'), 250) ELSE 0 END AS INTEGER)
+         AS question_weight_e4
 FROM cand
 JOIN packets p ON p.id = cand.packet_id
 JOIN v_eva_item_consensus c ON c.eva_packet_id = cand.id
+LEFT JOIN q ON q.eva_packet_id = cand.id
 WHERE cand.rn = 1""",
         """CREATE VIEW v_field_status AS
 SELECT c.packet_id, c.packet_ref, c.packet_version, c.field_name, c.phase, c.kind,
@@ -2588,7 +3458,10 @@ SELECT c.packet_id, c.packet_ref, c.packet_version, c.field_name, c.phase, c.kin
        SUM(CASE WHEN c.status = 'accepted' THEN 1 ELSE 0 END) AS accepted_items,
        SUM(CASE WHEN c.status = 'disputed' THEN 1 ELSE 0 END) AS disputed_items,
        MIN(c.confidence) AS min_confidence,
-       MAX(c.eva_packet_id) AS eva_packet_id
+       MAX(c.eva_packet_id) AS eva_packet_id,
+       MAX(c.question_context) AS question_context,
+       MAX(c.question_context_count) AS question_context_count,
+       MAX(c.question_weight_e4) AS question_weight_e4
 FROM v_field_consensus c
 GROUP BY c.packet_id, c.packet_ref, c.packet_version, c.field_name, c.phase, c.kind""",
         """CREATE VIEW v_packet_stats AS
@@ -2709,72 +3582,335 @@ LEFT JOIN v_field_status fs ON fs.packet_id = h.id AND fs.field_name = req.field
   AND fs.phase = req.phase
 WHERE req.phase = 'pre'
 GROUP BY h.id, h.ref, h.version, h.status""",
-        """CREATE VIEW v_queue AS
-WITH x AS (
-  SELECT p.id AS packet_id, p.ref AS packet_ref, p.version AS packet_version, p.status,
-         p.created_at, p.claimed_by, p.lease_expires_at,
-         COALESCE(o.priority_level, 5) AS objective_priority,
-         COALESCE((SELECT CAST(c.final_value AS NUMERIC) FROM v_field_consensus c
-                   WHERE c.packet_id = p.id AND c.field_name = 'ambiguity_quotient'
-                     AND c.phase = 'pre' AND c.status = 'accepted'), 5) AS ambiguity,
-         CASE WHEN p.manual_boost < 0 THEN 0 WHEN p.manual_boost > 10 THEN 10
-              ELSE p.manual_boost END AS boost,
-         (SELECT COUNT(*) FROM channel_runs r WHERE r.packet_id = p.id AND r.status = 'failed'
-            AND r.channel IN ('local_generation', 'workbench_production')
-            AND NOT EXISTS (SELECT 1 FROM confirmations cf WHERE cf.entity_id = p.id
-                              AND cf.entity_type = 'failure_budget' AND cf.status = 'approved'
-                              AND cf.decided_at
-                                  >= r.finished_at)) AS failed_runs,
-         (SELECT MAX(r.finished_at) FROM channel_runs r WHERE r.packet_id = p.id
-            AND r.status = 'failed'
-            AND r.channel IN ('local_generation', 'workbench_production')) AS last_failure_at,
-         (EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - p.created_at)) / 3600.0) AS age_hours,
-         (SELECT MIN(CASE o.kind WHEN 'block' THEN 1 WHEN 'hold' THEN 2 WHEN 'force' THEN 3
-                                 WHEN 'pin' THEN 4 ELSE 5 END)
-            FROM queue_overrides o WHERE o.packet_ref = p.ref AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'override' AND rv.target_id = o.id) AND (o.scope = 'lineage' OR o.target_version = p.version)) AS override_rank,
-         COALESCE((SELECT SUM(o.value) FROM queue_overrides o WHERE o.packet_ref = p.ref
-                     AND o.kind = 'reorder' AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'override' AND rv.target_id = o.id) AND (o.scope = 'lineage' OR o.target_version = p.version)), 0) AS reorder_delta,
-         (SELECT COUNT(*) FROM confirmations cf WHERE cf.entity_id = p.id
-            AND cf.status = 'pending') AS pending_approvals
-  FROM packets p
-  LEFT JOIN objectives o ON o.id = p.objective_id
-  WHERE p.status IN ('ready', 'queued')
-    AND NOT EXISTS (SELECT 1 FROM packets s WHERE s.supersedes_id = p.id)
-),
-y AS (
-  SELECT x.*,
-    CASE WHEN x.override_rank = 1 THEN 'blocked'
-         WHEN x.override_rank = 2 THEN 'held'
-         WHEN x.pending_approvals > 0 THEN 'awaiting_approval'
-         WHEN x.failed_runs >= COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'queue.failure_budget'), 3) THEN 'failure_budget'
-         WHEN x.last_failure_at IS NOT NULL AND (EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - x.last_failure_at)) / 3600.0) < (COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'queue.retry_backoff_minutes'), 30) / 60.0) THEN 'backoff'
-         WHEN x.claimed_by IS NOT NULL AND x.lease_expires_at IS NOT NULL
-              AND x.lease_expires_at > CURRENT_TIMESTAMP THEN 'claimed'
-         ELSE NULL END AS ineligible_reason,
-    CASE WHEN x.override_rank = 3 THEN 1
-         WHEN x.override_rank = 4 THEN 2
-         WHEN x.age_hours >= COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'queue.max_wait_hours'), 48) THEN 3
-         ELSE 4 END AS queue_class,
-    ROUND(CAST(
-        COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'priority.w_objective'), 0.30) * x.objective_priority / 10.0
-      + COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'priority.w_age'), 0.25) * (CASE WHEN x.age_hours < 0 THEN 0
-                           WHEN x.age_hours > COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'priority.max_age_hours'), 72) THEN COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'priority.max_age_hours'), 72)
-                           ELSE x.age_hours END) / COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'priority.max_age_hours'), 72)
-      + COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'priority.w_ambiguity'), 0.15) * (10 - x.ambiguity) / 10.0
-      + COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'priority.w_boost'), 0.20) * x.boost / 10.0
-      - COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'priority.w_failures'), 0.10) * (CASE WHEN x.failed_runs > COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'queue.failure_budget'), 3) THEN COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'queue.failure_budget'), 3)
-                                ELSE x.failed_runs END) / COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'queue.failure_budget'), 3)
-      + x.reorder_delta AS NUMERIC), 6) AS priority
-  FROM x
+        """CREATE VIEW v_packet_mandatory_fields AS
+WITH pk AS (SELECT p.id, p.lineage_key, p.repo_target_path FROM packets p WHERE NOT p.locked)
+SELECT pk.id AS packet_id, u.field_name, 'universal' AS reason
+FROM pk CROSS JOIN (SELECT 'requirement_alignment' AS field_name UNION ALL SELECT 'testability' AS field_name UNION ALL SELECT 'acceptance_criteria_coverage' AS field_name) u
+UNION
+SELECT pk.id, u.field_name, 'has_dependencies'
+FROM pk CROSS JOIN (SELECT 'dependency_validity' AS field_name UNION ALL SELECT 'interface_stability' AS field_name) u WHERE EXISTS (SELECT 1 FROM packet_dependencies e WHERE e.packet_id = pk.id AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = e.id))
+UNION
+SELECT pk.id, u.field_name, 'has_dependents'
+FROM pk CROSS JOIN (SELECT 'downstream_contract_clarity' AS field_name UNION ALL SELECT 'risk_assessment' AS field_name) u WHERE EXISTS (SELECT 1 FROM packet_dependencies e JOIN packets dx ON dx.id = e.packet_id WHERE e.depends_on_id = pk.lineage_key AND dx.lineage_key <> pk.lineage_key AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = e.id))
+UNION
+SELECT pk.id, u.field_name, 'charted_repo_target'
+FROM pk CROSS JOIN (SELECT 'risk_assessment' AS field_name UNION ALL SELECT 'sonar_hotspot_alignment' AS field_name) u WHERE pk.repo_target_path IS NOT NULL
+UNION
+SELECT pk.id, ps.field_name, 'preset_required'
+FROM pk CROSS JOIN eva_presets ps
+WHERE ps.phase = 'pre' AND ps.enabled AND ps.required AND ps.tier IN (1, 2)
+  AND ps.revision = (SELECT MAX(p2.revision) FROM eva_presets p2
+                     WHERE p2.field_name = ps.field_name AND p2.phase = ps.phase)""",
+        """CREATE VIEW v_packet_field_health AS
+SELECT p.id AS packet_id,
+       (SELECT COUNT(DISTINCT m.field_name) FROM v_packet_mandatory_fields m
+          LEFT JOIN v_field_status fs ON fs.packet_id = p.id AND fs.field_name = m.field_name
+           AND fs.phase = 'pre'
+         WHERE m.packet_id = p.id AND (fs.status IS NULL OR fs.status = 'pending')) AS missing_mandatory_fields,
+       (SELECT COUNT(*) FROM eva_presets ps
+          LEFT JOIN v_field_status fs ON fs.packet_id = p.id AND fs.field_name = ps.field_name
+           AND fs.phase = 'pre'
+         WHERE ps.phase = 'pre' AND ps.enabled AND ps.revision = (SELECT MAX(p2.revision) FROM eva_presets p2 WHERE p2.field_name = ps.field_name AND p2.phase = ps.phase) AND (fs.status IS NULL OR fs.status = 'pending')
+           AND ps.field_name NOT IN (SELECT m.field_name FROM v_packet_mandatory_fields m
+                                     WHERE m.packet_id = p.id)) AS missing_optional_fields,
+       -- @ORCHESTRATOR:PLACEHOLDER (M3b: wire the local-drafts trigger). Reported only: it is
+       -- not a v_eva_queue need condition until a drafting channel exists.
+       CASE WHEN p.examples_hash IS NULL THEN 1 ELSE 0 END AS missing_local_drafts,
+       COALESCE((SELECT SUM(fs.question_context_count) FROM v_field_status fs
+                 WHERE fs.packet_id = p.id AND fs.phase = 'pre'), 0) AS question_context_total,
+       (CASE WHEN (COALESCE((SELECT SUM(fs.question_weight_e4) FROM v_field_status fs WHERE fs.packet_id = p.id AND fs.phase = 'pre'), 0)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'qctx.cap_e4'), 2250) AS INTEGER)) THEN (COALESCE((SELECT SUM(fs.question_weight_e4) FROM v_field_status fs WHERE fs.packet_id = p.id AND fs.phase = 'pre'), 0)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'qctx.cap_e4'), 2250) AS INTEGER)) END) AS question_score_e4
+FROM packets p
+WHERE NOT p.locked""",
+        """CREATE VIEW v_packet_relational_centrality AS
+WITH c AS (
+  SELECT p.id AS packet_id, (SELECT COUNT(DISTINCT d1.lineage_key) FROM packets d1 JOIN packet_dependencies ed1 ON ed1.packet_id = d1.id WHERE ed1.depends_on_id = p.lineage_key AND d1.lineage_key <> p.lineage_key AND NOT d1.locked AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = ed1.id) AND NOT EXISTS (SELECT 1 FROM sealed_bundles sx JOIN packets mx ON mx.id = sx.packet_id WHERE mx.lineage_key = d1.lineage_key AND sx.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER))) AS direct_dependents, (SELECT COUNT(DISTINCT d2.lineage_key) FROM packets h JOIN packet_dependencies eh ON eh.depends_on_id = h.lineage_key JOIN packets d2 ON d2.id = eh.packet_id WHERE h.id IN (SELECT d1.id FROM packets d1 JOIN packet_dependencies ed1 ON ed1.packet_id = d1.id WHERE ed1.depends_on_id = p.lineage_key AND d1.lineage_key <> p.lineage_key AND NOT d1.locked AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = ed1.id) AND NOT EXISTS (SELECT 1 FROM sealed_bundles sx JOIN packets mx ON mx.id = sx.packet_id WHERE mx.lineage_key = d1.lineage_key AND sx.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER))) AND d2.lineage_key <> p.lineage_key AND d2.lineage_key <> h.lineage_key AND NOT d2.locked AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = eh.id) AND d2.lineage_key NOT IN (SELECT d1.lineage_key FROM packets d1 JOIN packet_dependencies ed1 ON ed1.packet_id = d1.id WHERE ed1.depends_on_id = p.lineage_key AND d1.lineage_key <> p.lineage_key AND NOT d1.locked AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = ed1.id) AND NOT EXISTS (SELECT 1 FROM sealed_bundles sx JOIN packets mx ON mx.id = sx.packet_id WHERE mx.lineage_key = d1.lineage_key AND sx.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER)))) AS two_hop_dependents,
+         (CASE WHEN COALESCE((SELECT o.priority_level FROM objectives o WHERE o.id = p.objective_id), 0) >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.critical_priority'), 8) AS INTEGER) THEN 1 ELSE 0 END) AS is_critical
+  FROM packets p WHERE NOT p.locked
 )
-SELECT y.packet_id, y.packet_ref, y.packet_version, y.status, y.created_at,
-       CASE WHEN y.ineligible_reason IS NULL THEN 1 ELSE 0 END AS eligible,
-       y.ineligible_reason, y.queue_class, y.priority, y.age_hours, y.failed_runs,
-       CASE WHEN y.ineligible_reason IS NULL THEN ROW_NUMBER() OVER (
-              PARTITION BY CASE WHEN y.ineligible_reason IS NULL THEN 0 ELSE 1 END
-              ORDER BY y.queue_class, y.priority DESC, y.created_at, y.packet_ref)
-            ELSE NULL END AS position
-FROM y""",
+SELECT c.*, (CASE WHEN (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.direct_e4'), 3000) AS INTEGER) * c.direct_dependents + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.two_hop_e4'), 1500) AS INTEGER) * c.two_hop_dependents + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.critical_e4'), 2500) AS INTEGER) * c.is_critical) < (10000) THEN (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.direct_e4'), 3000) AS INTEGER) * c.direct_dependents + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.two_hop_e4'), 1500) AS INTEGER) * c.two_hop_dependents + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.critical_e4'), 2500) AS INTEGER) * c.is_critical) ELSE (10000) END) AS centrality_e4 FROM c""",
+        """CREATE VIEW v_packet_user_feedback AS
+WITH latest AS (
+  SELECT f.packet_id, f.kind, (CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT) - CAST(FLOOR(EXTRACT(EPOCH FROM f.created_at)) AS BIGINT)) AS age_sec, CASE f.kind WHEN 'boost' THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.boost_e4'), 1500) AS INTEGER) WHEN 'nudge' THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.nudge_e4'), 500) AS INTEGER) WHEN 'demote' THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.demote_e4'), -1500) AS INTEGER) ELSE CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.pin_e4'), 3000) AS INTEGER) END AS w
+  FROM feedback_events f
+  WHERE NOT EXISTS (SELECT 1 FROM feedback_events g WHERE g.packet_id = f.packet_id
+                    AND g.actor = f.actor AND (g.created_at > f.created_at
+                         OR (g.created_at = f.created_at AND g.id > f.id)))
+),
+decayed AS (
+  SELECT latest.packet_id,
+         CASE WHEN latest.age_sec < 86400 THEN latest.w
+              WHEN latest.age_sec < 259200 THEN (CASE WHEN (latest.w) >= 0 THEN (latest.w) / 2 ELSE -((1 - (latest.w)) / 2) END)
+              ELSE 0 END AS v
+  FROM latest
+),
+s AS (SELECT decayed.packet_id, SUM(decayed.v) AS total FROM decayed GROUP BY decayed.packet_id)
+SELECT s.packet_id,
+       CASE WHEN s.total > CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.clamp_e4'), 3000) AS INTEGER) THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.clamp_e4'), 3000) AS INTEGER) WHEN s.total < -CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.clamp_e4'), 3000) AS INTEGER) THEN -CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.clamp_e4'), 3000) AS INTEGER)
+            ELSE s.total END AS feedback_e4
+FROM s""",
+        """CREATE VIEW v_packet_queue_score AS
+WITH x AS (
+  SELECT p.id AS packet_id, p.ref AS packet_ref, p.status, p.channel, p.root_id,
+         p.lineage_key,
+         p.repo_target_path, p.created_at, p.ready_since, p.crash_count,
+         CAST(FLOOR(EXTRACT(EPOCH FROM COALESCE(p.ready_since, p.created_at))) AS BIGINT) AS ready_epoch,
+         CASE WHEN (CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT) - CAST(FLOOR(EXTRACT(EPOCH FROM COALESCE(p.ready_since, p.created_at))) AS BIGINT)) < 0 THEN 0 ELSE (CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT) - CAST(FLOOR(EXTRACT(EPOCH FROM COALESCE(p.ready_since, p.created_at))) AS BIGINT)) END AS wait_sec,
+         CASE WHEN p.parent_bundle_id IS NULL
+              THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.root_parent_grade_e4'), 5000) AS INTEGER)
+              ELSE COALESCE((SELECT sb.composite_grade_e4 FROM sealed_bundles sb
+                             WHERE sb.id = p.parent_bundle_id),
+                            CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.root_parent_grade_e4'), 5000) AS INTEGER)) END
+           AS parent_grade_e4,
+         COALESCE(c.centrality_e4, 0) AS centrality_e4,
+         COALESCE(fh.question_score_e4, 0) AS question_score_e4,
+         COALESCE(fh.question_context_total, 0) AS question_context_count,
+         COALESCE(fh.missing_mandatory_fields, 0) AS missing_mandatory_fields,
+         COALESCE(fh.missing_optional_fields, 0) AS missing_optional_fields,
+         COALESCE(fh.missing_local_drafts, 0) AS missing_local_drafts,
+         COALESCE(uf.feedback_e4, 0) AS feedback_e4,
+         CASE WHEN p.status = 'held' OR EXISTS (SELECT 1 FROM queue_overrides o WHERE o.packet_ref = p.ref AND o.kind IN ('block', 'hold') AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'override' AND rv.target_id = o.id) AND (o.scope = 'lineage' OR o.target_version = p.version)) THEN 1 ELSE 0 END AS is_held,
+         CASE WHEN EXISTS (SELECT 1 FROM packet_dependencies e WHERE e.packet_id = p.id AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = e.id) AND NOT EXISTS (SELECT 1 FROM packets m JOIN sealed_bundles sb ON sb.packet_id = m.id WHERE m.lineage_key = e.depends_on_id AND m.status = 'sealed' AND sb.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER))) THEN 0 ELSE 1 END AS deps_satisfied,
+         CASE WHEN EXISTS (SELECT 1 FROM route_health rh WHERE rh.channel = p.channel AND rh.unhealthy_until IS NOT NULL AND CAST(FLOOR(EXTRACT(EPOCH FROM rh.unhealthy_until)) AS BIGINT) > CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT)) THEN 0 ELSE 1 END AS route_healthy,
+         CASE WHEN (p.cooldown_until IS NOT NULL AND CAST(FLOOR(EXTRACT(EPOCH FROM p.cooldown_until)) AS BIGINT) > CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT)) THEN 1 ELSE 0 END AS cooling
+  FROM packets p
+  LEFT JOIN v_packet_relational_centrality c ON c.packet_id = p.id
+  LEFT JOIN v_packet_field_health fh ON fh.packet_id = p.id
+  LEFT JOIN (WITH latest AS (
+  SELECT f.packet_id, f.kind, (CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT) - CAST(FLOOR(EXTRACT(EPOCH FROM f.created_at)) AS BIGINT)) AS age_sec, CASE f.kind WHEN 'boost' THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.boost_e4'), 1500) AS INTEGER) WHEN 'nudge' THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.nudge_e4'), 500) AS INTEGER) WHEN 'demote' THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.demote_e4'), -1500) AS INTEGER) ELSE CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.pin_e4'), 3000) AS INTEGER) END AS w
+  FROM feedback_events f
+  WHERE NOT EXISTS (SELECT 1 FROM feedback_events g WHERE g.packet_id = f.packet_id
+                    AND g.actor = f.actor AND (g.created_at > f.created_at
+                         OR (g.created_at = f.created_at AND g.id > f.id)))
+),
+decayed AS (
+  SELECT latest.packet_id,
+         CASE WHEN latest.age_sec < 86400 THEN latest.w
+              WHEN latest.age_sec < 259200 THEN (CASE WHEN (latest.w) >= 0 THEN (latest.w) / 2 ELSE -((1 - (latest.w)) / 2) END)
+              ELSE 0 END AS v
+  FROM latest
+),
+s AS (SELECT decayed.packet_id, SUM(decayed.v) AS total FROM decayed GROUP BY decayed.packet_id)
+SELECT s.packet_id,
+       CASE WHEN s.total > CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.clamp_e4'), 3000) AS INTEGER) THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.clamp_e4'), 3000) AS INTEGER) WHEN s.total < -CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.clamp_e4'), 3000) AS INTEGER) THEN -CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.clamp_e4'), 3000) AS INTEGER)
+            ELSE s.total END AS feedback_e4
+FROM s) uf ON uf.packet_id = p.id
+  WHERE NOT p.locked AND p.status IN ('draft', 'evaluating_pre', 'ready', 'queued', 'running')
+    AND NOT EXISTS (SELECT 1 FROM packets s WHERE s.supersedes_id = p.id)
+)
+SELECT x.*, (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS ageing_e4, ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) AS base_score_e4,
+       ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) - x.question_score_e4 + x.feedback_e4 + (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS score_e4,
+       ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) + 2 * x.question_score_e4 + x.feedback_e4 + (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS eva_priority_e4
+FROM x""",
+        """CREATE VIEW v_gen_queue AS
+WITH s AS (WITH x AS (
+  SELECT p.id AS packet_id, p.ref AS packet_ref, p.status, p.channel, p.root_id,
+         p.lineage_key,
+         p.repo_target_path, p.created_at, p.ready_since, p.crash_count,
+         CAST(FLOOR(EXTRACT(EPOCH FROM COALESCE(p.ready_since, p.created_at))) AS BIGINT) AS ready_epoch,
+         CASE WHEN (CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT) - CAST(FLOOR(EXTRACT(EPOCH FROM COALESCE(p.ready_since, p.created_at))) AS BIGINT)) < 0 THEN 0 ELSE (CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT) - CAST(FLOOR(EXTRACT(EPOCH FROM COALESCE(p.ready_since, p.created_at))) AS BIGINT)) END AS wait_sec,
+         CASE WHEN p.parent_bundle_id IS NULL
+              THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.root_parent_grade_e4'), 5000) AS INTEGER)
+              ELSE COALESCE((SELECT sb.composite_grade_e4 FROM sealed_bundles sb
+                             WHERE sb.id = p.parent_bundle_id),
+                            CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.root_parent_grade_e4'), 5000) AS INTEGER)) END
+           AS parent_grade_e4,
+         COALESCE(c.centrality_e4, 0) AS centrality_e4,
+         COALESCE(fh.question_score_e4, 0) AS question_score_e4,
+         COALESCE(fh.question_context_total, 0) AS question_context_count,
+         COALESCE(fh.missing_mandatory_fields, 0) AS missing_mandatory_fields,
+         COALESCE(fh.missing_optional_fields, 0) AS missing_optional_fields,
+         COALESCE(fh.missing_local_drafts, 0) AS missing_local_drafts,
+         COALESCE(uf.feedback_e4, 0) AS feedback_e4,
+         CASE WHEN p.status = 'held' OR EXISTS (SELECT 1 FROM queue_overrides o WHERE o.packet_ref = p.ref AND o.kind IN ('block', 'hold') AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'override' AND rv.target_id = o.id) AND (o.scope = 'lineage' OR o.target_version = p.version)) THEN 1 ELSE 0 END AS is_held,
+         CASE WHEN EXISTS (SELECT 1 FROM packet_dependencies e WHERE e.packet_id = p.id AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = e.id) AND NOT EXISTS (SELECT 1 FROM packets m JOIN sealed_bundles sb ON sb.packet_id = m.id WHERE m.lineage_key = e.depends_on_id AND m.status = 'sealed' AND sb.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER))) THEN 0 ELSE 1 END AS deps_satisfied,
+         CASE WHEN EXISTS (SELECT 1 FROM route_health rh WHERE rh.channel = p.channel AND rh.unhealthy_until IS NOT NULL AND CAST(FLOOR(EXTRACT(EPOCH FROM rh.unhealthy_until)) AS BIGINT) > CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT)) THEN 0 ELSE 1 END AS route_healthy,
+         CASE WHEN (p.cooldown_until IS NOT NULL AND CAST(FLOOR(EXTRACT(EPOCH FROM p.cooldown_until)) AS BIGINT) > CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT)) THEN 1 ELSE 0 END AS cooling
+  FROM packets p
+  LEFT JOIN v_packet_relational_centrality c ON c.packet_id = p.id
+  LEFT JOIN v_packet_field_health fh ON fh.packet_id = p.id
+  LEFT JOIN (WITH latest AS (
+  SELECT f.packet_id, f.kind, (CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT) - CAST(FLOOR(EXTRACT(EPOCH FROM f.created_at)) AS BIGINT)) AS age_sec, CASE f.kind WHEN 'boost' THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.boost_e4'), 1500) AS INTEGER) WHEN 'nudge' THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.nudge_e4'), 500) AS INTEGER) WHEN 'demote' THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.demote_e4'), -1500) AS INTEGER) ELSE CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.pin_e4'), 3000) AS INTEGER) END AS w
+  FROM feedback_events f
+  WHERE NOT EXISTS (SELECT 1 FROM feedback_events g WHERE g.packet_id = f.packet_id
+                    AND g.actor = f.actor AND (g.created_at > f.created_at
+                         OR (g.created_at = f.created_at AND g.id > f.id)))
+),
+decayed AS (
+  SELECT latest.packet_id,
+         CASE WHEN latest.age_sec < 86400 THEN latest.w
+              WHEN latest.age_sec < 259200 THEN (CASE WHEN (latest.w) >= 0 THEN (latest.w) / 2 ELSE -((1 - (latest.w)) / 2) END)
+              ELSE 0 END AS v
+  FROM latest
+),
+s AS (SELECT decayed.packet_id, SUM(decayed.v) AS total FROM decayed GROUP BY decayed.packet_id)
+SELECT s.packet_id,
+       CASE WHEN s.total > CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.clamp_e4'), 3000) AS INTEGER) THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.clamp_e4'), 3000) AS INTEGER) WHEN s.total < -CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.clamp_e4'), 3000) AS INTEGER) THEN -CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.clamp_e4'), 3000) AS INTEGER)
+            ELSE s.total END AS feedback_e4
+FROM s) uf ON uf.packet_id = p.id
+  WHERE NOT p.locked AND p.status IN ('draft', 'evaluating_pre', 'ready', 'queued', 'running')
+    AND NOT EXISTS (SELECT 1 FROM packets s WHERE s.supersedes_id = p.id)
+)
+SELECT x.*, (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS ageing_e4, ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) AS base_score_e4,
+       ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) - x.question_score_e4 + x.feedback_e4 + (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS score_e4,
+       ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) + 2 * x.question_score_e4 + x.feedback_e4 + (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS eva_priority_e4
+FROM x),
+g AS (
+  SELECT s.* FROM s
+  WHERE s.status = 'running'
+     OR (s.status IN ('queued', 'ready') AND s.is_held = 0 AND s.deps_satisfied = 1
+         AND s.route_healthy = 1 AND s.cooling = 0)
+),
+d AS (SELECT COUNT(*) AS queued_depth FROM g WHERE g.status = 'queued')
+SELECT g.*, d.queued_depth,
+       CASE WHEN d.queued_depth < CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'admission.low_depth'), 3) AS INTEGER) THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'admission.low_floor_e4'), 2500) AS INTEGER) ELSE CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'admission.floor_e4'), 3500) AS INTEGER) END AS floor_e4,
+       CASE WHEN g.status = 'running' THEN 1
+            WHEN g.wait_sec >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'admission.bypass_wait_sec'), 7200) AS INTEGER) THEN 1
+            WHEN g.score_e4 >= CASE WHEN d.queued_depth < CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'admission.low_depth'), 3) AS INTEGER) THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'admission.low_floor_e4'), 2500) AS INTEGER) ELSE CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'admission.floor_e4'), 3500) AS INTEGER) END
+            THEN 1 ELSE 0 END AS admissible,
+       CASE WHEN g.status = 'running' THEN 0
+            ELSE ROW_NUMBER() OVER (
+              PARTITION BY CASE WHEN g.status = 'running' THEN 1 ELSE 0 END
+              ORDER BY CASE WHEN g.status = 'queued' THEN 0 ELSE 1 END,
+                       g.score_e4 DESC, g.ready_epoch ASC, g.packet_id ASC)
+       END AS gen_position
+FROM g CROSS JOIN d""",
+        """CREATE VIEW v_eva_queue AS
+WITH s AS (WITH x AS (
+  SELECT p.id AS packet_id, p.ref AS packet_ref, p.status, p.channel, p.root_id,
+         p.lineage_key,
+         p.repo_target_path, p.created_at, p.ready_since, p.crash_count,
+         CAST(FLOOR(EXTRACT(EPOCH FROM COALESCE(p.ready_since, p.created_at))) AS BIGINT) AS ready_epoch,
+         CASE WHEN (CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT) - CAST(FLOOR(EXTRACT(EPOCH FROM COALESCE(p.ready_since, p.created_at))) AS BIGINT)) < 0 THEN 0 ELSE (CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT) - CAST(FLOOR(EXTRACT(EPOCH FROM COALESCE(p.ready_since, p.created_at))) AS BIGINT)) END AS wait_sec,
+         CASE WHEN p.parent_bundle_id IS NULL
+              THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.root_parent_grade_e4'), 5000) AS INTEGER)
+              ELSE COALESCE((SELECT sb.composite_grade_e4 FROM sealed_bundles sb
+                             WHERE sb.id = p.parent_bundle_id),
+                            CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.root_parent_grade_e4'), 5000) AS INTEGER)) END
+           AS parent_grade_e4,
+         COALESCE(c.centrality_e4, 0) AS centrality_e4,
+         COALESCE(fh.question_score_e4, 0) AS question_score_e4,
+         COALESCE(fh.question_context_total, 0) AS question_context_count,
+         COALESCE(fh.missing_mandatory_fields, 0) AS missing_mandatory_fields,
+         COALESCE(fh.missing_optional_fields, 0) AS missing_optional_fields,
+         COALESCE(fh.missing_local_drafts, 0) AS missing_local_drafts,
+         COALESCE(uf.feedback_e4, 0) AS feedback_e4,
+         CASE WHEN p.status = 'held' OR EXISTS (SELECT 1 FROM queue_overrides o WHERE o.packet_ref = p.ref AND o.kind IN ('block', 'hold') AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'override' AND rv.target_id = o.id) AND (o.scope = 'lineage' OR o.target_version = p.version)) THEN 1 ELSE 0 END AS is_held,
+         CASE WHEN EXISTS (SELECT 1 FROM packet_dependencies e WHERE e.packet_id = p.id AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = e.id) AND NOT EXISTS (SELECT 1 FROM packets m JOIN sealed_bundles sb ON sb.packet_id = m.id WHERE m.lineage_key = e.depends_on_id AND m.status = 'sealed' AND sb.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER))) THEN 0 ELSE 1 END AS deps_satisfied,
+         CASE WHEN EXISTS (SELECT 1 FROM route_health rh WHERE rh.channel = p.channel AND rh.unhealthy_until IS NOT NULL AND CAST(FLOOR(EXTRACT(EPOCH FROM rh.unhealthy_until)) AS BIGINT) > CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT)) THEN 0 ELSE 1 END AS route_healthy,
+         CASE WHEN (p.cooldown_until IS NOT NULL AND CAST(FLOOR(EXTRACT(EPOCH FROM p.cooldown_until)) AS BIGINT) > CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT)) THEN 1 ELSE 0 END AS cooling
+  FROM packets p
+  LEFT JOIN v_packet_relational_centrality c ON c.packet_id = p.id
+  LEFT JOIN v_packet_field_health fh ON fh.packet_id = p.id
+  LEFT JOIN (WITH latest AS (
+  SELECT f.packet_id, f.kind, (CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT) - CAST(FLOOR(EXTRACT(EPOCH FROM f.created_at)) AS BIGINT)) AS age_sec, CASE f.kind WHEN 'boost' THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.boost_e4'), 1500) AS INTEGER) WHEN 'nudge' THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.nudge_e4'), 500) AS INTEGER) WHEN 'demote' THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.demote_e4'), -1500) AS INTEGER) ELSE CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.pin_e4'), 3000) AS INTEGER) END AS w
+  FROM feedback_events f
+  WHERE NOT EXISTS (SELECT 1 FROM feedback_events g WHERE g.packet_id = f.packet_id
+                    AND g.actor = f.actor AND (g.created_at > f.created_at
+                         OR (g.created_at = f.created_at AND g.id > f.id)))
+),
+decayed AS (
+  SELECT latest.packet_id,
+         CASE WHEN latest.age_sec < 86400 THEN latest.w
+              WHEN latest.age_sec < 259200 THEN (CASE WHEN (latest.w) >= 0 THEN (latest.w) / 2 ELSE -((1 - (latest.w)) / 2) END)
+              ELSE 0 END AS v
+  FROM latest
+),
+s AS (SELECT decayed.packet_id, SUM(decayed.v) AS total FROM decayed GROUP BY decayed.packet_id)
+SELECT s.packet_id,
+       CASE WHEN s.total > CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.clamp_e4'), 3000) AS INTEGER) THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.clamp_e4'), 3000) AS INTEGER) WHEN s.total < -CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.clamp_e4'), 3000) AS INTEGER) THEN -CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.clamp_e4'), 3000) AS INTEGER)
+            ELSE s.total END AS feedback_e4
+FROM s) uf ON uf.packet_id = p.id
+  WHERE NOT p.locked AND p.status IN ('draft', 'evaluating_pre', 'ready', 'queued', 'running')
+    AND NOT EXISTS (SELECT 1 FROM packets s WHERE s.supersedes_id = p.id)
+)
+SELECT x.*, (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS ageing_e4, ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) AS base_score_e4,
+       ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) - x.question_score_e4 + x.feedback_e4 + (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS score_e4,
+       ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) + 2 * x.question_score_e4 + x.feedback_e4 + (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS eva_priority_e4
+FROM x),
+g AS (WITH s AS (WITH x AS (
+  SELECT p.id AS packet_id, p.ref AS packet_ref, p.status, p.channel, p.root_id,
+         p.lineage_key,
+         p.repo_target_path, p.created_at, p.ready_since, p.crash_count,
+         CAST(FLOOR(EXTRACT(EPOCH FROM COALESCE(p.ready_since, p.created_at))) AS BIGINT) AS ready_epoch,
+         CASE WHEN (CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT) - CAST(FLOOR(EXTRACT(EPOCH FROM COALESCE(p.ready_since, p.created_at))) AS BIGINT)) < 0 THEN 0 ELSE (CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT) - CAST(FLOOR(EXTRACT(EPOCH FROM COALESCE(p.ready_since, p.created_at))) AS BIGINT)) END AS wait_sec,
+         CASE WHEN p.parent_bundle_id IS NULL
+              THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.root_parent_grade_e4'), 5000) AS INTEGER)
+              ELSE COALESCE((SELECT sb.composite_grade_e4 FROM sealed_bundles sb
+                             WHERE sb.id = p.parent_bundle_id),
+                            CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.root_parent_grade_e4'), 5000) AS INTEGER)) END
+           AS parent_grade_e4,
+         COALESCE(c.centrality_e4, 0) AS centrality_e4,
+         COALESCE(fh.question_score_e4, 0) AS question_score_e4,
+         COALESCE(fh.question_context_total, 0) AS question_context_count,
+         COALESCE(fh.missing_mandatory_fields, 0) AS missing_mandatory_fields,
+         COALESCE(fh.missing_optional_fields, 0) AS missing_optional_fields,
+         COALESCE(fh.missing_local_drafts, 0) AS missing_local_drafts,
+         COALESCE(uf.feedback_e4, 0) AS feedback_e4,
+         CASE WHEN p.status = 'held' OR EXISTS (SELECT 1 FROM queue_overrides o WHERE o.packet_ref = p.ref AND o.kind IN ('block', 'hold') AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'override' AND rv.target_id = o.id) AND (o.scope = 'lineage' OR o.target_version = p.version)) THEN 1 ELSE 0 END AS is_held,
+         CASE WHEN EXISTS (SELECT 1 FROM packet_dependencies e WHERE e.packet_id = p.id AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = e.id) AND NOT EXISTS (SELECT 1 FROM packets m JOIN sealed_bundles sb ON sb.packet_id = m.id WHERE m.lineage_key = e.depends_on_id AND m.status = 'sealed' AND sb.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER))) THEN 0 ELSE 1 END AS deps_satisfied,
+         CASE WHEN EXISTS (SELECT 1 FROM route_health rh WHERE rh.channel = p.channel AND rh.unhealthy_until IS NOT NULL AND CAST(FLOOR(EXTRACT(EPOCH FROM rh.unhealthy_until)) AS BIGINT) > CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT)) THEN 0 ELSE 1 END AS route_healthy,
+         CASE WHEN (p.cooldown_until IS NOT NULL AND CAST(FLOOR(EXTRACT(EPOCH FROM p.cooldown_until)) AS BIGINT) > CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT)) THEN 1 ELSE 0 END AS cooling
+  FROM packets p
+  LEFT JOIN v_packet_relational_centrality c ON c.packet_id = p.id
+  LEFT JOIN v_packet_field_health fh ON fh.packet_id = p.id
+  LEFT JOIN (WITH latest AS (
+  SELECT f.packet_id, f.kind, (CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT) - CAST(FLOOR(EXTRACT(EPOCH FROM f.created_at)) AS BIGINT)) AS age_sec, CASE f.kind WHEN 'boost' THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.boost_e4'), 1500) AS INTEGER) WHEN 'nudge' THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.nudge_e4'), 500) AS INTEGER) WHEN 'demote' THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.demote_e4'), -1500) AS INTEGER) ELSE CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.pin_e4'), 3000) AS INTEGER) END AS w
+  FROM feedback_events f
+  WHERE NOT EXISTS (SELECT 1 FROM feedback_events g WHERE g.packet_id = f.packet_id
+                    AND g.actor = f.actor AND (g.created_at > f.created_at
+                         OR (g.created_at = f.created_at AND g.id > f.id)))
+),
+decayed AS (
+  SELECT latest.packet_id,
+         CASE WHEN latest.age_sec < 86400 THEN latest.w
+              WHEN latest.age_sec < 259200 THEN (CASE WHEN (latest.w) >= 0 THEN (latest.w) / 2 ELSE -((1 - (latest.w)) / 2) END)
+              ELSE 0 END AS v
+  FROM latest
+),
+s AS (SELECT decayed.packet_id, SUM(decayed.v) AS total FROM decayed GROUP BY decayed.packet_id)
+SELECT s.packet_id,
+       CASE WHEN s.total > CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.clamp_e4'), 3000) AS INTEGER) THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.clamp_e4'), 3000) AS INTEGER) WHEN s.total < -CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.clamp_e4'), 3000) AS INTEGER) THEN -CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.clamp_e4'), 3000) AS INTEGER)
+            ELSE s.total END AS feedback_e4
+FROM s) uf ON uf.packet_id = p.id
+  WHERE NOT p.locked AND p.status IN ('draft', 'evaluating_pre', 'ready', 'queued', 'running')
+    AND NOT EXISTS (SELECT 1 FROM packets s WHERE s.supersedes_id = p.id)
+)
+SELECT x.*, (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS ageing_e4, ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) AS base_score_e4,
+       ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) - x.question_score_e4 + x.feedback_e4 + (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS score_e4,
+       ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) + 2 * x.question_score_e4 + x.feedback_e4 + (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS eva_priority_e4
+FROM x),
+g AS (
+  SELECT s.* FROM s
+  WHERE s.status = 'running'
+     OR (s.status IN ('queued', 'ready') AND s.is_held = 0 AND s.deps_satisfied = 1
+         AND s.route_healthy = 1 AND s.cooling = 0)
+),
+d AS (SELECT COUNT(*) AS queued_depth FROM g WHERE g.status = 'queued')
+SELECT g.*, d.queued_depth,
+       CASE WHEN d.queued_depth < CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'admission.low_depth'), 3) AS INTEGER) THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'admission.low_floor_e4'), 2500) AS INTEGER) ELSE CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'admission.floor_e4'), 3500) AS INTEGER) END AS floor_e4,
+       CASE WHEN g.status = 'running' THEN 1
+            WHEN g.wait_sec >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'admission.bypass_wait_sec'), 7200) AS INTEGER) THEN 1
+            WHEN g.score_e4 >= CASE WHEN d.queued_depth < CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'admission.low_depth'), 3) AS INTEGER) THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'admission.low_floor_e4'), 2500) AS INTEGER) ELSE CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'admission.floor_e4'), 3500) AS INTEGER) END
+            THEN 1 ELSE 0 END AS admissible,
+       CASE WHEN g.status = 'running' THEN 0
+            ELSE ROW_NUMBER() OVER (
+              PARTITION BY CASE WHEN g.status = 'running' THEN 1 ELSE 0 END
+              ORDER BY CASE WHEN g.status = 'queued' THEN 0 ELSE 1 END,
+                       g.score_e4 DESC, g.ready_epoch ASC, g.packet_id ASC)
+       END AS gen_position
+FROM g CROSS JOIN d),
+latest AS (SELECT MAX(q.epoch_id) AS epoch_id FROM queue_epoch_snapshot q)
+SELECT s.packet_id, s.packet_ref, s.status, s.missing_mandatory_fields,
+       s.missing_optional_fields, s.missing_local_drafts, s.question_context_count,
+       s.question_score_e4, s.score_e4, s.eva_priority_e4, s.ready_epoch
+FROM s
+WHERE s.status IN ('draft', 'evaluating_pre', 'ready', 'queued')
+  AND (s.missing_mandatory_fields > 0 OR s.missing_optional_fields > 0
+       OR s.question_context_count > 0)
+  AND (s.status IN ('draft', 'evaluating_pre')
+       OR s.packet_id IN (SELECT g.packet_id FROM g))
+  AND NOT EXISTS (SELECT 1 FROM queue_epoch_snapshot q JOIN latest ON q.epoch_id = latest.epoch_id
+                  WHERE q.packet_id = s.packet_id AND q.is_locked_out)""",
         """CREATE VIEW v_run_attempts AS
 SELECT r.id AS generation_run_id, r.packet_id, r.packet_version, r.state, r.channel,
        r.fencing_token, r.attempts, r.max_attempts, c.id AS channel_run_id, c.run_id,

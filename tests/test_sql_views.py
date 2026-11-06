@@ -23,7 +23,9 @@ def test_the_baseline_carries_every_master_view(dialect: str) -> None:
     statements = baseline().STATEMENTS[dialect]
     for sql in all_view_statements(dialect):
         assert sql in statements
-    assert (*HEAD_VIEWS, *VIEW_NAMES, *RUN_VIEWS) == ALL_VIEW_NAMES
+    from orchestrator.sql import genqueue
+
+    assert (*HEAD_VIEWS, *VIEW_NAMES, *genqueue.VIEW_NAMES, *RUN_VIEWS) == ALL_VIEW_NAMES
 
 
 @pytest.mark.parametrize("dialect", ["sqlite", "postgresql"])

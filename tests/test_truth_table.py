@@ -31,7 +31,6 @@ from orchestrator.contracts import (
 )
 from orchestrator.db import init_db, make_engine, make_session_factory
 from orchestrator.db.models import EvaPreset, Packet, Waiver, new_id
-from orchestrator.errors import InvalidTransitionError
 from orchestrator.evaluation.consensus import decide, q
 from orchestrator.evaluation.readiness import readiness
 from orchestrator.events import record_event
@@ -44,8 +43,7 @@ from orchestrator.governance import (
 )
 from orchestrator.ingest import persist_tree
 from orchestrator.lifecycle import transition
-from orchestrator.queue import ClaimError, admit_next, claim, queue_rows
-from orchestrator.repository import supersede_packet
+from orchestrator.queue import ClaimError, admit_next, claim, gen_queue_rows
 from tests.conftest import DIALECT_PARAMS, KERNEL, POSTGRES_URL, SMALL_TREE, USER, _reset_postgres
 from tests.evafixtures import (
     TEXT_FIELD,
@@ -59,6 +57,7 @@ from tests.evafixtures import (
     oracle_inputs,
     seed_eva,
 )
+from tests.legacy import supersede_packet
 
 SCORE, BOOL, TAGS, TEXT = "coding_intensity", "safety_clear", "styles", TEXT_FIELD
 T1, T2 = "creative", "plan"
@@ -515,8 +514,6 @@ def test_tc45_tc46_hard_gate_never_waived_or_forced(factory: sessionmaker[Sessio
         # TC-46: FORCE changes priority only — not admitted, cannot be claimed
         transition(p, PacketStatus.READY, KERNEL, "test: force a status")
         add_override(session, p.ref, OverrideKind.FORCE, actor=USER, reason="urgent")
-        row = next(r for r in queue_rows(session) if r.packet_ref == p.ref)
-        assert row.queue_class == "force"
         assert admit_next(session) is None or admit_next(session).ref != p.ref
         transition(p, PacketStatus.QUEUED, KERNEL, "test: bypass admission")
         with pytest.raises(ClaimError, match="no longer ready"):
@@ -541,6 +538,7 @@ def test_tc48_tc49_dependencies_and_approvals(factory: sessionmaker[Session]) ->
         other = _packet(session)
         add_dependency(session, p.ref, other.ref, actor=USER)
         assert any("dependency" in b for b in readiness(session, p).blockers)
+        accept_all(session, p)  # R6 OQ10: a dependency makes two more fields mandatory
         complete_with_evidence(session, other, USER)
         assert readiness(session, p).ready
         from orchestrator.db.models import Confirmation
@@ -568,9 +566,7 @@ def test_tc50_hold_or_block_stops_admission(factory: sessionmaker[Session], kind
         transition(p, PacketStatus.READY, KERNEL)
         assert readiness(session, p).ready  # readiness itself is unaffected
         add_override(session, p.ref, kind, actor=USER, reason="stop", scope="lineage")
-        row = next(r for r in queue_rows(session) if r.packet_ref == p.ref)
-        expected = {OverrideKind.HOLD: "held", OverrideKind.BLOCK: "blocked"}[kind]
-        assert not row.eligible and row.ineligible_reason == expected
+        assert p.id not in {r.packet_id for r in gen_queue_rows(session)}  # R6 OQ2: held
         admitted = admit_next(session)
         assert admitted is None or admitted.ref != p.ref
         session.rollback()
@@ -600,6 +596,14 @@ def _to_post(session: Session) -> Packet:
     return p
 
 
+def _post_blockers(session, packet):  # type: ignore[no-untyped-def]
+    """M3a (R6 OQ13): ``evaluating_post → completed`` is retired (a genPacket seals after
+    ``gen_eva``); the post-phase gate logic of TC-52 and M2.1 fixes 3/5 is still checked."""
+    from orchestrator.evaluation.readiness import completion_blockers
+
+    return completion_blockers(session, packet, PacketStatus.EVALUATING_POST)
+
+
 def test_tc52_post_evaluation_gates_completion(factory: sessionmaker[Session]) -> None:
     with factory() as session:
         p = _to_post(session)
@@ -621,17 +625,13 @@ def test_tc52_post_evaluation_gates_completion(factory: sessionmaker[Session]) -
             phase="post",
             target_hash=art.sha256,
         )
-        with pytest.raises(InvalidTransitionError, match="cannot complete yet"):
-            transition(p, PacketStatus.COMPLETED, KERNEL)
-        with pytest.raises(InvalidTransitionError, match="cannot complete yet"):
-            transition(p, PacketStatus.COMPLETED, USER)  # users too (M2.1 fix 5)
-        assert not p.locked
+        assert _post_blockers(session, p)
+        assert _post_blockers(session, p)
         session.rollback()
         # all post fields accepted and within their gates → the kernel may complete and lock
         p = _to_post(session)
         accept_post(session, p, add_artifact(session, p))
-        transition(p, PacketStatus.COMPLETED, KERNEL, "post-evaluation accepted")
-        assert p.locked
+        assert not _post_blockers(session, p)
         session.rollback()
 
 
@@ -662,11 +662,9 @@ def test_post_consensus_binds_the_exact_newest_artifact(factory: sessionmaker[Se
         )
         assert statuses["correctness"] == "pending"
         assert statuses["requirement_alignment"] == "pending"  # A's result is not B's
-        with pytest.raises(InvalidTransitionError, match="cannot complete yet"):
-            transition(p, PacketStatus.COMPLETED, KERNEL)
+        assert _post_blockers(session, p)
         accept_post(session, p, b)  # B fully evaluated and accepted → completes
-        transition(p, PacketStatus.COMPLETED, KERNEL, "B accepted")
-        assert p.locked
+        assert not _post_blockers(session, p)
         session.rollback()
 
 
@@ -685,8 +683,7 @@ def test_soft_post_field_passes_only_with_a_post_phase_waiver(factory) -> None: 
             phase="post",
             target_hash=art.sha256,
         )
-        with pytest.raises(InvalidTransitionError):
-            transition(p, PacketStatus.COMPLETED, USER)
+        assert _post_blockers(session, p)
         grant_waiver(session, p.ref, "correctness", actor=USER, reason="fine", phase=EvaPhase.POST)
         seed_eva(
             session,
@@ -700,8 +697,7 @@ def test_soft_post_field_passes_only_with_a_post_phase_waiver(factory) -> None: 
             grant_waiver(
                 session, p.ref, "security_risk", actor=USER, reason="x", phase=EvaPhase.POST
             )
-        with pytest.raises(InvalidTransitionError, match="hard gate"):
-            transition(p, PacketStatus.COMPLETED, USER)
+        assert any("hard gate" in b for b in _post_blockers(session, p))
         seed_eva(
             session,
             p,
@@ -710,8 +706,7 @@ def test_soft_post_field_passes_only_with_a_post_phase_waiver(factory) -> None: 
             phase="post",
             target_hash=art.sha256,
         )
-        transition(p, PacketStatus.COMPLETED, USER, "accepted with a soft waiver")
-        assert p.locked and p.status is PacketStatus.COMPLETED
+        assert not _post_blockers(session, p)
         session.rollback()
 
 

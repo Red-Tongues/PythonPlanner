@@ -40,8 +40,9 @@ LOCKABLE_TABLES: tuple[str, ...] = ("projects", "objectives", "packets")
 
 #: Locking statuses checked by the M1 completion trigger. ``closed_unverified`` (M2.1) has its
 #: own trigger (``_m21_*``).
-_LOCKING_SQL = "'archived', 'completed'"
-assert {"archived", "completed"} <= {s.value for s in LOCKING_STATUSES}
+_LOCKING_SQL = "'archived', 'completed', 'sealed'"
+_LOCK_MSG = "completed/archived/sealed packets must be locked with completed_at set"
+assert {"archived", "completed", "sealed"} <= {s.value for s in LOCKING_STATUSES}
 
 
 # --------------------------------------------------------------------------- SQLite
@@ -83,7 +84,7 @@ def _sqlite_statements() -> list[str]:
             timing,
             "packets",
             lock_check,
-            "completed/archived packets must be locked with completed_at set",
+            "completed/archived/sealed packets must be locked with completed_at set",
         )
         stmts += t(
             f"trg_artifacts_accepted_at_{op}",
@@ -175,7 +176,7 @@ def _postgresql_statements() -> list[str]:
             "orch_packets_completion_guard",
             f"  IF NEW.status IN ({_LOCKING_SQL})\n"
             "     AND (NOT NEW.locked OR NEW.completed_at IS NULL) THEN\n"
-            f"    {_pg_raise('completed/archived packets must be locked with completed_at set')}\n"
+            f"    {_pg_raise(_LOCK_MSG)}\n"
             "  END IF;",
         ),
         _pg_function(
@@ -269,7 +270,7 @@ LINEAGE: dict[str, tuple[tuple[str, ...], str]] = {
         "EXISTS (SELECT 1 FROM packets d WHERE d.objective_id = OLD.id)",
     ),
     "packets": (
-        ("project_id", "objective_id", "parent_id", "root_id"),
+        ("project_id", "objective_id", "parent_id", "root_id", "lineage_key"),
         "EXISTS (SELECT 1 FROM packets d WHERE d.id <> OLD.id "
         "AND (d.parent_id = OLD.id OR d.root_id = OLD.id)) "
         "OR EXISTS (SELECT 1 FROM evaluation_passes d WHERE d.packet_id = OLD.id) "
@@ -731,10 +732,16 @@ M3_APPEND_ONLY: tuple[str, ...] = (
 #: M3 tables whose rows are never deleted (mutable state, but history is kept)
 M3_NO_DELETE: tuple[str, ...] = ("kernel_leases", "governor_states", "budget_counters")
 #: generation_runs columns fixed from insert (in addition to 0005's snapshot binding)
-RUN_FROZEN: tuple[str, ...] = ("claimed_by", "channel", "fencing_token", "created_at")
+RUN_FROZEN: tuple[str, ...] = (
+    "claimed_by",
+    "channel",
+    "fencing_token",
+    "claim_content_revision",
+    "created_at",
+)
 #: generation_runs columns that may be set once and never changed afterwards
 RUN_WRITE_ONCE: tuple[str, ...] = ("manifest_hash", "commit_sha")
-RUN_TERMINAL_SQL = "'failed', 'stale', 'succeeded', 'abandoned'"
+RUN_TERMINAL_SQL = "'failed', 'stale', 'succeeded', 'abandoned', 'crashed'"
 RUN_BINDINGS_MSG = "generation run bindings are frozen (gate revision moves by +1 only)"
 GOVERNOR_MSG = "a governor state change must increase its revision and keep its scope"
 
@@ -950,6 +957,180 @@ def is_transition_violation(exc: BaseException) -> bool:
     return TRANSITION_MARKER in str(exc)
 
 
+# --------------------------------------------------------------------------- M3a (R6)
+# The genPacket loop: revision capture, append-only history, sealed bundles and queue records.
+#
+# R6 OQ32: every guard (immutability, lineage, transition table) is a BEFORE trigger and the
+# outbox capture is an AFTER UPDATE trigger, so a rejected change aborts before any outbox row
+# is written, on both dialects. R6 OQ33: ``content_revision`` moves only with an audited column.
+
+#: table → audited text-comparable columns (an UPDATE OF them is captured into the outbox)
+AUDITED_COLUMNS: dict[str, tuple[str, ...]] = {
+    "packets": (
+        "title",
+        "prompt_description",
+        "response_structure",
+        "response_contract",
+        "repo_target_path",
+        "priority_level",
+        "manual_boost",
+    ),
+    "projects": ("name", "brief", "industry", "scope"),
+    "objectives": ("name", "brief", "priority_level"),
+}
+ENTITY_OF: dict[str, str] = {"packets": "packet", "projects": "project", "objectives": "objective"}
+M3A_APPEND_ONLY: tuple[str, ...] = (
+    "content_blobs",
+    "field_revisions",
+    "sealed_bundles",
+    "eva_discard_log",
+    "queue_epoch_snapshot",
+    "feedback_events",
+    "crash_events",
+)
+M3A_NO_DELETE: tuple[str, ...] = ("route_health", "eva_context_links")
+#: eva_context_links columns frozen from insert (only ``is_questioned`` may go false → true)
+LINK_FROZEN: tuple[str, ...] = (
+    "id",
+    "eva_packet_id",
+    "packet_id",
+    "field_name",
+    "source_type",
+    "source_id",
+    "source_ref",
+    "source_hash",
+    "source_revision",
+    "link_strength",
+    "link_reason",
+    "quote",
+    "created_at",
+)
+LINK_MSG = "eva_context_links are append-only; only is_questioned may go from false to true"
+
+
+def _m3a_sqlite() -> list[str]:
+    t = _create_sqlite_trigger
+    stmts = [s for table in M3A_APPEND_ONLY for s in _sqlite_append_only(table)]
+    stmts += [
+        t(
+            f"trg_{table}_no_delete",
+            "BEFORE DELETE",
+            table,
+            "1 = 1",
+            f"{table} rows cannot be deleted",
+        )  # fmt: skip
+        for table in M3A_NO_DELETE
+    ]
+    stmts.append(
+        t(
+            "trg_eva_context_links_frozen",
+            "BEFORE UPDATE",
+            "eva_context_links",
+            " OR ".join(f"NEW.{c} IS NOT OLD.{c}" for c in LINK_FROZEN)
+            + " OR (OLD.is_questioned = 1 AND NEW.is_questioned IS NOT 1)",
+            LINK_MSG,
+        )
+    )
+    for table, columns in AUDITED_COLUMNS.items():
+        cols = ", ".join(columns)
+        changed = " OR ".join(f"OLD.{c} IS NOT NEW.{c}" for c in columns)
+        same = "OLD.content_revision = NEW.content_revision"
+        stmts.append(
+            f"CREATE TRIGGER trg_{table}_content_revision AFTER UPDATE OF {cols} ON {table} "
+            f"FOR EACH ROW WHEN ({changed}) AND {same} "
+            f"BEGIN UPDATE {table} SET content_revision = OLD.content_revision + 1, "
+            "last_producer = 'user_sql' WHERE id = NEW.id; END"
+        )
+        producer = f"CASE WHEN {same} THEN 'user_sql' ELSE NEW.last_producer END"
+        revision = f"CASE WHEN {same} THEN OLD.content_revision + 1 ELSE NEW.content_revision END"
+        selects = "\nUNION ALL\n".join(
+            f"SELECT ctx.tx, '{ENTITY_OF[table]}', NEW.id, '{c}', CAST(OLD.{c} AS TEXT), "
+            f"CAST(NEW.{c} AS TEXT), {producer}, {revision}, CURRENT_TIMESTAMP FROM ctx "
+            f"WHERE OLD.{c} IS NOT NEW.{c}"
+            for c in columns
+        )
+        stmts.append(
+            f"CREATE TRIGGER trg_{table}_outbox AFTER UPDATE OF {cols} ON {table} "
+            f"FOR EACH ROW WHEN {changed}\nBEGIN\n"
+            "INSERT INTO raw_revision_outbox (tx_id, entity_type, entity_id, field_name, "
+            "old_value, new_value, producer, content_revision, captured_at)\n"
+            f"WITH ctx AS (SELECT lower(hex(randomblob(8))) AS tx)\n{selects};\nEND"
+        )
+    return stmts
+
+
+def _m3a_postgresql() -> list[str]:
+    stmts: list[str] = [
+        _pg_function(
+            "orch_eva_context_links_guard",
+            "  IF TG_OP = 'DELETE' THEN\n"
+            f"    {_pg_raise('eva_context_links rows cannot be deleted')}\n"
+            "  END IF;\n"
+            "  IF "
+            + "\n     OR ".join(f"NEW.{c} IS DISTINCT FROM OLD.{c}" for c in LINK_FROZEN)
+            + "\n     OR (OLD.is_questioned AND NOT NEW.is_questioned) THEN\n"
+            f"    {_pg_raise(LINK_MSG)}\n"
+            "  END IF;",
+        )
+    ]
+    for table, columns in AUDITED_COLUMNS.items():
+        changed = "\n     OR ".join(f"OLD.{c} IS DISTINCT FROM NEW.{c}" for c in columns)
+        stmts.append(
+            _pg_function(
+                f"orch_{table}_content_revision",
+                f"  IF ({changed})\n"
+                "     AND OLD.content_revision = NEW.content_revision THEN\n"
+                "    NEW.content_revision := OLD.content_revision + 1;\n"
+                "    NEW.last_producer := 'user_sql';\n"
+                "  END IF;",
+            )
+        )
+        inserts = "\n".join(
+            f"  IF OLD.{c} IS DISTINCT FROM NEW.{c} THEN\n"
+            "    INSERT INTO raw_revision_outbox (tx_id, entity_type, entity_id, field_name, "
+            "old_value, new_value, producer, content_revision, captured_at)\n"
+            f"    VALUES (v_tx, '{ENTITY_OF[table]}', NEW.id, '{c}', OLD.{c}::text, "
+            f"NEW.{c}::text, NEW.last_producer, NEW.content_revision, now());\n"
+            "  END IF;"
+            for c in columns
+        )
+        stmts.append(
+            f"CREATE OR REPLACE FUNCTION orch_{table}_outbox() RETURNS trigger LANGUAGE plpgsql "
+            "AS $fn$\nDECLARE v_tx text := pg_current_xact_id()::text;\nBEGIN\n"
+            f"{inserts}\n  RETURN NULL;\nEND;\n$fn$"
+        )
+        cols = ", ".join(columns)
+        stmts += [
+            f"CREATE TRIGGER trg_{table}_content_revision BEFORE UPDATE OF {cols} ON {table} "
+            f"FOR EACH ROW EXECUTE FUNCTION orch_{table}_content_revision()",
+            f"CREATE TRIGGER trg_{table}_outbox AFTER UPDATE OF {cols} ON {table} "
+            f"FOR EACH ROW EXECUTE FUNCTION orch_{table}_outbox()",
+        ]
+    for table in M3A_APPEND_ONLY:
+        stmts += [
+            f"CREATE TRIGGER trg_{table}_append_only BEFORE UPDATE OR DELETE ON {table} "
+            "FOR EACH ROW EXECUTE FUNCTION orch_append_only_guard()",
+            f"CREATE TRIGGER trg_{table}_no_truncate BEFORE TRUNCATE ON {table} "
+            "FOR EACH STATEMENT EXECUTE FUNCTION orch_append_only_guard()",
+        ]
+    stmts += [
+        "CREATE TRIGGER trg_route_health_no_delete BEFORE DELETE ON route_health "
+        "FOR EACH ROW EXECUTE FUNCTION orch_no_delete_guard()",
+        "CREATE TRIGGER trg_eva_context_links_guard BEFORE UPDATE OR DELETE ON eva_context_links "
+        "FOR EACH ROW EXECUTE FUNCTION orch_eva_context_links_guard()",
+    ]
+    return stmts
+
+
+def m3a_statements(dialect: str) -> list[str]:
+    """The M3a trigger DDL, per dialect."""
+    if dialect == "sqlite":
+        return _m3a_sqlite()
+    if dialect == "postgresql":
+        return _m3a_postgresql()
+    raise NotImplementedError(f"no M3a DDL for dialect {dialect!r}")
+
+
 # --------------------------------------------------------------------------- assembly
 
 
@@ -973,10 +1154,10 @@ def trigger_statements(dialect: str) -> list[str]:
     order: functions before the triggers that use them. Each trigger appears once."""
     if dialect == "sqlite":
         groups = [_sqlite_statements(), _lineage("sqlite"), _m2_sqlite(), _m21_sqlite()]
-        groups.append(m3_statements("sqlite"))
+        groups += [m3_statements("sqlite"), m3a_statements("sqlite")]
     elif dialect == "postgresql":
         groups = [_postgresql_statements(), _lineage("postgresql"), _m2_postgresql()]
-        groups += [_m21_postgresql(), m3_statements("postgresql")]
+        groups += [_m21_postgresql(), m3_statements("postgresql"), m3a_statements("postgresql")]
     else:
         raise NotImplementedError(f"no DDL for dialect {dialect!r}")
     return [s for group in groups for s in group if not s.startswith("DROP ")]

@@ -4,6 +4,196 @@ Newest entries first. Every agent session appends an entry: what changed, decisi
 
 ---
 
+## 2026-11-06 00:40-01:10 - R6: Argon rulings on M3a OQ1-OQ35 (PM)
+
+- The CFO delegated binding decisions on M3a OQ1-OQ35 to Argon, without further CFO sign-off.
+- Argon issued the rulings; PM verification led to corrections of OQ7 and OQ32 and a restatement of OQ24.
+- Flags F1 and F2 were left for the CFO and are not adopted.
+- Next: Claude Code implements M3a on a new branch.
+
+---
+
+## 2026-11-06 — Argon's final audit of PR #6: conditions E1, E2, E4 met (Claude Code)
+
+Argon's final audit: **conditional pass**; E3, E5, E6 accepted as-is. M3a stops here (no M3b work).
+
+- **E1 / OQ15:** the seal site in `evaluation/gen_eva.seal_packet` is tagged `@ORCHESTRATOR:PLACEHOLDER (M3b: OQ15 refs/gen wiring)`; the M3a spec has a new *Carry-over to M3b* section that makes `refs/gen/<run_id>` commits and `sealed_bundles.output_ref` population a **mandatory M3b acceptance criterion** (it also lists the `fast_synth`, local-drafts and kernel-tick placeholders).
+- **E2 (5th crash):** `record_crash` makes `running → queued → held` in the caller's single transaction. New test (both dialects): with the 5th crash written but not committed, a second session still sees `running` and its claim fails; after the commit it sees `held` (`crash_limit`), both moves are evented, and a claim still fails. `queued` is never visible to another session.
+- **E4 (soft HOLD during a run):** the seal, the child spawn and the child's starting status commit together. New test (both dialects): before the commit another session sees the parent `running`, no bundle and no child; after it, the parent is `sealed` and locked and the child exists.
+  - **Which packet ends up held — stated, not changed:** none, because of the user's HOLD. A HOLD is a queue override keyed by the packet's ref; it never stops the run (OQ19). At the seal the parent is sealed and locked, and the override stays on the parent's ref, where it has no further effect. The child has a new ref, so the HOLD does **not** carry to it; the child is held only when the parent's grade is ≥ 8,500 (`grade_met`). If the HOLD should land on the child, that needs a ruling (carry active HOLD/BLOCK overrides to the child at spawn).
+  - **Correction:** checkpoint 3 said a soft HOLD on a running packet "takes effect when the run ends". That was wrong, as described above.
+
+**Tests:** full run on SQLite + PostgreSQL 16: 704 passed, 4 skipped (pre-existing dialect skips), 0 failed, in one run (11 min 45 s). Ruff clean.
+
+**Next:** none for M3a. PR #6 stays a draft and unmerged; M3b is not started.
+
+---
+
+## 2026-11-06 — M3a checkpoint 3 (after C5), for Argon's final audit (Claude Code)
+
+**What landed**
+- **3442deb — run bindings, crash path, R6 transitions.** `binding_mismatch`/MR1 guard: fencing token, ownership, lease, owner close/BLOCK and GLOBAL_PAUSE only — a G/H/C change, an upstream edit, an evaPacket or a soft HOLD never stales a running generation (Q7, OQ19). `abort_run` (CFO_ABORT) revokes the lease. A stale or revoked running packet goes `running → queued` (never `evaluating_pre`). Exit-3 decisions bind the confirmation (decided-once CAS) and the fencing token, not G. `record_crash` (OQ18): run `crashed`, `crash_count + 1`, `running → queued` with cooldown `min(3600, 30·2^(n−1))`, held at 5 (`crash_limit`), route unhealthy 600 s after 3 crashes in 300 s (window excludes exactly t − 300 s). Transition table per R6 (listed in ARCHITECTURE §7.3, "M3a changes").
+- **98c71df — `evaluation/gen_eva.py`.** `complete_generation` (no queue view read before the seal; spy-tested), integer composite grade (OQ16, sonar fallback), seal of the claim-time revision rebuilt from `field_revisions` (OQ20), `spawn_child` (one per bundle, idempotent; `lineage_key`/`root_id` per Argon K1; carried pre-phase results questioned; `draft → ready` / `evaluating_pre` / held `grade_met` at ≥ 8,500), OQ17 prompt template with a pluggable `fast_synth` (**`@ORCHESTRATOR:PLACEHOLDER`**: no local model is wired in M3a, the stub always declines and the template is used; a raising synth also falls back), `LINEAGE_HISTORY_SQL` (by `lineage_key`).
+- Tests: `tests/test_m3a_gen_eva.py` — AC8, AC9 (hash checks), AC28–AC35, boundaries 8,499/8,500, crash counts 3/5, the 300 s window, the CFO example; the M2 completion tests now check `completion_blockers` because `evaluating_post → completed` is retired.
+
+**Tests:** last full run on SQLite + PostgreSQL 16: 696 passed, 4 skipped, plus two failures that were a mid-run doc regeneration and one PG concurrency test whose premise R6 changed (now an owner abort races the dispatch); both re-run green, as did the new AC8/AC9 checks (29/29 gen_eva tests on both dialects). Ruff clean.
+
+**Deviations (new in C5)**
+- **OQ15:** output is not committed to `refs/gen/<run_id>`: M3a has no production repository wired in. `sealed_bundles.output_ref` exists and stays NULL; the artifact's sha256 is the bundle's `artifact_hash`.
+- **Crash at the limit:** R6 has no `running → held` row, so the fifth crash goes `running → queued → held` in one transaction.
+- **Stale runs:** the packet returns to `queued` (R6's new `running → queued`), not to `evaluating_pre` as E7 had it; a BLOCK/HOLD/pending confirmation still defers the move (V2). A soft HOLD on a running packet keeps the run going; the hold takes effect when the run ends.
+- **`failed`:** nothing enters it any more (crashes requeue); it keeps its exits for older rows.
+- **Content address of a blob** is `sha256(json.dumps(value))` (so NULL and '' differ); the bundle hash is `sha256` over `[snapshot_hash, grade, artifact_hash]`.
+- **Split children roll up** when their lineage has a member sealed at `dep_satisfaction_grade_e4`.
+
+**Known issues**
+- K2 (accepted): suite runtime ~11 min on both dialects; profile the views after M3a.
+- `failed` packets from before M3a still have `failed → queued` (retry) and `failed → evaluating_pre`.
+- The kernel tick/daemon that calls `admission_tick`, `next_dispatch`, `complete_generation` and `reconcile_runs` in order is M3b (OQ28); M3a provides and tests the functions.
+
+**Next:** C6 — draft PR to `main` with the AC table and every deviation from R6; Argon's final audit.
+
+---
+
+## 2026-11-06 — C4 fixup after Argon's conditional pass (K1, D1, D7) (Claude Code)
+
+Argon's audit of C1–C4: **conditional pass**. Landed before any child-spawn code (C5 work was stashed and resumed afterwards).
+
+- **K1 (Argon option b, binding) — `packets.lineage_key` (NOT NULL).** Roots and split children: own id (set on insert by an ORM `before_insert` hook when not given; split children keep `root_id = coalesce(parent.root_id, parent.id)` and start at `lineage_depth = 0`). Re-imagined children (C5): `lineage_key = parent.lineage_key`, `lineage_depth + 1`. `lineage_key` joins the immutable ancestry columns of the packet lineage triggers.
+  - Dependency edges resolve to the target's `lineage_key` (`add_dependency`; an edge inside one's own lineage is refused). Satisfaction = some member of that lineage sealed with `composite_grade_e4 >= dep_satisfaction_grade_e4` — nothing else; a completed/archived split parent no longer satisfies an edge. Centrality counts distinct dependent `lineage_key`s; mandatory "has dependents" and the lineage part of the lockout use `lineage_key`. `root_id` stays for the federation tree, roll-up and archival.
+  - **Deviation from R6 OQ13/OQ24** (per Argon K1): edges target the lineage key, not `root_id`.
+  - **Backfill:** none needed — no live data and the single baseline is regenerated; every insert path sets the key (ingest/split: own id via the hook; legacy `supersede` successors in `tests/legacy.py`: the predecessor's key; raw-SQL fixtures pass it explicitly). The `coalesce(root_id, id)` fallback was not needed anywhere.
+  - Roll-up: a split child counts as done when its lineage has a member sealed at the grade bar (or it is a completed legacy row). The test fixture `complete_with_evidence` now finishes a packet by sealing it.
+- **D1 amend:** the plain index is replaced by a partial UNIQUE index `uq_packets_lineage_step (objective_id, lineage_key, lineage_depth) WHERE supersedes_id IS NULL` (both dialects).
+- **D7 amend:** the `missing_local_drafts` exclusion is tagged `@ORCHESTRATOR:PLACEHOLDER (M3b: wire the local-drafts trigger)` in the view and in `eva_queue_select`.
+- **Tests (both dialects):** `tests/test_m3a_lineage.py` — split isolation (sibling A sealed at 7,000 satisfies edges to A only, not to sibling B or to the split parent; separate centrality; locking B does not lock A) and mixed ancestry split → re-imagine → split (inherited vs fresh keys, dependency outcomes).
+- Accepted as-is by Argon: D2, D3, D4, D5, D6, D8, D9.
+
+**Tests:** 669 passed, 4 skipped on SQLite + PostgreSQL 16; ruff clean.
+
+**Known issue (K2, accepted for M3a):** the suite takes ~10 min on both dialects because of the queue views; profile and optimise the views after M3a.
+
+---
+
+## 2026-11-06 — M3a checkpoint 2 (after C4), for Argon's audit (Claude Code)
+
+**What landed since checkpoint 1**
+- **c1b2f60 — docs only:** R6 folded into the M3a spec (every OQ marked *resolved per R6*, OQ29–OQ35 listed, contradicting ACs fixed: AC17/18/20/21/25/26/30/33/34; F1/F2 not adopted). Requirement F (PROJECT_PLAN table and §-text) and CLAUDE.md Golden Rule 1 carry the OQ26 wording. R6 untouched.
+- **C2 b326816 / C3 10ef23b** (split as asked) also gained: a drain-failure test and a re-verify-failure test (whole edit rolls back: zero outbox and `field_revisions` rows, `content_revision` unchanged, both dialects), and "gate-only changes do not bump `content_revision`".
+- **C4 e8f12b6 — queues, readiness, admission.**
+  - `sql/genqueue.py`: `v_packet_mandatory_fields`, `v_packet_field_health`, `v_packet_relational_centrality`, `v_packet_user_feedback`, `v_packet_queue_score`, `v_gen_queue`, `v_eva_queue`; `v_queue` removed. Integer-only arithmetic: settings cast to INTEGER, whole-second epochs (`strftime('%s')` / `FLOOR(EXTRACT(EPOCH))`), non-negative integer division, explicit floor for halving negatives, `(x + 5000) / 10000` rounding.
+  - `admission_tick` (drain → demote → promote → snapshot), `write_epoch_snapshot` with OQ3 lockout flags, `is_locked_out` (reads the newest snapshot only), `next_dispatch` (OQ25: oldest every 5th, incumbency margin 250, snapshot-based), `add_feedback`.
+  - Readiness: mandatory sets (Python `mandatory_fields_for_packet` parity-tested against the view), ambiguity ≤ 4,000, lineage-based dependency satisfaction at `dep_satisfaction_grade_e4`.
+  - Evaluator: lockout refusal with an event; OQ30 commit CAS → `eva_discard_log`; `evaluate_pending` works from `v_eva_queue`.
+  - Catalogue: `risk_assessment`, `interface_stability`, `downstream_contract_clarity`, `sonar_hotspot_alignment` (task-level scores) with pre-phase presets for all 8 universal/relational fields (tier 2, `required = false`: mandatoriness is relational) and post presets for the two new composite-grade fields.
+  - Removed: `enforce_failure_budgets`, failure-budget confirmations, the `priority.*` and failure-budget settings, fair FORCE/PIN admission. New transition row `queued → ready` (OQ12).
+  - Boundary fixtures (PM rule 4): ageing 49:59 / 50:00, question cap 2,250, dependency grade 6,999 / 7,000, depth 2/3 (low floor), wait 7,199 / 7,200 s (bypass), feedback ×1 / ×0.5 / 0 at 24 h / 72 h and the ±3,000 clamp, 21-way tie ordered by `packet_id`.
+
+**Tests:** last full run on both dialects: 664 passed, 4 skipped (dialect-specific skips), 1 failure that was an order-dependent baseline-text issue, fixed in C4 (deferred foreign keys are now sorted); the affected schema tests re-run green. Ruff clean. The suite now takes ~10 min on both dialects (was ~5): the queue views are evaluated per packet.
+
+**Deviations (new in C4)**
+- **AC18 subset:** R6 OQ2 limits genQueue to running/queued/ready, so `draft`/`evaluating_pre` rows of `v_eva_queue` are not genQueue rows; the subset holds for ready/queued rows (spec AC18 updated).
+- **Demotion hysteresis:** a queued packet is measured against the floor at the queued depth *without itself*, otherwise a root admitted under the low floor (depth < 3) is demoted at depth 3 and re-admitted the next tick, forever.
+- **`missing_local_drafts`** is reported (`packets.examples_hash`, new) but is **not** an evaQueue inclusion trigger: nothing in M3a can produce local drafts, so it would keep every packet in evaQueue permanently.
+- **`is_critical_objective_path`** (OQ8) is defined as "the packet's objective has `priority_level >= centrality.critical_priority` (8)"; R6 does not define it.
+- **Dependents/lineage key:** edges target `COALESCE(root_id, id)` per OQ13; because split children and re-imagined children share `root_id`, a split tree counts as one lineage for satisfaction, centrality and lockout (known issue below).
+- **Ambiguity bound:** with FakeProvider scores, 2 of the 15 sample packets now go to `needs_review` (`test_cli_acceptance_chain` updated from 15 to 13 ready + 2 review).
+
+**Known issues**
+- Split trees and re-imagination lineages share `root_id` (R6 OQ24 sets `root_id = coalesce(parent.root_id, parent.id)`), so a sealed sibling in a split tree can satisfy an edge aimed at another member. Needs a CFO/Argon decision if it matters (a separate lineage key).
+- Suite runtime doubled (views). Not optimised yet.
+
+**Next (in order):** C5 — `gen_eva` + seal + child spawn + crash path, binding changes in `runs.py`, the remaining R6 transition-table changes (add `draft → ready`, `running → queued`; remove `ready/queued → evaluating_pre`, `running → failed`, `evaluating_post → completed` for genPackets), AC28–AC35 incl. 8,499/8,500 and crash 3/5 + 300 s boundaries, OQ17 placeholder; then C6 (ARCHITECTURE §7.3, PR).
+
+---
+
+## 2026-11-06 — M3a checkpoint 1 (after C3), for Argon's audit (Claude Code)
+
+Branch `m3a/genpacket-loop` (from `docs/t1c-v3-m3a-spec` @ 8d7058d, R6 included). Pushed after each commit. Not merged; no PR yet.
+
+**What landed**
+- **C1 a60a233 — schema and triggers.** New tables `content_blobs`, `raw_revision_outbox`, `field_revisions`, `sealed_bundles` (`UNIQUE(packet_id)`), `eva_context_links`, `eva_discard_log`, `queue_epoch_snapshot`, `feedback_events`, `crash_events`, `route_health`. New packet columns `content_revision`, `last_producer`, `crash_count`, `cooldown_until`, `hold_reason`, `ready_since`, `lineage_depth`, `parent_bundle_id/hash`; `generation_runs.claim_content_revision` (frozen). Projects/objectives get `content_revision`, `last_producer`. New locked terminal status `sealed` and the row `evaluating_post → sealed`.
+  - Guards stay BEFORE triggers; outbox capture is an AFTER UPDATE trigger on both dialects (OQ32). `content_revision` is bumped only when an audited content column changes (OQ33); status, gate and route changes never bump it.
+  - T1–T6 of the T1-C v2 trigger proof pass against the production DDL, plus "rejected transition / locked edit writes zero outbox rows and leaves `content_revision` unchanged".
+- **C2 b326816 — in-place edits with history.** `update_packet/update_project/update_objective` edit in place and drain the outbox synchronously into blobs + `field_revisions` (one `<entity>.revised` event per revision group). `supersede_*` retired from `src/` (legacy rows and their lineage triggers stay; tests build them via `tests/legacy.py`). `snapshot_at` reconstructs a packet at a content revision (OQ20). A failed drain rolls back the whole edit (test, both dialects).
+- **C3 10ef23b — context links and `question_context`.** Intra-packet `input_hash`; `eva_context_links` with section-offset quote attribution (OQ22), hard-dependency, definition and preset links (OQ23); `v_context_link_status`; `v_field_consensus` adds `question_context`, `question_context_count`, `question_weight_e4` (OQ4) and no longer nulls results for context or definition/preset bumps. Drain re-verifies quotes (OQ34); a failed re-verification rolls the edit back. `require_current_context` retired; ready/queued packets enriched in place, never demoted (OQ12).
+
+**Tests:** 651 collected (392 SQLite, 259 PostgreSQL 16). Last full run: 645 passed, 4 skipped (the existing dialect-specific skips), then the two new rollback tests passed on both. Ruff clean.
+
+**Deviations so far (from R6 / spec)**
+- OQ24 uniqueness `(objective_id, position, lineage_depth)` is an **index, not UNIQUE**: legacy superseded versions and split children share positions, and many fixtures insert such rows. Display order is `(objective, position, lineage_depth, ref)`.
+- OQ21: the `supersedes_id` columns, head views and lineage triggers are **kept** for legacy rows (no live data to migrate, but removing them would touch every lineage test); no `src/` path writes them.
+- `eva_context_links` link to definition and preset revisions use `source_type = 'definition'` (preset links carry `source_id = preset:<field>:<phase>`).
+- The content address of an evaPacket now includes the source-document hash, so a result is never reused across different upstream context.
+- Settings for every R6 constant were added now (`SETTINGS_M3A`); most are read from C4 on.
+
+**Next (in order):** docs-only commit folding R6 into the M3a spec, Requirement F and CLAUDE.md Golden Rule 1 (OQ26); then C4 (queues, readiness, admission, lockout); C5 (gen_eva, seal, child, crash, runs bindings, transition table); C6 (docs, PR).
+
+---
+
+## 2026-11-06 00:05-00:40 - R5: independent audit of the CFO directive, PM decisions (PM)
+
+- Added the R5 audit: Argon directive findings, R&D queue-score critique and GitHub Copilot CI/branch report. Product decisions remain the CFO's; PM decisions are triage and recommendations.
+- Accepted claim-time seal binding and the unbounded lineage/crash-loop risks (OQ29, OQ14, OQ18); recommended numeric stop and crash ceilings.
+- Accepted evaluation lockout races and snapshotting (OQ30-OQ31), trigger ordering on both dialects (OQ32), separate content revision (OQ33), quote re-verification (OQ34), and seal-time outbox draining (OQ35); noted SQLite WAL concurrency and content-blob uniqueness.
+- Recommended bounded queue-score terms, a root default grade, bounded ageing and explicit tie-breaks under OQ4-OQ9; questioned-context boosting conflicts with refresh lockout (OQ5).
+- Main CI was green at 71977eb and PR #3 merge 6b89a18; the earlier known issue is closed. PRs #4 and #5 are open, three squash-merged source branches are cleanup candidates, and review-packs are kept. PR #5 stays draft pending CFO sign-off of OQ1-OQ35.
+
+---
+
+## 2026-11-05 (evening) — CFO directive folded in: T1-C v3, Q1 v2, M3a spec draft (Claude Code, docs only)
+
+Handover from the PM after the CFO's directive (`docs/notes/2026-11-05_CFO_T1C_v2_Directive_and_Review.docx`). The work is **docs only**: no `src/` changes and no M3a code. Branch `docs/t1c-v3-m3a-spec`, one commit per task, draft PR into `main` (not merged). PR #3 was already merged (6b89a18), so the directive's Step 1 is done.
+
+**What changed**
+- **Directive .md** (1813d4d): the committed Markdown is now a verbatim pandoc-checked conversion of the .docx.
+  - The earlier conversion had added a "Subject:" line, dropped the C.ii intro sentence, shortened Sketch 2's heading and changed `sonar_Hotspot_alignment`.
+  - A conversion note says the .docx is authoritative.
+- **PROJECT_PLAN §21** (06b0be4): dated entries for the directive, decisions Q1–Q7 and the PM note that Step 1 is satisfied.
+- **T1-C v3 (Final)** (`docs/notes/2026-11-05_T1C_v3_final.md`, 4b25ea1).
+  - **Kept:** the outbox, `field_revisions`, `content_blobs`, `sealed_bundles`, the trigger proof (T1–T6) and fencing.
+  - **Retired:**
+    - `supersedes_id` cloning of genPackets;
+    - `require_current_context` hard invalidation;
+    - `enforce_failure_budgets` and the K = 3 breaker (plus the lineage retry budget and the 10% prior);
+    - `binding_mismatch` staling on `gate_revision` / upstream `input_hash`;
+    - v2's "re-opening" and episode numbers. A genPacket now seals once and continues as a child.
+- **Q1 v2** (`docs/notes/2026-11-04_Q1_queue_maths_brainstorm.md`, 1fd3f2d):
+  - genQueue with evaQueue as a subset;
+  - continuous Ready/Queued enrichment;
+  - the 0–2 lockout;
+  - mandatory fields gate Ready, and relational score alone gates Queued;
+  - feedback as a weight;
+  - crashes counted apart from grades.
+  - Steps 1–3 are kept as history, each mapped to what Q1 v2 does with it.
+- **M3a spec draft** (`docs/milestones/M3a_genpacket_loop.md`, 15aff22):
+  - scope = Step 3 (a)–(e);
+  - module/view change table (directive C.i, re-located to current line numbers);
+  - 35 acceptance criteria for SQLite + PostgreSQL 16;
+  - a table of 10 state-machine conflicts with ARCHITECTURE §7 / D8;
+  - **28 open questions for the CFO**.
+
+**Decisions / deviations**
+- Treated the directive's sketches as non-production references. Every gap was logged as an open question (OQ1–OQ28) rather than decided. Each one is referenced from T1-C v3 and Q1 v2 where it bites.
+- The biggest ones:
+  - **OQ6:** with the sketch's maths, an isolated root packet never reaches the 3,500 floor.
+  - **OQ13:** sealing every graded parent as `completed` would let poor output satisfy dependencies.
+  - **OQ14:** "a child regardless of grade" means a lineage has no stop rule.
+  - **OQ5:** `question_context` raises rank, which pushes packets into the lockout where they can't be refreshed.
+  - **OQ15:** today's repo write happens before post-evaluation.
+- Not edited: CLAUDE.md Golden Rule 1 and Requirement F. Their rewording waits for the CFO (OQ26).
+
+**Known issues**
+- The directive's C.i line numbers predate PR #3's final tree; the M3a table uses current approximate locations.
+- **`git push` was rejected by GitHub for the first six commits** (`fatal error in commit_refs`), for every ref tried, including pushing an existing commit to a new branch. Those commits were recreated one by one through the GitHub API with the same messages and content. After each one, a fetch and `git diff` showed the remote tree identical to the local commit. Their SHAs differ from the local ones; the SHAs above are the pushed ones. A later plain `git push` (the SHA-fix commit) succeeded, and the cause was not found.
+
+**Next:**
+1. The CFO reviews the draft PR and answers or delegates OQ1–OQ28.
+2. The PM folds the answers into the M3a spec and T1-C v3.
+3. Then M3a implementation (directive Step 4) on a feature branch, with the baseline regenerated and both dialects green.
+
+---
+
 ## 2026-11-05 09:00–09:30 — R4 audit (Argon) J1–J3 fixed (Claude Code)
 
 Argon's independent audit of PR #3 was a **conditional pass: fix J1 and J2, then merge**. The PM decided J1–J3 under sprint autonomy (the CFO is busy). J4/J5 are informational, so no change. Not merged; the PM merges.

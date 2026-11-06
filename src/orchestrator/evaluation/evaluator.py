@@ -107,6 +107,7 @@ PRE_STATUSES_TO_EVALUATE = frozenset(
     {
         PacketStatus.DRAFT,
         PacketStatus.READY,
+        PacketStatus.QUEUED,
         PacketStatus.NEEDS_REVIEW,
         PacketStatus.FAILED,
         PacketStatus.EVALUATING,
@@ -117,6 +118,10 @@ PRE_STATUSES_TO_EVALUATE = frozenset(
 
 class EvaluationError(OrchestratorError):
     """The packet cannot be evaluated in its current state."""
+
+
+class LockedOut(EvaluationError):
+    """R6 OQ3/OQ31: the packet is in the genQueue lockout of the newest epoch snapshot."""
 
 
 class StaleEvaluation(OrchestratorError):
@@ -163,8 +168,19 @@ def head_context(session: Session, packet: Packet) -> tuple[Project, Objective |
     return project, objective
 
 
+#: M3a continuous enrichment (Q3(iii), R6 OQ12): these statuses are evaluated in place and are
+#: never demoted to ``evaluating_pre`` by an evaluation
+ENRICHED_IN_PLACE = frozenset({PacketStatus.READY, PacketStatus.QUEUED})
+
+
 def packet_document(session: Session, packet: Packet) -> tuple[str, str]:
-    """(source document, target hash) for a packet version's pre-phase evaPackets."""
+    """(source document, target hash) for a packet's pre-phase evaPackets.
+
+    M3a (T1-C v3 §2): the document still shows the evaluator the project and objective, but
+    the target hash is **intra-packet** (``context.intra_packet_hash``): an upstream edit never
+    changes it; it raises ``question_context`` through the evaPacket's context links."""
+    from orchestrator.evaluation.context import intra_packet_hash
+
     project, objective = head_context(session, packet)
     document = prompts.source_document(
         project_name=project.name,
@@ -174,7 +190,7 @@ def packet_document(session: Session, packet: Packet) -> tuple[str, str]:
         title=packet.title,
         description=packet.prompt_description,
     )
-    return document, hashlib.sha256(document.encode()).hexdigest()
+    return document, intra_packet_hash(packet)
 
 
 def refresh_input_hash(session: Session, packet: Packet, actor: Actor = EVALUATOR) -> str:
@@ -370,9 +386,13 @@ class Evaluator:
         if phase is EvaPhase.PRE:
             if status not in PRE_STATUSES_TO_EVALUATE:
                 raise EvaluationError(f"{packet.ref} is {status.value}; cannot pre-evaluate now")
+            self._refuse_if_locked_out(packet)
+            from orchestrator.queue import latest_epoch
+
+            self._observed = (packet.content_revision, latest_epoch(session))
             target = refresh_input_hash(session, packet, self.actor)
             document, _ = packet_document(session, packet)
-            if status is not PacketStatus.EVALUATING_PRE:
+            if status not in ENRICHED_IN_PLACE and status is not PacketStatus.EVALUATING_PRE:
                 self._transition(packet, PacketStatus.EVALUATING_PRE, "evaluation started")
         else:
             from orchestrator.evaluation.readiness import newest_artifact
@@ -387,6 +407,7 @@ class Evaluator:
             # M2.1 fix 3: post-phase evaPackets target the exact newest artifact
             document, target = artifact.content, artifact.sha256
 
+        self._document_hash = hashlib.sha256(document.encode()).hexdigest()
         self.verify_models()
         cycle = self._open_cycle(packet, phase, target)
         report.cycle_id = cycle.id
@@ -539,6 +560,7 @@ class Evaluator:
         # definition as evaluated (version and content) and the exemplars it includes
         content_address = sha256(
             target,
+            getattr(self, "_document_hash", None),  # M3a: the context read is part of the address
             preset.id,
             preset.schema_version,
             preset.policy_version,
@@ -716,13 +738,14 @@ class Evaluator:
         fingerprint *recomputed from the current packet, project and objective heads* (so a
         superseded project or objective is caught even though ``packets.input_hash`` has not
         been refreshed yet); for the post phase the sha256 of the packet's newest artifact."""
+        from orchestrator.evaluation.context import intra_packet_hash
         from orchestrator.evaluation.readiness import newest_artifact
 
         packet = self.session.get(Packet, eva.packet_id)
         self.session.refresh(packet)  # type: ignore[arg-type]
         stale = packet is None or not is_head(self.session, packet) or packet.locked
         if not stale and eva.phase is EvaPhase.PRE:
-            _, current = packet_document(self.session, packet)  # type: ignore[arg-type]
+            current = intra_packet_hash(packet)  # type: ignore[arg-type]
             stale = current != eva.target_hash or packet.input_hash != eva.target_hash  # type: ignore[union-attr]
         elif not stale:
             artifact = newest_artifact(self.session, packet)  # type: ignore[arg-type]
@@ -1017,8 +1040,87 @@ class Evaluator:
 
     # ------------------------------------------------------------------ decisions
 
+    def _refuse_if_locked_out(self, packet: Packet) -> None:
+        """AC20 (defence in depth): an evaPacket never runs on a locked-out packet."""
+        from orchestrator.queue import is_locked_out
+
+        if is_locked_out(self.session, packet.id):
+            record_event(
+                self.session,
+                actor=self.actor,
+                action="evaluation.lockout_refused",
+                entity_type="packet",
+                entity_id=packet.id,
+                entity_ref=packet.ref,
+                entity_version=packet.version,
+                reason="the packet is in the genQueue position 0-2 lockout (R6 OQ3, OQ31)",
+            )
+            self.session.flush()
+            raise LockedOut(f"{packet.ref} is locked out of evaQueue (genQueue positions 0-2)")
+
+    def _commit_guard(self, work: list[_Work]) -> None:
+        """R6 OQ30: an in-flight evaluation finishes, but its commit checks the newest lockout
+        snapshot and the content revision in one compare-and-set; on conflict its evaPackets
+        are superseded and the discard is logged (append-only ``eva_discard_log``)."""
+        from orchestrator.db.models import EvaDiscardLog
+        from orchestrator.queue import is_locked_out, latest_epoch
+
+        observed = getattr(self, "_observed", None)
+        if observed is None or not work:
+            return
+        packet = self.session.get(Packet, work[0].eva.packet_id)
+        assert packet is not None
+        self.session.refresh(packet)
+        locked = is_locked_out(self.session, packet.id)
+        if packet.content_revision == observed[0] and not locked:
+            return
+        open_states = (EvaState.PLANNED, EvaState.EXTRACTING, EvaState.CROSS_SCORING)
+        for w in work:
+            if EvaState(w.eva.state) in open_states:
+                self._set_state(w.eva, EvaState.SUPERSEDED, "discarded at commit (R6 OQ30)")
+        row = EvaDiscardLog(
+            id=new_id(),
+            packet_id=packet.id,
+            cycle_id=work[0].eva.cycle_id,
+            epoch_id=latest_epoch(self.session),
+            expected_content_revision=observed[0],
+            actual_content_revision=packet.content_revision,
+            locked_out=locked,
+            reason="locked out at commit" if locked else "content revision moved",
+        )
+        self.session.add(row)
+        record_event(
+            self.session,
+            actor=self.actor,
+            action="evaluation.discarded",
+            entity_type="eva_discard_log",
+            entity_id=row.id,
+            entity_ref=packet.ref,
+            entity_version=packet.version,
+            after={"locked_out": locked, "content_revision": packet.content_revision},
+            reason=row.reason,
+        )
+        self.session.flush()
+        raise StaleEvaluation(f"{packet.ref}: evaluation discarded at commit ({row.reason})")
+
     def _finish(self, work: list[_Work], report: EvaluationReport) -> None:
-        """Record the SQL decision as the evaPacket's terminal state."""
+        """Record the SQL decision as the evaPacket's terminal state, then register the
+        context each finished pre-phase evaPacket read (M3a, R6 OQ22)."""
+        if work and EvaPhase(work[0].eva.phase) is EvaPhase.PRE:
+            self._commit_guard(work)
+        self._decide(work, report)
+        from orchestrator.evaluation.context import register_context_links
+
+        for w in work:
+            if EvaState(w.eva.state) in (EvaState.CONSENSUS, EvaState.DISPUTED):
+                packet = self.session.get(Packet, w.eva.packet_id)
+                assert packet is not None
+                project, objective = head_context(self.session, packet)
+                register_context_links(
+                    self.session, w.eva, packet, project, objective, actor=self.actor
+                )
+
+    def _decide(self, work: list[_Work], report: EvaluationReport) -> None:
         for w in work:
             eva = w.eva
             if EvaState(eva.state) in (
@@ -1069,6 +1171,8 @@ class Evaluator:
         self.session.flush()
         verdict = evaluation_verdict(self.session, packet, EvaPhase.PRE)
         unresolved = unresolved_tier1 or bool(report.unresolved)
+        if PacketStatus(packet.status) in ENRICHED_IN_PLACE:
+            return  # R6 OQ12: enrichment never demotes; queued → ready only by score
         if verdict.ok and not unresolved:
             from orchestrator.branching import promote_consensus
 
@@ -1115,35 +1219,15 @@ def evaluate_packet(
 
 
 def pending_packets(session: Session, limit: int | None = None) -> list[Packet]:
-    """Head genPackets whose pre-phase evaluation set is missing or stale — changed inputs or
-    context, or results no longer current for the active definitions and presets (needs_review
-    is left alone: no evaluation loop on a dispute — B9)."""
-    from orchestrator.repository import _heads
+    """The evaluator's work list (M3a, R6 OQ5): ``v_eva_queue`` in priority order — developing
+    packets with missing mandatory or optional fields or questioned context, minus the lockout
+    of the newest epoch snapshot. ``needs_review`` is left alone (B9: no loop on a dispute)."""
+    from orchestrator.queue import eva_queue_rows
 
-    candidates = session.scalars(
-        _heads(Packet)
-        .where(
-            Packet.locked.is_(False),
-            Packet.status.in_(
-                [
-                    PacketStatus.DRAFT,
-                    PacketStatus.EVALUATING_PRE,
-                    PacketStatus.EVALUATING,
-                    PacketStatus.READY,
-                ]
-            ),
-        )
-        .order_by(Packet.created_at, Packet.ref)
-    ).all()
     result: list[Packet] = []
-    for packet in candidates:
-        _, target = packet_document(session, packet)
-        stale = packet.input_hash != target or PacketStatus(packet.status) is not PacketStatus.READY
-        if not stale:  # M2.1 fix 4: a new definition or preset revision makes results pending
-            from orchestrator.evaluation.readiness import evaluation_verdict
-
-            stale = not evaluation_verdict(session, packet, EvaPhase.PRE).ok
-        if stale:
+    for row in eva_queue_rows(session):
+        packet = session.get(Packet, row.packet_id)
+        if packet is not None:
             result.append(packet)
         if limit is not None and len(result) >= limit:
             break

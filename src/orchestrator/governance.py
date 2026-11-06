@@ -193,12 +193,12 @@ def add_dependency(
 ) -> PacketDependency:
     packet = get_packet(session, packet_ref)
     target = get_packet(session, depends_on_ref)
-    if packet.ref == target.ref:
-        raise GovernanceError("a packet cannot depend on itself")
+    if packet.ref == target.ref or packet.lineage_key == target.lineage_key:
+        raise GovernanceError("a packet cannot depend on itself or its own lineage")
     dependency = PacketDependency(
         id=new_id(),
         packet_id=packet.id,
-        depends_on_id=target.id,
+        depends_on_id=target.lineage_key,  # Argon K1: an edge targets the lineage, not a row
         kind=DependencyKind(kind),
         satisfied_when="completed",
     )
