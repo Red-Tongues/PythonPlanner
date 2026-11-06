@@ -348,15 +348,36 @@ def accept_post(session: Session, packet: Packet, artifact) -> None:  # type: ig
         )
 
 
-def complete_with_evidence(session: Session, packet: Packet, actor) -> None:  # type: ignore[no-untyped-def]
-    """Complete ``packet`` the only way the gate allows: an artifact plus accepted post-phase
-    evaluations of exactly that artifact (M2.1 fixes 3 and 5)."""
+def complete_with_evidence(session: Session, packet: Packet, actor, grade_e4: int = 8000):  # type: ignore[no-untyped-def]
+    """Finish ``packet`` the only way M3a allows a genPacket to finish: an artifact, accepted
+    post-phase evaluations of exactly that artifact, and a seal (R6 OQ13 — ``evaluating_post →
+    completed`` is retired). ``actor`` is kept for call-site compatibility; the seal is a kernel
+    move. Returns the bundle."""
     from orchestrator.contracts import PacketStatus
+    from orchestrator.db.models import SealedBundle
     from orchestrator.lifecycle import transition
+    from orchestrator.revisions import store_blob
 
     drive_to(packet, PacketStatus.EVALUATING_POST)
-    accept_post(session, packet, add_artifact(session, packet))
-    transition(packet, PacketStatus.COMPLETED, actor, "accepted with post-evaluation evidence")
+    artifact = add_artifact(session, packet)
+    accept_post(session, packet, artifact)
+    blob = store_blob(session, f"snapshot {packet.id}")
+    bundle = SealedBundle(
+        id=new_id(),
+        packet_id=packet.id,
+        claim_content_revision=packet.content_revision,
+        snapshot_hash=blob,
+        bundle_hash=blob,
+        composite_grade_e4=grade_e4,
+        artifact_hash=artifact.sha256,
+    )
+    session.add(bundle)
+    record_event(
+        session, actor=FIXTURE, action="test.seal", entity_type="sealed_bundle", entity_id=bundle.id
+    )
+    session.flush()
+    transition(packet, PacketStatus.SEALED, FIXTURE, f"sealed with evidence ({actor})")
+    return bundle
 
 
 def drive_to(packet: Packet, target) -> None:  # type: ignore[no-untyped-def]

@@ -52,9 +52,9 @@ def test_happy_path_writes_one_event_per_transition(session: Session, tree) -> N
         transition(packet, S.COMPLETED, KERNEL)  # no artifact or post-phase consensus yet
     with pytest.raises(InvalidTransitionError, match="cannot complete yet"):
         transition(packet, S.COMPLETED, USER, "accepted by hand")  # users too (M2.1 fix 5)
-    complete_with_evidence(session, packet, KERNEL)
+    complete_with_evidence(session, packet, KERNEL)  # M3a: a genPacket finishes sealed
     assert packet.locked and packet.completed_at is not None
-    assert packet.status is S.COMPLETED
+    assert packet.status is S.SEALED
 
 
 def test_illegal_transition_raises_and_writes_nothing(session: Session, tree) -> None:
@@ -82,9 +82,9 @@ def test_user_closes_unverified_work_but_completion_needs_evidence(session: Sess
     assert not can_transition(S.DRAFT, S.CLOSED_UNVERIFIED, KERNEL)  # only a person closes
     with pytest.raises(InvalidTransitionError):  # archived is legacy: nothing enters it (M3)
         transition(tree.packets[1], S.ARCHIVED, user, "dropped")
-    # with evidence a user may complete from evaluating_post (deviation P2: `packet complete`)
+    # with evidence the packet finishes sealed (M3a, R6 OQ13)
     complete_with_evidence(session, tree.packets[2], user)
-    assert tree.packets[2].status is S.COMPLETED
+    assert tree.packets[2].status is S.SEALED
 
 
 def test_terminal_packets_are_immutable(session: Session, tree) -> None:

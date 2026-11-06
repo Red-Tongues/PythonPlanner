@@ -198,8 +198,10 @@ def mandatory_fields_for_packet(session: Session, packet: Packet) -> dict[str, s
     if session.scalar(
         select(PacketDependency.id)
         .where(
-            PacketDependency.depends_on_id.in_([packet.id, packet.root_id or packet.id]),
-            PacketDependency.packet_id != packet.id,
+            PacketDependency.depends_on_id == packet.lineage_key,  # Argon K1
+            PacketDependency.packet_id.not_in(
+                select(Packet.id).where(Packet.lineage_key == packet.lineage_key)
+            ),
             active,
         )
         .limit(1)
@@ -276,9 +278,10 @@ def valid_waivers(session: Session, packet: Packet, phase: EvaPhase) -> frozense
 
 
 def unmet_dependencies(session: Session, packet: Packet) -> tuple[str, ...]:
-    """R6 OQ13: an edge (re-pointed at the target's lineage root) is satisfied when any member
-    of that lineage is sealed with ``composite_grade_e4 >= dep_satisfaction_grade_e4``, or is
-    ``completed`` (legacy roll-up). Mirrors ``genqueue.satisfied_sql``."""
+    """R6 OQ13 with Argon K1: an edge (resolved to the target's ``lineage_key``) is satisfied
+    when some member of that lineage is sealed with ``composite_grade_e4 >=
+    dep_satisfaction_grade_e4``; a completed or archived split parent does not satisfy it.
+    Mirrors ``genqueue.satisfied_sql``."""
     from orchestrator.db.models import SealedBundle
     from orchestrator.settings_store import get_int
 
@@ -291,17 +294,13 @@ def unmet_dependencies(session: Session, packet: Packet) -> tuple[str, ...]:
         .where(PacketDependency.packet_id.in_(lineage), PacketDependency.id.not_in(revoked))
         .order_by(PacketDependency.id)
     ):
-        members = (Packet.id == dep.depends_on_id) | (Packet.root_id == dep.depends_on_id)
         done = session.scalar(
             select(Packet.id)
-            .outerjoin(SealedBundle, SealedBundle.packet_id == Packet.id)
+            .join(SealedBundle, SealedBundle.packet_id == Packet.id)
             .where(
-                members,
-                (Packet.status == PacketStatus.COMPLETED)
-                | (
-                    (Packet.status == PacketStatus.SEALED)
-                    & (SealedBundle.composite_grade_e4 >= grade)
-                ),
+                Packet.lineage_key == dep.depends_on_id,
+                Packet.status == PacketStatus.SEALED,
+                SealedBundle.composite_grade_e4 >= grade,
             )
             .limit(1)
         )
@@ -401,11 +400,31 @@ def completion_blockers(session: Session, packet: Packet, current: PacketStatus)
         children = children_of(session, packet)
         if not children:
             return ["the trunk has no children"]
-        return [
-            f"child {c.ref} is {PacketStatus(c.status).value}"
-            for c in children
-            if PacketStatus(c.status) is not PacketStatus.COMPLETED
-        ]
+        from orchestrator.db.models import SealedBundle
+        from orchestrator.settings_store import get_int
+
+        grade = get_int(session, "dep_satisfaction_grade_e4", 7000)
+
+        def done(child: Packet) -> bool:
+            status = PacketStatus(child.status)
+            if status is PacketStatus.COMPLETED:
+                return True
+            # M3a (Argon K1): a split child is done when some member of its re-imagination
+            # lineage is sealed at the satisfaction grade
+            return (
+                session.scalar(
+                    select(SealedBundle.id)
+                    .join(Packet, Packet.id == SealedBundle.packet_id)
+                    .where(
+                        Packet.lineage_key == child.lineage_key,
+                        SealedBundle.composite_grade_e4 >= grade,
+                    )
+                    .limit(1)
+                )
+                is not None
+            )
+
+        return [f"child {c.ref} is {PacketStatus(c.status).value}" for c in children if not done(c)]
     if newest_artifact(session, packet) is None:
         return ["no artifact has been generated, so there is nothing to accept"]
     return list(evaluation_verdict(session, packet, EvaPhase.POST).blockers)

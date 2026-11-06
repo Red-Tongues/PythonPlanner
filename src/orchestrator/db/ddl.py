@@ -270,7 +270,7 @@ LINEAGE: dict[str, tuple[tuple[str, ...], str]] = {
         "EXISTS (SELECT 1 FROM packets d WHERE d.objective_id = OLD.id)",
     ),
     "packets": (
-        ("project_id", "objective_id", "parent_id", "root_id"),
+        ("project_id", "objective_id", "parent_id", "root_id", "lineage_key"),
         "EXISTS (SELECT 1 FROM packets d WHERE d.id <> OLD.id "
         "AND (d.parent_id = OLD.id OR d.root_id = OLD.id)) "
         "OR EXISTS (SELECT 1 FROM evaluation_passes d WHERE d.packet_id = OLD.id) "

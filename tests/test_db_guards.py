@@ -120,9 +120,9 @@ def _packet(c: Connection, pid: str, status: str, ref: str, project: str = "p1")
             "INSERT INTO packets (id, ref, project_id, position, packet_kind, title,"
             " prompt_description, response_structure, response_contract, manual_boost, status,"
             " evaluations_count, locked, completed_at, version, depth, source, created_at,"
-            " updated_at, gate_revision) VALUES (:id, :ref, :p, 0, 'task', 'T', 'x',"
+            " updated_at, gate_revision, lineage_key) VALUES (:id, :ref, :p, 0, 'task', 'T', 'x',"
             " 'markdown_document', 'markdown_document@1.0', 0, :s, 0, :l, :c, 1, 0, 'm', :t,"
-            " :t, 0)"
+            " :t, 0, :id)"
         ),
         {
             "id": pid,
@@ -364,10 +364,10 @@ def test_a_populated_database_survives_init_db(db_url: str) -> None:
                     "INSERT INTO packets (id, ref, project_id, position, packet_kind, title,"
                     " prompt_description, response_structure, response_contract, manual_boost,"
                     " status, evaluations_count, locked, version, depth, source, created_at,"
-                    " updated_at, gate_revision, supersedes_id, input_hash) VALUES ('k3',"
-                    " 'PP-000001', 'p1', 0, 'task', 'T2', 'y', 'markdown_document',"
+                    " updated_at, gate_revision, supersedes_id, input_hash, lineage_key) VALUES"
+                    " ('k3', 'PP-000001', 'p1', 0, 'task', 'T2', 'y', 'markdown_document',"
                     " 'markdown_document@1.0', 0, 'draft', 0, :f, 2, 0, 'm', :t, :t, 5, 'k1',"
-                    " 'hash-k3')"
+                    " 'hash-k3', 'k1')"
                 ),
                 {"t": NOW, "f": False},
             )
@@ -417,9 +417,9 @@ def test_a_populated_database_survives_init_db(db_url: str) -> None:
                 "INSERT INTO packets (id, ref, project_id, position, packet_kind, title,"
                 " prompt_description, response_structure, response_contract, manual_boost,"
                 " status, evaluations_count, locked, version, depth, source, created_at,"
-                " updated_at, gate_revision) VALUES ('k9', 'PP-000009', 'p1', 0, 'content_eval',"
-                " 'E', 'x', 'markdown_document', 'markdown_document@1.0', 0, 'draft', 0, :f, 1,"
-                " 0, 'm', :t, :t, 0)",
+                " updated_at, gate_revision, lineage_key) VALUES ('k9', 'PP-000009', 'p1', 0,"
+                " 'content_eval', 'E', 'x', 'markdown_document', 'markdown_document@1.0', 0,"
+                " 'draft', 0, :f, 1, 0, 'm', :t, :t, 0, 'k9')",
                 t=NOW,
                 f=False,
             )

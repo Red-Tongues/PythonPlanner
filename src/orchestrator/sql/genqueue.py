@@ -67,19 +67,21 @@ ACTIVE_EDGE = (
     "NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' "
     "AND rv.target_id = {e}.id)"
 )
-#: the lineage key an edge targets (R6 OQ13: edges point at the target's root)
-LINEAGE = "COALESCE({p}.root_id, {p}.id)"
+#: the lineage an edge targets (Argon K1 amending R6 OQ13: edges resolve to the target's
+#: ``lineage_key``, never ``root_id``, so split siblings stay separate lineages)
+LINEAGE = "{p}.lineage_key"
 
 
 def satisfied_sql(edge: str) -> str:
-    """R6 OQ13: an edge is satisfied when any member of the target lineage is sealed with
-    ``composite_grade_e4 >= dep_satisfaction_grade_e4`` (or completed, legacy roll-up)."""
+    """R6 OQ13 with Argon K1: an edge is satisfied when some member of the target lineage
+    (``lineage_key = depends_on_id``) is sealed with ``composite_grade_e4 >=
+    dep_satisfaction_grade_e4``. Nothing else satisfies it — a completed or archived split
+    parent does not."""
     grade = _int("dep_satisfaction_grade_e4", 7000)
     return (
-        f"EXISTS (SELECT 1 FROM packets m LEFT JOIN sealed_bundles sb ON sb.packet_id = m.id "
-        f"WHERE (m.id = {edge}.depends_on_id OR m.root_id = {edge}.depends_on_id) "
-        f"AND ((m.status = 'sealed' AND sb.composite_grade_e4 >= {grade}) "
-        f"OR m.status = 'completed'))"
+        f"EXISTS (SELECT 1 FROM packets m JOIN sealed_bundles sb ON sb.packet_id = m.id "
+        f"WHERE m.lineage_key = {edge}.depends_on_id AND m.status = 'sealed' "
+        f"AND sb.composite_grade_e4 >= {grade})"
     )
 
 
@@ -90,15 +92,14 @@ def mandatory_fields() -> str:
         + ")"
     )
     has_dependents = (
-        "EXISTS (SELECT 1 FROM packet_dependencies e WHERE e.depends_on_id IN "
-        f"(pk.id, {LINEAGE.format(p='pk')}) AND e.packet_id <> pk.id AND "
-        + ACTIVE_EDGE.format(e="e")
-        + ")"
+        "EXISTS (SELECT 1 FROM packet_dependencies e JOIN packets dx ON dx.id = e.packet_id "
+        f"WHERE e.depends_on_id = {LINEAGE.format(p='pk')} "
+        f"AND dx.lineage_key <> {LINEAGE.format(p='pk')} AND " + ACTIVE_EDGE.format(e="e") + ")"
     )
     charted = "pk.repo_target_path IS NOT NULL"
     r = RELATIONAL_FIELDS
     return f"""CREATE VIEW v_packet_mandatory_fields AS
-WITH pk AS (SELECT p.id, p.root_id, p.repo_target_path FROM packets p WHERE NOT p.locked)
+WITH pk AS (SELECT p.id, p.lineage_key, p.repo_target_path FROM packets p WHERE NOT p.locked)
 SELECT pk.id AS packet_id, u.field_name, 'universal' AS reason
 FROM pk CROSS JOIN ({_names(UNIVERSAL_FIELDS)}) u
 UNION
@@ -137,6 +138,8 @@ SELECT p.id AS packet_id,
          WHERE {latest} AND {missing}
            AND ps.field_name NOT IN (SELECT m.field_name FROM v_packet_mandatory_fields m
                                      WHERE m.packet_id = p.id)) AS missing_optional_fields,
+       -- @ORCHESTRATOR:PLACEHOLDER (M3b: wire the local-drafts trigger). Reported only: it is
+       -- not a v_eva_queue need condition until a drafting channel exists.
        CASE WHEN p.examples_hash IS NULL THEN 1 ELSE 0 END AS missing_local_drafts,
        COALESCE((SELECT SUM(fs.question_context_count) FROM v_field_status fs
                  WHERE fs.packet_id = p.id AND fs.phase = 'pre'), 0) AS question_context_total,
@@ -146,30 +149,33 @@ WHERE NOT p.locked"""  # noqa: E501
 
 
 def _dependents(target: str, alias: str) -> str:
-    """Unlocked packets ``alias`` with an active edge to ``target``'s lineage whose own
-    lineage has no sealed member graded at or above the satisfaction grade (R6 OQ8)."""
+    """Unlocked packets ``alias`` of *other* lineages with an active edge to ``target``'s
+    lineage, whose own lineage has no sealed member graded at or above the satisfaction grade
+    (R6 OQ8 with Argon K1)."""
     grade = _int("dep_satisfaction_grade_e4", 7000)
     return (
         f"FROM packets {alias} JOIN packet_dependencies e{alias} ON e{alias}.packet_id = "
-        f"{alias}.id WHERE e{alias}.depends_on_id IN ({target}.id, "
-        f"{LINEAGE.format(p=target)}) AND {alias}.id <> {target}.id AND NOT {alias}.locked AND "
+        f"{alias}.id WHERE e{alias}.depends_on_id = {LINEAGE.format(p=target)} "
+        f"AND {alias}.lineage_key <> {LINEAGE.format(p=target)} AND NOT {alias}.locked AND "
         + ACTIVE_EDGE.format(e=f"e{alias}")
         + f" AND NOT EXISTS (SELECT 1 FROM sealed_bundles sx JOIN packets mx ON mx.id = "
-        f"sx.packet_id WHERE {LINEAGE.format(p='mx')} = {LINEAGE.format(p=alias)} "
+        f"sx.packet_id WHERE mx.lineage_key = {alias}.lineage_key "
         f"AND sx.composite_grade_e4 >= {grade})"
     )
 
 
 def centrality() -> str:
-    direct = f"(SELECT COUNT(DISTINCT d1.id) {_dependents('p', 'd1')})"
+    """OQ8, counting **distinct dependent lineages** (Argon K1)."""
+    direct = f"(SELECT COUNT(DISTINCT d1.lineage_key) {_dependents('p', 'd1')})"
     two_hop = (
-        f"(SELECT COUNT(DISTINCT d2.id) FROM packets h "
-        f"JOIN packet_dependencies eh ON eh.depends_on_id IN (h.id, {LINEAGE.format(p='h')}) "
+        f"(SELECT COUNT(DISTINCT d2.lineage_key) FROM packets h "
+        f"JOIN packet_dependencies eh ON eh.depends_on_id = h.lineage_key "
         f"JOIN packets d2 ON d2.id = eh.packet_id "
         f"WHERE h.id IN (SELECT d1.id {_dependents('p', 'd1')}) "
-        f"AND d2.id <> p.id AND NOT d2.locked AND "
+        f"AND d2.lineage_key <> p.lineage_key AND d2.lineage_key <> h.lineage_key "
+        f"AND NOT d2.locked AND "
         + ACTIVE_EDGE.format(e="eh")
-        + f" AND d2.id NOT IN (SELECT d1.id {_dependents('p', 'd1')}))"
+        + f" AND d2.lineage_key NOT IN (SELECT d1.lineage_key {_dependents('p', 'd1')}))"
     )
     critical = (
         "(CASE WHEN COALESCE((SELECT o.priority_level FROM objectives o "
@@ -257,6 +263,7 @@ def queue_score_select(dialect: str, now: str) -> str:
     feedback = feedback_select(dialect, now)
     return f"""WITH x AS (
   SELECT p.id AS packet_id, p.ref AS packet_ref, p.status, p.channel, p.root_id,
+         p.lineage_key,
          p.repo_target_path, p.created_at, p.ready_since, p.crash_count,
          {epoch.format(x="COALESCE(p.ready_since, p.created_at)")} AS ready_epoch,
          CASE WHEN {wait} < 0 THEN 0 ELSE {wait} END AS wait_sec,
@@ -321,7 +328,10 @@ FROM g CROSS JOIN d"""
 
 def eva_queue_select(dialect: str, now: str) -> str:
     """R6 OQ3/OQ5/OQ31: developing packets needing enrichment, minus the lockout of the newest
-    ``queue_epoch_snapshot``. ``ready``/``queued`` rows are also ``v_gen_queue`` rows."""
+    ``queue_epoch_snapshot``. ``ready``/``queued`` rows are also ``v_gen_queue`` rows.
+
+    @ORCHESTRATOR:PLACEHOLDER (M3b: wire the local-drafts trigger): ``missing_local_drafts`` is
+    deliberately not a need condition yet — nothing in M3a can produce local drafts."""
     return f"""WITH s AS ({queue_score_select(dialect, now)}),
 g AS ({gen_queue_select(dialect, now)}),
 latest AS (SELECT MAX(q.epoch_id) AS epoch_id FROM queue_epoch_snapshot q)

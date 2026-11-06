@@ -77,6 +77,7 @@ def supersede_packet(
         parent_id=old.parent_id,
         root_id=old.root_id,
         depth=old.depth,
+        lineage_key=old.lineage_key,
         status=PacketStatus.DRAFT,
         locked=False,
         source="supersede",

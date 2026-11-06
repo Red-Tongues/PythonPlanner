@@ -173,12 +173,13 @@ def _edges(session: Session) -> list[tuple[str, str]]:
 def lockout_set(
     zone: set[str], packets: dict[str, dict[str, Any]], edges: list[tuple[str, str]]
 ) -> set[str]:
-    """R6 OQ3: positions 0-2 plus packets sharing their lineage (``root_id``), linked by a hard
-    dependency in either direction, or writing the same non-null repo path."""
+    """R6 OQ3 with Argon K1: positions 0-2 plus packets of the same re-imagination lineage
+    (``lineage_key``, never ``root_id``: split siblings are not locked together), linked by a
+    hard dependency in either direction, or writing the same non-null repo path."""
 
     def key(pid: str) -> str:
         row = packets.get(pid, {})
-        return row.get("root_id") or pid
+        return row.get("lineage_key") or pid
 
     locked = set(zone)
     keys = {key(z) for z in zone} | set(zone)

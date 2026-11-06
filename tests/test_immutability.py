@@ -90,9 +90,10 @@ def test_completion_requires_lock_on_update_and_insert(engine, tree) -> None:
     insert = (
         "INSERT INTO packets (id, ref, project_id, objective_id, position, packet_kind, title, "
         "prompt_description, response_structure, response_contract, status, evaluations_count, "
-        "manual_boost, locked, version, depth, source, created_at, updated_at) VALUES "
-        "(:id, 'PP-999999', :project, :objective, 1, 'task', 't', 'd', 'markdown_document', "
-        "'markdown_document@1.0', :status, 0, 0, :locked, 1, 0, 'test', :now, :now)"
+        "manual_boost, locked, version, depth, source, created_at, updated_at, lineage_key) "
+        "VALUES (:id, 'PP-999999', :project, :objective, 1, 'task', 't', 'd', "
+        "'markdown_document', 'markdown_document@1.0', :status, 0, 0, :locked, 1, 0, 'test', "
+        ":now, :now, :id)"
     )
     common = {"project": p.project_id, "objective": p.objective_id, "now": utcnow().isoformat()}
     assert_db_rejects(engine, insert, id="x1", status="completed", locked=False, **common)

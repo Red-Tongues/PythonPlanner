@@ -141,9 +141,9 @@ def test_legacy_rows_stay_valid_and_only_reenter_evaluation(db_url: str) -> None
                         "INSERT INTO packets (id, ref, project_id, position, packet_kind, title,"
                         " prompt_description, response_structure, response_contract, "
                         "manual_boost, status, evaluations_count, locked, version, depth, "
-                        "source, created_at, updated_at) VALUES (:id, :ref, 'p1', 0, 'task', "
-                        "'Legacy', 'x', 'markdown_document', 'markdown_document@1.0', 0, :s, 0, "
-                        ":f, 1, 0, 'm', :t, :t)"
+                        "source, created_at, updated_at, lineage_key) VALUES (:id, :ref, 'p1', "
+                        "0, 'task', 'Legacy', 'x', 'markdown_document', 'markdown_document@1.0', "
+                        "0, :s, 0, :f, 1, 0, 'm', :t, :t, :id)"
                     ),
                     {"id": pid, "ref": f"PP-00000{pid[1]}", "s": status, "t": now, "f": False},
                 )

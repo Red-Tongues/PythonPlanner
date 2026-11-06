@@ -13,6 +13,26 @@ Newest entries first. Every agent session appends an entry: what changed, decisi
 
 ---
 
+## 2026-11-06 — C4 fixup after Argon's conditional pass (K1, D1, D7) (Claude Code)
+
+Argon's audit of C1–C4: **conditional pass**. Landed before any child-spawn code (C5 work was stashed and resumed afterwards).
+
+- **K1 (Argon option b, binding) — `packets.lineage_key` (NOT NULL).** Roots and split children: own id (set on insert by an ORM `before_insert` hook when not given; split children keep `root_id = coalesce(parent.root_id, parent.id)` and start at `lineage_depth = 0`). Re-imagined children (C5): `lineage_key = parent.lineage_key`, `lineage_depth + 1`. `lineage_key` joins the immutable ancestry columns of the packet lineage triggers.
+  - Dependency edges resolve to the target's `lineage_key` (`add_dependency`; an edge inside one's own lineage is refused). Satisfaction = some member of that lineage sealed with `composite_grade_e4 >= dep_satisfaction_grade_e4` — nothing else; a completed/archived split parent no longer satisfies an edge. Centrality counts distinct dependent `lineage_key`s; mandatory "has dependents" and the lineage part of the lockout use `lineage_key`. `root_id` stays for the federation tree, roll-up and archival.
+  - **Deviation from R6 OQ13/OQ24** (per Argon K1): edges target the lineage key, not `root_id`.
+  - **Backfill:** none needed — no live data and the single baseline is regenerated; every insert path sets the key (ingest/split: own id via the hook; legacy `supersede` successors in `tests/legacy.py`: the predecessor's key; raw-SQL fixtures pass it explicitly). The `coalesce(root_id, id)` fallback was not needed anywhere.
+  - Roll-up: a split child counts as done when its lineage has a member sealed at the grade bar (or it is a completed legacy row). The test fixture `complete_with_evidence` now finishes a packet by sealing it.
+- **D1 amend:** the plain index is replaced by a partial UNIQUE index `uq_packets_lineage_step (objective_id, lineage_key, lineage_depth) WHERE supersedes_id IS NULL` (both dialects).
+- **D7 amend:** the `missing_local_drafts` exclusion is tagged `@ORCHESTRATOR:PLACEHOLDER (M3b: wire the local-drafts trigger)` in the view and in `eva_queue_select`.
+- **Tests (both dialects):** `tests/test_m3a_lineage.py` — split isolation (sibling A sealed at 7,000 satisfies edges to A only, not to sibling B or to the split parent; separate centrality; locking B does not lock A) and mixed ancestry split → re-imagine → split (inherited vs fresh keys, dependency outcomes).
+- Accepted as-is by Argon: D2, D3, D4, D5, D6, D8, D9.
+
+**Tests:** 669 passed, 4 skipped on SQLite + PostgreSQL 16; ruff clean.
+
+**Known issue (K2, accepted for M3a):** the suite takes ~10 min on both dialects because of the queue views; profile and optimise the views after M3a.
+
+---
+
 ## 2026-11-06 — M3a checkpoint 2 (after C4), for Argon's audit (Claude Code)
 
 **What landed since checkpoint 1**

@@ -28,6 +28,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    event,
     false,
     text,
 )
@@ -188,10 +189,16 @@ class Packet(Base):
     __tablename__ = "packets"
     __table_args__ = (
         UniqueConstraint("ref", "version"),
-        # R6 OQ24: a re-imagined child keeps its parent's position and orders by generation.
-        # Deviation: an index, not UNIQUE — superseded legacy versions and split children share
-        # positions; (objective, position, lineage_depth, ref) is the display order.
-        Index("ix_packets_objective_position_lineage", "objective_id", "position", "lineage_depth"),
+        # R6 OQ24 as amended by Argon D1 (PM-resolved): one active version per lineage step
+        Index(
+            "uq_packets_lineage_step",
+            "objective_id",
+            "lineage_key",
+            "lineage_depth",
+            unique=True,
+            sqlite_where=text("supersedes_id IS NULL"),
+            postgresql_where=text("supersedes_id IS NULL"),
+        ),
     )
 
     id: Mapped[str] = _id()
@@ -282,6 +289,11 @@ class Packet(Base):
     lineage_depth: Mapped[int] = mapped_column(
         Integer, default=0, server_default=text("0"), nullable=False
     )
+    #: Argon K1 (amends R6 OQ13/OQ24): the re-imagination lineage. A root or a split child is its
+    #: own lineage (its id); a re-imagined child inherits its parent's key. Dependency edges,
+    #: their satisfaction, centrality and the lineage part of the lockout use this key; root_id
+    #: stays the federation (split) tree for roll-up and archival. Set on insert (see below).
+    lineage_key: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     #: Q6 / OQ24: the sealed bundle of the parent this child re-imagines
     parent_bundle_id: Mapped[str | None] = mapped_column(
         ForeignKey("sealed_bundles.id", use_alter=True)
@@ -296,6 +308,15 @@ class Packet(Base):
 
     project: Mapped[Project] = relationship()
     objective: Mapped[Objective | None] = relationship(foreign_keys=[objective_id])
+
+
+@event.listens_for(Packet, "before_insert")
+def _default_lineage_key(_mapper: Any, _connection: Any, target: Packet) -> None:
+    """A packet inserted without a lineage key starts its own lineage (roots, split children)."""
+    if target.id is None:
+        target.id = new_id()
+    if target.lineage_key is None:
+        target.lineage_key = target.id
 
 
 # --------------------------------------------------------------------------- evaluation layer

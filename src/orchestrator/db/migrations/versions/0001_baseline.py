@@ -541,6 +541,7 @@ STATEMENTS: dict[str, list[str]] = {
 	hold_reason VARCHAR(32),
 	ready_since DATETIME,
 	lineage_depth INTEGER DEFAULT 0 NOT NULL,
+	lineage_key VARCHAR(36) NOT NULL,
 	parent_bundle_id VARCHAR(36),
 	parent_bundle_hash VARCHAR(64),
 	examples_hash VARCHAR(64),
@@ -560,13 +561,14 @@ STATEMENTS: dict[str, list[str]] = {
 	CONSTRAINT fk_packets_parent_bundle_id_sealed_bundles FOREIGN KEY(parent_bundle_id) REFERENCES sealed_bundles (id),
 	CONSTRAINT fk_packets_examples_hash_content_blobs FOREIGN KEY(examples_hash) REFERENCES content_blobs (hash)
 )""",
+        """CREATE INDEX ix_packets_lineage_key ON packets (lineage_key)""",
         """CREATE INDEX ix_packets_objective_id ON packets (objective_id)""",
-        """CREATE INDEX ix_packets_objective_position_lineage ON packets (objective_id, position, lineage_depth)""",
         """CREATE INDEX ix_packets_parent_id ON packets (parent_id)""",
         """CREATE INDEX ix_packets_project_id ON packets (project_id)""",
         """CREATE INDEX ix_packets_ref ON packets (ref)""",
         """CREATE INDEX ix_packets_root_id ON packets (root_id)""",
         """CREATE INDEX ix_packets_status ON packets (status)""",
+        """CREATE UNIQUE INDEX uq_packets_lineage_step ON packets (objective_id, lineage_key, lineage_depth) WHERE supersedes_id IS NULL""",
         """CREATE TABLE branch_applications (
 	id VARCHAR(36) NOT NULL,
 	packet_id VARCHAR(36) NOT NULL,
@@ -1033,9 +1035,9 @@ STATEMENTS: dict[str, list[str]] = {
         """CREATE TRIGGER trg_packets_superseded_no_delete BEFORE DELETE ON packets FOR EACH ROW WHEN EXISTS (SELECT 1 FROM packets s WHERE s.supersedes_id = OLD.id) BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: superseded row in packets is history and cannot be deleted'); END""",
         """CREATE TRIGGER trg_packets_successor_no_delete BEFORE DELETE ON packets FOR EACH ROW WHEN OLD.supersedes_id IS NOT NULL BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: a superseding version in packets cannot be deleted; archive instead'); END""",
         """CREATE TRIGGER trg_packets_dependents_no_delete BEFORE DELETE ON packets FOR EACH ROW WHEN EXISTS (SELECT 1 FROM packets d WHERE d.id <> OLD.id AND (d.parent_id = OLD.id OR d.root_id = OLD.id)) OR EXISTS (SELECT 1 FROM evaluation_passes d WHERE d.packet_id = OLD.id) OR EXISTS (SELECT 1 FROM artifacts d WHERE d.packet_id = OLD.id) OR EXISTS (SELECT 1 FROM channel_runs d WHERE d.packet_id = OLD.id) OR EXISTS (SELECT 1 FROM quality_reports d WHERE d.packet_id = OLD.id) BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: row in packets has dependents and cannot be deleted; archive instead'); END""",
-        """CREATE TRIGGER trg_packets_lineage_no_rewrite BEFORE UPDATE ON packets FOR EACH ROW WHEN NEW.ref IS NOT OLD.ref OR NEW.version IS NOT OLD.version OR NEW.supersedes_id IS NOT OLD.supersedes_id OR NEW.project_id IS NOT OLD.project_id OR NEW.objective_id IS NOT OLD.objective_id OR NEW.parent_id IS NOT OLD.parent_id OR NEW.root_id IS NOT OLD.root_id BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: lineage fields of packets (ref, version, supersedes_id, ancestry) are immutable'); END""",
+        """CREATE TRIGGER trg_packets_lineage_no_rewrite BEFORE UPDATE ON packets FOR EACH ROW WHEN NEW.ref IS NOT OLD.ref OR NEW.version IS NOT OLD.version OR NEW.supersedes_id IS NOT OLD.supersedes_id OR NEW.project_id IS NOT OLD.project_id OR NEW.objective_id IS NOT OLD.objective_id OR NEW.parent_id IS NOT OLD.parent_id OR NEW.root_id IS NOT OLD.root_id OR NEW.lineage_key IS NOT OLD.lineage_key BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: lineage fields of packets (ref, version, supersedes_id, ancestry) are immutable'); END""",
         """CREATE TRIGGER trg_packets_lineage_start BEFORE INSERT ON packets FOR EACH ROW WHEN NEW.supersedes_id IS NULL AND NEW.version <> 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: a new lineage in packets starts at version 1'); END""",
-        """CREATE TRIGGER trg_packets_lineage_successor BEFORE INSERT ON packets FOR EACH ROW WHEN NEW.supersedes_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM packets p WHERE p.id = NEW.supersedes_id AND p.ref = NEW.ref AND p.version + 1 = NEW.version AND p.project_id IS NEW.project_id AND p.objective_id IS NEW.objective_id AND p.parent_id IS NEW.parent_id AND p.root_id IS NEW.root_id) BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: a successor in packets must keep the ref, have version = predecessor + 1 and the same ancestry'); END""",
+        """CREATE TRIGGER trg_packets_lineage_successor BEFORE INSERT ON packets FOR EACH ROW WHEN NEW.supersedes_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM packets p WHERE p.id = NEW.supersedes_id AND p.ref = NEW.ref AND p.version + 1 = NEW.version AND p.project_id IS NEW.project_id AND p.objective_id IS NEW.objective_id AND p.parent_id IS NEW.parent_id AND p.root_id IS NEW.root_id AND p.lineage_key IS NEW.lineage_key) BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: a successor in packets must keep the ref, have version = predecessor + 1 and the same ancestry'); END""",
         """CREATE TRIGGER trg_evaluation_pass_items_append_only_update BEFORE UPDATE ON evaluation_pass_items FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: evaluation_pass_items is append-only (update rejected)'); END""",
         """CREATE TRIGGER trg_evaluation_pass_items_append_only_delete BEFORE DELETE ON evaluation_pass_items FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: evaluation_pass_items is append-only (delete rejected)'); END""",
         """CREATE TRIGGER trg_eva_presets_append_only_update BEFORE UPDATE ON eva_presets FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: eva_presets is append-only (update rejected)'); END""",
@@ -1501,7 +1503,7 @@ LEFT JOIN v_field_status fs ON fs.packet_id = h.id AND fs.field_name = req.field
 WHERE req.phase = 'pre'
 GROUP BY h.id, h.ref, h.version, h.status""",
         """CREATE VIEW v_packet_mandatory_fields AS
-WITH pk AS (SELECT p.id, p.root_id, p.repo_target_path FROM packets p WHERE NOT p.locked)
+WITH pk AS (SELECT p.id, p.lineage_key, p.repo_target_path FROM packets p WHERE NOT p.locked)
 SELECT pk.id AS packet_id, u.field_name, 'universal' AS reason
 FROM pk CROSS JOIN (SELECT 'requirement_alignment' AS field_name UNION ALL SELECT 'testability' AS field_name UNION ALL SELECT 'acceptance_criteria_coverage' AS field_name) u
 UNION
@@ -1509,7 +1511,7 @@ SELECT pk.id, u.field_name, 'has_dependencies'
 FROM pk CROSS JOIN (SELECT 'dependency_validity' AS field_name UNION ALL SELECT 'interface_stability' AS field_name) u WHERE EXISTS (SELECT 1 FROM packet_dependencies e WHERE e.packet_id = pk.id AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = e.id))
 UNION
 SELECT pk.id, u.field_name, 'has_dependents'
-FROM pk CROSS JOIN (SELECT 'downstream_contract_clarity' AS field_name UNION ALL SELECT 'risk_assessment' AS field_name) u WHERE EXISTS (SELECT 1 FROM packet_dependencies e WHERE e.depends_on_id IN (pk.id, COALESCE(pk.root_id, pk.id)) AND e.packet_id <> pk.id AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = e.id))
+FROM pk CROSS JOIN (SELECT 'downstream_contract_clarity' AS field_name UNION ALL SELECT 'risk_assessment' AS field_name) u WHERE EXISTS (SELECT 1 FROM packet_dependencies e JOIN packets dx ON dx.id = e.packet_id WHERE e.depends_on_id = pk.lineage_key AND dx.lineage_key <> pk.lineage_key AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = e.id))
 UNION
 SELECT pk.id, u.field_name, 'charted_repo_target'
 FROM pk CROSS JOIN (SELECT 'risk_assessment' AS field_name UNION ALL SELECT 'sonar_hotspot_alignment' AS field_name) u WHERE pk.repo_target_path IS NOT NULL
@@ -1531,6 +1533,8 @@ SELECT p.id AS packet_id,
          WHERE ps.phase = 'pre' AND ps.enabled AND ps.revision = (SELECT MAX(p2.revision) FROM eva_presets p2 WHERE p2.field_name = ps.field_name AND p2.phase = ps.phase) AND (fs.status IS NULL OR fs.status = 'pending')
            AND ps.field_name NOT IN (SELECT m.field_name FROM v_packet_mandatory_fields m
                                      WHERE m.packet_id = p.id)) AS missing_optional_fields,
+       -- @ORCHESTRATOR:PLACEHOLDER (M3b: wire the local-drafts trigger). Reported only: it is
+       -- not a v_eva_queue need condition until a drafting channel exists.
        CASE WHEN p.examples_hash IS NULL THEN 1 ELSE 0 END AS missing_local_drafts,
        COALESCE((SELECT SUM(fs.question_context_count) FROM v_field_status fs
                  WHERE fs.packet_id = p.id AND fs.phase = 'pre'), 0) AS question_context_total,
@@ -1539,7 +1543,7 @@ FROM packets p
 WHERE NOT p.locked""",
         """CREATE VIEW v_packet_relational_centrality AS
 WITH c AS (
-  SELECT p.id AS packet_id, (SELECT COUNT(DISTINCT d1.id) FROM packets d1 JOIN packet_dependencies ed1 ON ed1.packet_id = d1.id WHERE ed1.depends_on_id IN (p.id, COALESCE(p.root_id, p.id)) AND d1.id <> p.id AND NOT d1.locked AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = ed1.id) AND NOT EXISTS (SELECT 1 FROM sealed_bundles sx JOIN packets mx ON mx.id = sx.packet_id WHERE COALESCE(mx.root_id, mx.id) = COALESCE(d1.root_id, d1.id) AND sx.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER))) AS direct_dependents, (SELECT COUNT(DISTINCT d2.id) FROM packets h JOIN packet_dependencies eh ON eh.depends_on_id IN (h.id, COALESCE(h.root_id, h.id)) JOIN packets d2 ON d2.id = eh.packet_id WHERE h.id IN (SELECT d1.id FROM packets d1 JOIN packet_dependencies ed1 ON ed1.packet_id = d1.id WHERE ed1.depends_on_id IN (p.id, COALESCE(p.root_id, p.id)) AND d1.id <> p.id AND NOT d1.locked AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = ed1.id) AND NOT EXISTS (SELECT 1 FROM sealed_bundles sx JOIN packets mx ON mx.id = sx.packet_id WHERE COALESCE(mx.root_id, mx.id) = COALESCE(d1.root_id, d1.id) AND sx.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER))) AND d2.id <> p.id AND NOT d2.locked AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = eh.id) AND d2.id NOT IN (SELECT d1.id FROM packets d1 JOIN packet_dependencies ed1 ON ed1.packet_id = d1.id WHERE ed1.depends_on_id IN (p.id, COALESCE(p.root_id, p.id)) AND d1.id <> p.id AND NOT d1.locked AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = ed1.id) AND NOT EXISTS (SELECT 1 FROM sealed_bundles sx JOIN packets mx ON mx.id = sx.packet_id WHERE COALESCE(mx.root_id, mx.id) = COALESCE(d1.root_id, d1.id) AND sx.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER)))) AS two_hop_dependents,
+  SELECT p.id AS packet_id, (SELECT COUNT(DISTINCT d1.lineage_key) FROM packets d1 JOIN packet_dependencies ed1 ON ed1.packet_id = d1.id WHERE ed1.depends_on_id = p.lineage_key AND d1.lineage_key <> p.lineage_key AND NOT d1.locked AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = ed1.id) AND NOT EXISTS (SELECT 1 FROM sealed_bundles sx JOIN packets mx ON mx.id = sx.packet_id WHERE mx.lineage_key = d1.lineage_key AND sx.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER))) AS direct_dependents, (SELECT COUNT(DISTINCT d2.lineage_key) FROM packets h JOIN packet_dependencies eh ON eh.depends_on_id = h.lineage_key JOIN packets d2 ON d2.id = eh.packet_id WHERE h.id IN (SELECT d1.id FROM packets d1 JOIN packet_dependencies ed1 ON ed1.packet_id = d1.id WHERE ed1.depends_on_id = p.lineage_key AND d1.lineage_key <> p.lineage_key AND NOT d1.locked AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = ed1.id) AND NOT EXISTS (SELECT 1 FROM sealed_bundles sx JOIN packets mx ON mx.id = sx.packet_id WHERE mx.lineage_key = d1.lineage_key AND sx.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER))) AND d2.lineage_key <> p.lineage_key AND d2.lineage_key <> h.lineage_key AND NOT d2.locked AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = eh.id) AND d2.lineage_key NOT IN (SELECT d1.lineage_key FROM packets d1 JOIN packet_dependencies ed1 ON ed1.packet_id = d1.id WHERE ed1.depends_on_id = p.lineage_key AND d1.lineage_key <> p.lineage_key AND NOT d1.locked AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = ed1.id) AND NOT EXISTS (SELECT 1 FROM sealed_bundles sx JOIN packets mx ON mx.id = sx.packet_id WHERE mx.lineage_key = d1.lineage_key AND sx.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER)))) AS two_hop_dependents,
          (CASE WHEN COALESCE((SELECT o.priority_level FROM objectives o WHERE o.id = p.objective_id), 0) >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.critical_priority'), 8) AS INTEGER) THEN 1 ELSE 0 END) AS is_critical
   FROM packets p WHERE NOT p.locked
 )
@@ -1567,6 +1571,7 @@ FROM s""",
         """CREATE VIEW v_packet_queue_score AS
 WITH x AS (
   SELECT p.id AS packet_id, p.ref AS packet_ref, p.status, p.channel, p.root_id,
+         p.lineage_key,
          p.repo_target_path, p.created_at, p.ready_since, p.crash_count,
          CAST(strftime('%s', COALESCE(p.ready_since, p.created_at)) AS INTEGER) AS ready_epoch,
          CASE WHEN (CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER) - CAST(strftime('%s', COALESCE(p.ready_since, p.created_at)) AS INTEGER)) < 0 THEN 0 ELSE (CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER) - CAST(strftime('%s', COALESCE(p.ready_since, p.created_at)) AS INTEGER)) END AS wait_sec,
@@ -1584,7 +1589,7 @@ WITH x AS (
          COALESCE(fh.missing_local_drafts, 0) AS missing_local_drafts,
          COALESCE(uf.feedback_e4, 0) AS feedback_e4,
          CASE WHEN p.status = 'held' OR EXISTS (SELECT 1 FROM queue_overrides o WHERE o.packet_ref = p.ref AND o.kind IN ('block', 'hold') AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'override' AND rv.target_id = o.id) AND (o.scope = 'lineage' OR o.target_version = p.version)) THEN 1 ELSE 0 END AS is_held,
-         CASE WHEN EXISTS (SELECT 1 FROM packet_dependencies e WHERE e.packet_id = p.id AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = e.id) AND NOT EXISTS (SELECT 1 FROM packets m LEFT JOIN sealed_bundles sb ON sb.packet_id = m.id WHERE (m.id = e.depends_on_id OR m.root_id = e.depends_on_id) AND ((m.status = 'sealed' AND sb.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER)) OR m.status = 'completed'))) THEN 0 ELSE 1 END AS deps_satisfied,
+         CASE WHEN EXISTS (SELECT 1 FROM packet_dependencies e WHERE e.packet_id = p.id AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = e.id) AND NOT EXISTS (SELECT 1 FROM packets m JOIN sealed_bundles sb ON sb.packet_id = m.id WHERE m.lineage_key = e.depends_on_id AND m.status = 'sealed' AND sb.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER))) THEN 0 ELSE 1 END AS deps_satisfied,
          CASE WHEN EXISTS (SELECT 1 FROM route_health rh WHERE rh.channel = p.channel AND rh.unhealthy_until IS NOT NULL AND CAST(strftime('%s', rh.unhealthy_until) AS INTEGER) > CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER)) THEN 0 ELSE 1 END AS route_healthy,
          CASE WHEN (p.cooldown_until IS NOT NULL AND CAST(strftime('%s', p.cooldown_until) AS INTEGER) > CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER)) THEN 1 ELSE 0 END AS cooling
   FROM packets p
@@ -1619,6 +1624,7 @@ FROM x""",
         """CREATE VIEW v_gen_queue AS
 WITH s AS (WITH x AS (
   SELECT p.id AS packet_id, p.ref AS packet_ref, p.status, p.channel, p.root_id,
+         p.lineage_key,
          p.repo_target_path, p.created_at, p.ready_since, p.crash_count,
          CAST(strftime('%s', COALESCE(p.ready_since, p.created_at)) AS INTEGER) AS ready_epoch,
          CASE WHEN (CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER) - CAST(strftime('%s', COALESCE(p.ready_since, p.created_at)) AS INTEGER)) < 0 THEN 0 ELSE (CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER) - CAST(strftime('%s', COALESCE(p.ready_since, p.created_at)) AS INTEGER)) END AS wait_sec,
@@ -1636,7 +1642,7 @@ WITH s AS (WITH x AS (
          COALESCE(fh.missing_local_drafts, 0) AS missing_local_drafts,
          COALESCE(uf.feedback_e4, 0) AS feedback_e4,
          CASE WHEN p.status = 'held' OR EXISTS (SELECT 1 FROM queue_overrides o WHERE o.packet_ref = p.ref AND o.kind IN ('block', 'hold') AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'override' AND rv.target_id = o.id) AND (o.scope = 'lineage' OR o.target_version = p.version)) THEN 1 ELSE 0 END AS is_held,
-         CASE WHEN EXISTS (SELECT 1 FROM packet_dependencies e WHERE e.packet_id = p.id AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = e.id) AND NOT EXISTS (SELECT 1 FROM packets m LEFT JOIN sealed_bundles sb ON sb.packet_id = m.id WHERE (m.id = e.depends_on_id OR m.root_id = e.depends_on_id) AND ((m.status = 'sealed' AND sb.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER)) OR m.status = 'completed'))) THEN 0 ELSE 1 END AS deps_satisfied,
+         CASE WHEN EXISTS (SELECT 1 FROM packet_dependencies e WHERE e.packet_id = p.id AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = e.id) AND NOT EXISTS (SELECT 1 FROM packets m JOIN sealed_bundles sb ON sb.packet_id = m.id WHERE m.lineage_key = e.depends_on_id AND m.status = 'sealed' AND sb.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER))) THEN 0 ELSE 1 END AS deps_satisfied,
          CASE WHEN EXISTS (SELECT 1 FROM route_health rh WHERE rh.channel = p.channel AND rh.unhealthy_until IS NOT NULL AND CAST(strftime('%s', rh.unhealthy_until) AS INTEGER) > CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER)) THEN 0 ELSE 1 END AS route_healthy,
          CASE WHEN (p.cooldown_until IS NOT NULL AND CAST(strftime('%s', p.cooldown_until) AS INTEGER) > CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER)) THEN 1 ELSE 0 END AS cooling
   FROM packets p
@@ -1691,6 +1697,7 @@ FROM g CROSS JOIN d""",
         """CREATE VIEW v_eva_queue AS
 WITH s AS (WITH x AS (
   SELECT p.id AS packet_id, p.ref AS packet_ref, p.status, p.channel, p.root_id,
+         p.lineage_key,
          p.repo_target_path, p.created_at, p.ready_since, p.crash_count,
          CAST(strftime('%s', COALESCE(p.ready_since, p.created_at)) AS INTEGER) AS ready_epoch,
          CASE WHEN (CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER) - CAST(strftime('%s', COALESCE(p.ready_since, p.created_at)) AS INTEGER)) < 0 THEN 0 ELSE (CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER) - CAST(strftime('%s', COALESCE(p.ready_since, p.created_at)) AS INTEGER)) END AS wait_sec,
@@ -1708,7 +1715,7 @@ WITH s AS (WITH x AS (
          COALESCE(fh.missing_local_drafts, 0) AS missing_local_drafts,
          COALESCE(uf.feedback_e4, 0) AS feedback_e4,
          CASE WHEN p.status = 'held' OR EXISTS (SELECT 1 FROM queue_overrides o WHERE o.packet_ref = p.ref AND o.kind IN ('block', 'hold') AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'override' AND rv.target_id = o.id) AND (o.scope = 'lineage' OR o.target_version = p.version)) THEN 1 ELSE 0 END AS is_held,
-         CASE WHEN EXISTS (SELECT 1 FROM packet_dependencies e WHERE e.packet_id = p.id AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = e.id) AND NOT EXISTS (SELECT 1 FROM packets m LEFT JOIN sealed_bundles sb ON sb.packet_id = m.id WHERE (m.id = e.depends_on_id OR m.root_id = e.depends_on_id) AND ((m.status = 'sealed' AND sb.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER)) OR m.status = 'completed'))) THEN 0 ELSE 1 END AS deps_satisfied,
+         CASE WHEN EXISTS (SELECT 1 FROM packet_dependencies e WHERE e.packet_id = p.id AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = e.id) AND NOT EXISTS (SELECT 1 FROM packets m JOIN sealed_bundles sb ON sb.packet_id = m.id WHERE m.lineage_key = e.depends_on_id AND m.status = 'sealed' AND sb.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER))) THEN 0 ELSE 1 END AS deps_satisfied,
          CASE WHEN EXISTS (SELECT 1 FROM route_health rh WHERE rh.channel = p.channel AND rh.unhealthy_until IS NOT NULL AND CAST(strftime('%s', rh.unhealthy_until) AS INTEGER) > CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER)) THEN 0 ELSE 1 END AS route_healthy,
          CASE WHEN (p.cooldown_until IS NOT NULL AND CAST(strftime('%s', p.cooldown_until) AS INTEGER) > CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER)) THEN 1 ELSE 0 END AS cooling
   FROM packets p
@@ -1742,6 +1749,7 @@ SELECT x.*, (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.v
 FROM x),
 g AS (WITH s AS (WITH x AS (
   SELECT p.id AS packet_id, p.ref AS packet_ref, p.status, p.channel, p.root_id,
+         p.lineage_key,
          p.repo_target_path, p.created_at, p.ready_since, p.crash_count,
          CAST(strftime('%s', COALESCE(p.ready_since, p.created_at)) AS INTEGER) AS ready_epoch,
          CASE WHEN (CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER) - CAST(strftime('%s', COALESCE(p.ready_since, p.created_at)) AS INTEGER)) < 0 THEN 0 ELSE (CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER) - CAST(strftime('%s', COALESCE(p.ready_since, p.created_at)) AS INTEGER)) END AS wait_sec,
@@ -1759,7 +1767,7 @@ g AS (WITH s AS (WITH x AS (
          COALESCE(fh.missing_local_drafts, 0) AS missing_local_drafts,
          COALESCE(uf.feedback_e4, 0) AS feedback_e4,
          CASE WHEN p.status = 'held' OR EXISTS (SELECT 1 FROM queue_overrides o WHERE o.packet_ref = p.ref AND o.kind IN ('block', 'hold') AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'override' AND rv.target_id = o.id) AND (o.scope = 'lineage' OR o.target_version = p.version)) THEN 1 ELSE 0 END AS is_held,
-         CASE WHEN EXISTS (SELECT 1 FROM packet_dependencies e WHERE e.packet_id = p.id AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = e.id) AND NOT EXISTS (SELECT 1 FROM packets m LEFT JOIN sealed_bundles sb ON sb.packet_id = m.id WHERE (m.id = e.depends_on_id OR m.root_id = e.depends_on_id) AND ((m.status = 'sealed' AND sb.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER)) OR m.status = 'completed'))) THEN 0 ELSE 1 END AS deps_satisfied,
+         CASE WHEN EXISTS (SELECT 1 FROM packet_dependencies e WHERE e.packet_id = p.id AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = e.id) AND NOT EXISTS (SELECT 1 FROM packets m JOIN sealed_bundles sb ON sb.packet_id = m.id WHERE m.lineage_key = e.depends_on_id AND m.status = 'sealed' AND sb.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER))) THEN 0 ELSE 1 END AS deps_satisfied,
          CASE WHEN EXISTS (SELECT 1 FROM route_health rh WHERE rh.channel = p.channel AND rh.unhealthy_until IS NOT NULL AND CAST(strftime('%s', rh.unhealthy_until) AS INTEGER) > CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER)) THEN 0 ELSE 1 END AS route_healthy,
          CASE WHEN (p.cooldown_until IS NOT NULL AND CAST(strftime('%s', p.cooldown_until) AS INTEGER) > CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER)) THEN 1 ELSE 0 END AS cooling
   FROM packets p
@@ -2214,6 +2222,7 @@ LEFT JOIN channel_run_outcomes o ON o.channel_run_id = c.id""",
 	hold_reason VARCHAR(32),
 	ready_since TIMESTAMP WITH TIME ZONE,
 	lineage_depth INTEGER DEFAULT 0 NOT NULL,
+	lineage_key VARCHAR(36) NOT NULL,
 	parent_bundle_id VARCHAR(36),
 	parent_bundle_hash VARCHAR(64),
 	examples_hash VARCHAR(64),
@@ -2231,13 +2240,14 @@ LEFT JOIN channel_run_outcomes o ON o.channel_run_id = c.id""",
 	CONSTRAINT fk_packets_parent_id_packets FOREIGN KEY(parent_id) REFERENCES packets (id),
 	CONSTRAINT fk_packets_root_id_packets FOREIGN KEY(root_id) REFERENCES packets (id)
 )""",
+        """CREATE INDEX ix_packets_lineage_key ON packets (lineage_key)""",
         """CREATE INDEX ix_packets_objective_id ON packets (objective_id)""",
-        """CREATE INDEX ix_packets_objective_position_lineage ON packets (objective_id, position, lineage_depth)""",
         """CREATE INDEX ix_packets_parent_id ON packets (parent_id)""",
         """CREATE INDEX ix_packets_project_id ON packets (project_id)""",
         """CREATE INDEX ix_packets_ref ON packets (ref)""",
         """CREATE INDEX ix_packets_root_id ON packets (root_id)""",
         """CREATE INDEX ix_packets_status ON packets (status)""",
+        """CREATE UNIQUE INDEX uq_packets_lineage_step ON packets (objective_id, lineage_key, lineage_depth) WHERE supersedes_id IS NULL""",
         """CREATE TABLE branch_applications (
 	id VARCHAR(36) NOT NULL,
 	packet_id VARCHAR(36) NOT NULL,
@@ -2829,7 +2839,7 @@ BEGIN
     RETURN OLD;
   END IF;
   IF TG_OP = 'UPDATE' THEN
-    IF NEW.ref IS DISTINCT FROM OLD.ref OR NEW.version IS DISTINCT FROM OLD.version OR NEW.supersedes_id IS DISTINCT FROM OLD.supersedes_id OR NEW.project_id IS DISTINCT FROM OLD.project_id OR NEW.objective_id IS DISTINCT FROM OLD.objective_id OR NEW.parent_id IS DISTINCT FROM OLD.parent_id OR NEW.root_id IS DISTINCT FROM OLD.root_id THEN
+    IF NEW.ref IS DISTINCT FROM OLD.ref OR NEW.version IS DISTINCT FROM OLD.version OR NEW.supersedes_id IS DISTINCT FROM OLD.supersedes_id OR NEW.project_id IS DISTINCT FROM OLD.project_id OR NEW.objective_id IS DISTINCT FROM OLD.objective_id OR NEW.parent_id IS DISTINCT FROM OLD.parent_id OR NEW.root_id IS DISTINCT FROM OLD.root_id OR NEW.lineage_key IS DISTINCT FROM OLD.lineage_key THEN
       RAISE EXCEPTION 'orchestrator-immutable: lineage fields of % (ref, version, supersedes_id, ancestry) are immutable', TG_TABLE_NAME USING ERRCODE = '23001';
     END IF;
   END IF;
@@ -2839,7 +2849,7 @@ BEGIN
         RAISE EXCEPTION 'orchestrator-immutable: a new lineage in % starts at version 1', TG_TABLE_NAME USING ERRCODE = '23001';
       END IF;
     ELSIF NOT EXISTS (SELECT 1 FROM packets p WHERE p.id = NEW.supersedes_id
-                      AND p.ref = NEW.ref AND p.version + 1 = NEW.version AND p.project_id IS NOT DISTINCT FROM NEW.project_id AND p.objective_id IS NOT DISTINCT FROM NEW.objective_id AND p.parent_id IS NOT DISTINCT FROM NEW.parent_id AND p.root_id IS NOT DISTINCT FROM NEW.root_id) THEN
+                      AND p.ref = NEW.ref AND p.version + 1 = NEW.version AND p.project_id IS NOT DISTINCT FROM NEW.project_id AND p.objective_id IS NOT DISTINCT FROM NEW.objective_id AND p.parent_id IS NOT DISTINCT FROM NEW.parent_id AND p.root_id IS NOT DISTINCT FROM NEW.root_id AND p.lineage_key IS NOT DISTINCT FROM NEW.lineage_key) THEN
       RAISE EXCEPTION 'orchestrator-immutable: a successor in % must keep the ref, have version = predecessor + 1 and the same ancestry', TG_TABLE_NAME USING ERRCODE = '23001';
     END IF;
   END IF;
@@ -3573,7 +3583,7 @@ LEFT JOIN v_field_status fs ON fs.packet_id = h.id AND fs.field_name = req.field
 WHERE req.phase = 'pre'
 GROUP BY h.id, h.ref, h.version, h.status""",
         """CREATE VIEW v_packet_mandatory_fields AS
-WITH pk AS (SELECT p.id, p.root_id, p.repo_target_path FROM packets p WHERE NOT p.locked)
+WITH pk AS (SELECT p.id, p.lineage_key, p.repo_target_path FROM packets p WHERE NOT p.locked)
 SELECT pk.id AS packet_id, u.field_name, 'universal' AS reason
 FROM pk CROSS JOIN (SELECT 'requirement_alignment' AS field_name UNION ALL SELECT 'testability' AS field_name UNION ALL SELECT 'acceptance_criteria_coverage' AS field_name) u
 UNION
@@ -3581,7 +3591,7 @@ SELECT pk.id, u.field_name, 'has_dependencies'
 FROM pk CROSS JOIN (SELECT 'dependency_validity' AS field_name UNION ALL SELECT 'interface_stability' AS field_name) u WHERE EXISTS (SELECT 1 FROM packet_dependencies e WHERE e.packet_id = pk.id AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = e.id))
 UNION
 SELECT pk.id, u.field_name, 'has_dependents'
-FROM pk CROSS JOIN (SELECT 'downstream_contract_clarity' AS field_name UNION ALL SELECT 'risk_assessment' AS field_name) u WHERE EXISTS (SELECT 1 FROM packet_dependencies e WHERE e.depends_on_id IN (pk.id, COALESCE(pk.root_id, pk.id)) AND e.packet_id <> pk.id AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = e.id))
+FROM pk CROSS JOIN (SELECT 'downstream_contract_clarity' AS field_name UNION ALL SELECT 'risk_assessment' AS field_name) u WHERE EXISTS (SELECT 1 FROM packet_dependencies e JOIN packets dx ON dx.id = e.packet_id WHERE e.depends_on_id = pk.lineage_key AND dx.lineage_key <> pk.lineage_key AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = e.id))
 UNION
 SELECT pk.id, u.field_name, 'charted_repo_target'
 FROM pk CROSS JOIN (SELECT 'risk_assessment' AS field_name UNION ALL SELECT 'sonar_hotspot_alignment' AS field_name) u WHERE pk.repo_target_path IS NOT NULL
@@ -3603,6 +3613,8 @@ SELECT p.id AS packet_id,
          WHERE ps.phase = 'pre' AND ps.enabled AND ps.revision = (SELECT MAX(p2.revision) FROM eva_presets p2 WHERE p2.field_name = ps.field_name AND p2.phase = ps.phase) AND (fs.status IS NULL OR fs.status = 'pending')
            AND ps.field_name NOT IN (SELECT m.field_name FROM v_packet_mandatory_fields m
                                      WHERE m.packet_id = p.id)) AS missing_optional_fields,
+       -- @ORCHESTRATOR:PLACEHOLDER (M3b: wire the local-drafts trigger). Reported only: it is
+       -- not a v_eva_queue need condition until a drafting channel exists.
        CASE WHEN p.examples_hash IS NULL THEN 1 ELSE 0 END AS missing_local_drafts,
        COALESCE((SELECT SUM(fs.question_context_count) FROM v_field_status fs
                  WHERE fs.packet_id = p.id AND fs.phase = 'pre'), 0) AS question_context_total,
@@ -3611,7 +3623,7 @@ FROM packets p
 WHERE NOT p.locked""",
         """CREATE VIEW v_packet_relational_centrality AS
 WITH c AS (
-  SELECT p.id AS packet_id, (SELECT COUNT(DISTINCT d1.id) FROM packets d1 JOIN packet_dependencies ed1 ON ed1.packet_id = d1.id WHERE ed1.depends_on_id IN (p.id, COALESCE(p.root_id, p.id)) AND d1.id <> p.id AND NOT d1.locked AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = ed1.id) AND NOT EXISTS (SELECT 1 FROM sealed_bundles sx JOIN packets mx ON mx.id = sx.packet_id WHERE COALESCE(mx.root_id, mx.id) = COALESCE(d1.root_id, d1.id) AND sx.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER))) AS direct_dependents, (SELECT COUNT(DISTINCT d2.id) FROM packets h JOIN packet_dependencies eh ON eh.depends_on_id IN (h.id, COALESCE(h.root_id, h.id)) JOIN packets d2 ON d2.id = eh.packet_id WHERE h.id IN (SELECT d1.id FROM packets d1 JOIN packet_dependencies ed1 ON ed1.packet_id = d1.id WHERE ed1.depends_on_id IN (p.id, COALESCE(p.root_id, p.id)) AND d1.id <> p.id AND NOT d1.locked AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = ed1.id) AND NOT EXISTS (SELECT 1 FROM sealed_bundles sx JOIN packets mx ON mx.id = sx.packet_id WHERE COALESCE(mx.root_id, mx.id) = COALESCE(d1.root_id, d1.id) AND sx.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER))) AND d2.id <> p.id AND NOT d2.locked AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = eh.id) AND d2.id NOT IN (SELECT d1.id FROM packets d1 JOIN packet_dependencies ed1 ON ed1.packet_id = d1.id WHERE ed1.depends_on_id IN (p.id, COALESCE(p.root_id, p.id)) AND d1.id <> p.id AND NOT d1.locked AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = ed1.id) AND NOT EXISTS (SELECT 1 FROM sealed_bundles sx JOIN packets mx ON mx.id = sx.packet_id WHERE COALESCE(mx.root_id, mx.id) = COALESCE(d1.root_id, d1.id) AND sx.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER)))) AS two_hop_dependents,
+  SELECT p.id AS packet_id, (SELECT COUNT(DISTINCT d1.lineage_key) FROM packets d1 JOIN packet_dependencies ed1 ON ed1.packet_id = d1.id WHERE ed1.depends_on_id = p.lineage_key AND d1.lineage_key <> p.lineage_key AND NOT d1.locked AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = ed1.id) AND NOT EXISTS (SELECT 1 FROM sealed_bundles sx JOIN packets mx ON mx.id = sx.packet_id WHERE mx.lineage_key = d1.lineage_key AND sx.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER))) AS direct_dependents, (SELECT COUNT(DISTINCT d2.lineage_key) FROM packets h JOIN packet_dependencies eh ON eh.depends_on_id = h.lineage_key JOIN packets d2 ON d2.id = eh.packet_id WHERE h.id IN (SELECT d1.id FROM packets d1 JOIN packet_dependencies ed1 ON ed1.packet_id = d1.id WHERE ed1.depends_on_id = p.lineage_key AND d1.lineage_key <> p.lineage_key AND NOT d1.locked AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = ed1.id) AND NOT EXISTS (SELECT 1 FROM sealed_bundles sx JOIN packets mx ON mx.id = sx.packet_id WHERE mx.lineage_key = d1.lineage_key AND sx.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER))) AND d2.lineage_key <> p.lineage_key AND d2.lineage_key <> h.lineage_key AND NOT d2.locked AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = eh.id) AND d2.lineage_key NOT IN (SELECT d1.lineage_key FROM packets d1 JOIN packet_dependencies ed1 ON ed1.packet_id = d1.id WHERE ed1.depends_on_id = p.lineage_key AND d1.lineage_key <> p.lineage_key AND NOT d1.locked AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = ed1.id) AND NOT EXISTS (SELECT 1 FROM sealed_bundles sx JOIN packets mx ON mx.id = sx.packet_id WHERE mx.lineage_key = d1.lineage_key AND sx.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER)))) AS two_hop_dependents,
          (CASE WHEN COALESCE((SELECT o.priority_level FROM objectives o WHERE o.id = p.objective_id), 0) >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.critical_priority'), 8) AS INTEGER) THEN 1 ELSE 0 END) AS is_critical
   FROM packets p WHERE NOT p.locked
 )
@@ -3639,6 +3651,7 @@ FROM s""",
         """CREATE VIEW v_packet_queue_score AS
 WITH x AS (
   SELECT p.id AS packet_id, p.ref AS packet_ref, p.status, p.channel, p.root_id,
+         p.lineage_key,
          p.repo_target_path, p.created_at, p.ready_since, p.crash_count,
          CAST(FLOOR(EXTRACT(EPOCH FROM COALESCE(p.ready_since, p.created_at))) AS BIGINT) AS ready_epoch,
          CASE WHEN (CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT) - CAST(FLOOR(EXTRACT(EPOCH FROM COALESCE(p.ready_since, p.created_at))) AS BIGINT)) < 0 THEN 0 ELSE (CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT) - CAST(FLOOR(EXTRACT(EPOCH FROM COALESCE(p.ready_since, p.created_at))) AS BIGINT)) END AS wait_sec,
@@ -3656,7 +3669,7 @@ WITH x AS (
          COALESCE(fh.missing_local_drafts, 0) AS missing_local_drafts,
          COALESCE(uf.feedback_e4, 0) AS feedback_e4,
          CASE WHEN p.status = 'held' OR EXISTS (SELECT 1 FROM queue_overrides o WHERE o.packet_ref = p.ref AND o.kind IN ('block', 'hold') AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'override' AND rv.target_id = o.id) AND (o.scope = 'lineage' OR o.target_version = p.version)) THEN 1 ELSE 0 END AS is_held,
-         CASE WHEN EXISTS (SELECT 1 FROM packet_dependencies e WHERE e.packet_id = p.id AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = e.id) AND NOT EXISTS (SELECT 1 FROM packets m LEFT JOIN sealed_bundles sb ON sb.packet_id = m.id WHERE (m.id = e.depends_on_id OR m.root_id = e.depends_on_id) AND ((m.status = 'sealed' AND sb.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER)) OR m.status = 'completed'))) THEN 0 ELSE 1 END AS deps_satisfied,
+         CASE WHEN EXISTS (SELECT 1 FROM packet_dependencies e WHERE e.packet_id = p.id AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = e.id) AND NOT EXISTS (SELECT 1 FROM packets m JOIN sealed_bundles sb ON sb.packet_id = m.id WHERE m.lineage_key = e.depends_on_id AND m.status = 'sealed' AND sb.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER))) THEN 0 ELSE 1 END AS deps_satisfied,
          CASE WHEN EXISTS (SELECT 1 FROM route_health rh WHERE rh.channel = p.channel AND rh.unhealthy_until IS NOT NULL AND CAST(FLOOR(EXTRACT(EPOCH FROM rh.unhealthy_until)) AS BIGINT) > CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT)) THEN 0 ELSE 1 END AS route_healthy,
          CASE WHEN (p.cooldown_until IS NOT NULL AND CAST(FLOOR(EXTRACT(EPOCH FROM p.cooldown_until)) AS BIGINT) > CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT)) THEN 1 ELSE 0 END AS cooling
   FROM packets p
@@ -3691,6 +3704,7 @@ FROM x""",
         """CREATE VIEW v_gen_queue AS
 WITH s AS (WITH x AS (
   SELECT p.id AS packet_id, p.ref AS packet_ref, p.status, p.channel, p.root_id,
+         p.lineage_key,
          p.repo_target_path, p.created_at, p.ready_since, p.crash_count,
          CAST(FLOOR(EXTRACT(EPOCH FROM COALESCE(p.ready_since, p.created_at))) AS BIGINT) AS ready_epoch,
          CASE WHEN (CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT) - CAST(FLOOR(EXTRACT(EPOCH FROM COALESCE(p.ready_since, p.created_at))) AS BIGINT)) < 0 THEN 0 ELSE (CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT) - CAST(FLOOR(EXTRACT(EPOCH FROM COALESCE(p.ready_since, p.created_at))) AS BIGINT)) END AS wait_sec,
@@ -3708,7 +3722,7 @@ WITH s AS (WITH x AS (
          COALESCE(fh.missing_local_drafts, 0) AS missing_local_drafts,
          COALESCE(uf.feedback_e4, 0) AS feedback_e4,
          CASE WHEN p.status = 'held' OR EXISTS (SELECT 1 FROM queue_overrides o WHERE o.packet_ref = p.ref AND o.kind IN ('block', 'hold') AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'override' AND rv.target_id = o.id) AND (o.scope = 'lineage' OR o.target_version = p.version)) THEN 1 ELSE 0 END AS is_held,
-         CASE WHEN EXISTS (SELECT 1 FROM packet_dependencies e WHERE e.packet_id = p.id AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = e.id) AND NOT EXISTS (SELECT 1 FROM packets m LEFT JOIN sealed_bundles sb ON sb.packet_id = m.id WHERE (m.id = e.depends_on_id OR m.root_id = e.depends_on_id) AND ((m.status = 'sealed' AND sb.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER)) OR m.status = 'completed'))) THEN 0 ELSE 1 END AS deps_satisfied,
+         CASE WHEN EXISTS (SELECT 1 FROM packet_dependencies e WHERE e.packet_id = p.id AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = e.id) AND NOT EXISTS (SELECT 1 FROM packets m JOIN sealed_bundles sb ON sb.packet_id = m.id WHERE m.lineage_key = e.depends_on_id AND m.status = 'sealed' AND sb.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER))) THEN 0 ELSE 1 END AS deps_satisfied,
          CASE WHEN EXISTS (SELECT 1 FROM route_health rh WHERE rh.channel = p.channel AND rh.unhealthy_until IS NOT NULL AND CAST(FLOOR(EXTRACT(EPOCH FROM rh.unhealthy_until)) AS BIGINT) > CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT)) THEN 0 ELSE 1 END AS route_healthy,
          CASE WHEN (p.cooldown_until IS NOT NULL AND CAST(FLOOR(EXTRACT(EPOCH FROM p.cooldown_until)) AS BIGINT) > CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT)) THEN 1 ELSE 0 END AS cooling
   FROM packets p
@@ -3763,6 +3777,7 @@ FROM g CROSS JOIN d""",
         """CREATE VIEW v_eva_queue AS
 WITH s AS (WITH x AS (
   SELECT p.id AS packet_id, p.ref AS packet_ref, p.status, p.channel, p.root_id,
+         p.lineage_key,
          p.repo_target_path, p.created_at, p.ready_since, p.crash_count,
          CAST(FLOOR(EXTRACT(EPOCH FROM COALESCE(p.ready_since, p.created_at))) AS BIGINT) AS ready_epoch,
          CASE WHEN (CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT) - CAST(FLOOR(EXTRACT(EPOCH FROM COALESCE(p.ready_since, p.created_at))) AS BIGINT)) < 0 THEN 0 ELSE (CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT) - CAST(FLOOR(EXTRACT(EPOCH FROM COALESCE(p.ready_since, p.created_at))) AS BIGINT)) END AS wait_sec,
@@ -3780,7 +3795,7 @@ WITH s AS (WITH x AS (
          COALESCE(fh.missing_local_drafts, 0) AS missing_local_drafts,
          COALESCE(uf.feedback_e4, 0) AS feedback_e4,
          CASE WHEN p.status = 'held' OR EXISTS (SELECT 1 FROM queue_overrides o WHERE o.packet_ref = p.ref AND o.kind IN ('block', 'hold') AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'override' AND rv.target_id = o.id) AND (o.scope = 'lineage' OR o.target_version = p.version)) THEN 1 ELSE 0 END AS is_held,
-         CASE WHEN EXISTS (SELECT 1 FROM packet_dependencies e WHERE e.packet_id = p.id AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = e.id) AND NOT EXISTS (SELECT 1 FROM packets m LEFT JOIN sealed_bundles sb ON sb.packet_id = m.id WHERE (m.id = e.depends_on_id OR m.root_id = e.depends_on_id) AND ((m.status = 'sealed' AND sb.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER)) OR m.status = 'completed'))) THEN 0 ELSE 1 END AS deps_satisfied,
+         CASE WHEN EXISTS (SELECT 1 FROM packet_dependencies e WHERE e.packet_id = p.id AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = e.id) AND NOT EXISTS (SELECT 1 FROM packets m JOIN sealed_bundles sb ON sb.packet_id = m.id WHERE m.lineage_key = e.depends_on_id AND m.status = 'sealed' AND sb.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER))) THEN 0 ELSE 1 END AS deps_satisfied,
          CASE WHEN EXISTS (SELECT 1 FROM route_health rh WHERE rh.channel = p.channel AND rh.unhealthy_until IS NOT NULL AND CAST(FLOOR(EXTRACT(EPOCH FROM rh.unhealthy_until)) AS BIGINT) > CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT)) THEN 0 ELSE 1 END AS route_healthy,
          CASE WHEN (p.cooldown_until IS NOT NULL AND CAST(FLOOR(EXTRACT(EPOCH FROM p.cooldown_until)) AS BIGINT) > CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT)) THEN 1 ELSE 0 END AS cooling
   FROM packets p
@@ -3814,6 +3829,7 @@ SELECT x.*, (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.v
 FROM x),
 g AS (WITH s AS (WITH x AS (
   SELECT p.id AS packet_id, p.ref AS packet_ref, p.status, p.channel, p.root_id,
+         p.lineage_key,
          p.repo_target_path, p.created_at, p.ready_since, p.crash_count,
          CAST(FLOOR(EXTRACT(EPOCH FROM COALESCE(p.ready_since, p.created_at))) AS BIGINT) AS ready_epoch,
          CASE WHEN (CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT) - CAST(FLOOR(EXTRACT(EPOCH FROM COALESCE(p.ready_since, p.created_at))) AS BIGINT)) < 0 THEN 0 ELSE (CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT) - CAST(FLOOR(EXTRACT(EPOCH FROM COALESCE(p.ready_since, p.created_at))) AS BIGINT)) END AS wait_sec,
@@ -3831,7 +3847,7 @@ g AS (WITH s AS (WITH x AS (
          COALESCE(fh.missing_local_drafts, 0) AS missing_local_drafts,
          COALESCE(uf.feedback_e4, 0) AS feedback_e4,
          CASE WHEN p.status = 'held' OR EXISTS (SELECT 1 FROM queue_overrides o WHERE o.packet_ref = p.ref AND o.kind IN ('block', 'hold') AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'override' AND rv.target_id = o.id) AND (o.scope = 'lineage' OR o.target_version = p.version)) THEN 1 ELSE 0 END AS is_held,
-         CASE WHEN EXISTS (SELECT 1 FROM packet_dependencies e WHERE e.packet_id = p.id AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = e.id) AND NOT EXISTS (SELECT 1 FROM packets m LEFT JOIN sealed_bundles sb ON sb.packet_id = m.id WHERE (m.id = e.depends_on_id OR m.root_id = e.depends_on_id) AND ((m.status = 'sealed' AND sb.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER)) OR m.status = 'completed'))) THEN 0 ELSE 1 END AS deps_satisfied,
+         CASE WHEN EXISTS (SELECT 1 FROM packet_dependencies e WHERE e.packet_id = p.id AND NOT EXISTS (SELECT 1 FROM revocations rv WHERE rv.target_type = 'dependency' AND rv.target_id = e.id) AND NOT EXISTS (SELECT 1 FROM packets m JOIN sealed_bundles sb ON sb.packet_id = m.id WHERE m.lineage_key = e.depends_on_id AND m.status = 'sealed' AND sb.composite_grade_e4 >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'dep_satisfaction_grade_e4'), 7000) AS INTEGER))) THEN 0 ELSE 1 END AS deps_satisfied,
          CASE WHEN EXISTS (SELECT 1 FROM route_health rh WHERE rh.channel = p.channel AND rh.unhealthy_until IS NOT NULL AND CAST(FLOOR(EXTRACT(EPOCH FROM rh.unhealthy_until)) AS BIGINT) > CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT)) THEN 0 ELSE 1 END AS route_healthy,
          CASE WHEN (p.cooldown_until IS NOT NULL AND CAST(FLOOR(EXTRACT(EPOCH FROM p.cooldown_until)) AS BIGINT) > CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT)) THEN 1 ELSE 0 END AS cooling
   FROM packets p

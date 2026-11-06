@@ -198,9 +198,11 @@ def test_superseding_versions_and_rows_with_dependents_cannot_be_deleted(
 
     # a child packet makes its parent undeletable (DB and repository)
     parent = tree.packets[0]
+    child_id = new_id()
     child = {
         **row_of(engine, "packets", parent.id),
-        "id": new_id(),
+        "id": child_id,
+        "lineage_key": child_id,  # a split child starts its own lineage (Argon K1)
         "ref": "PP-900001",
         "parent_id": parent.id,
         "root_id": parent.root_id,
