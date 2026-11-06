@@ -13,6 +13,32 @@ Newest entries first. Every agent session appends an entry: what changed, decisi
 
 ---
 
+## 2026-11-06 — M3a checkpoint 3 (after C5), for Argon's final audit (Claude Code)
+
+**What landed**
+- **3442deb — run bindings, crash path, R6 transitions.** `binding_mismatch`/MR1 guard: fencing token, ownership, lease, owner close/BLOCK and GLOBAL_PAUSE only — a G/H/C change, an upstream edit, an evaPacket or a soft HOLD never stales a running generation (Q7, OQ19). `abort_run` (CFO_ABORT) revokes the lease. A stale or revoked running packet goes `running → queued` (never `evaluating_pre`). Exit-3 decisions bind the confirmation (decided-once CAS) and the fencing token, not G. `record_crash` (OQ18): run `crashed`, `crash_count + 1`, `running → queued` with cooldown `min(3600, 30·2^(n−1))`, held at 5 (`crash_limit`), route unhealthy 600 s after 3 crashes in 300 s (window excludes exactly t − 300 s). Transition table per R6 (listed in ARCHITECTURE §7.3, "M3a changes").
+- **98c71df — `evaluation/gen_eva.py`.** `complete_generation` (no queue view read before the seal; spy-tested), integer composite grade (OQ16, sonar fallback), seal of the claim-time revision rebuilt from `field_revisions` (OQ20), `spawn_child` (one per bundle, idempotent; `lineage_key`/`root_id` per Argon K1; carried pre-phase results questioned; `draft → ready` / `evaluating_pre` / held `grade_met` at ≥ 8,500), OQ17 prompt template with a pluggable `fast_synth` (**`@ORCHESTRATOR:PLACEHOLDER`**: no local model is wired in M3a, the stub always declines and the template is used; a raising synth also falls back), `LINEAGE_HISTORY_SQL` (by `lineage_key`).
+- Tests: `tests/test_m3a_gen_eva.py` — AC8, AC9 (hash checks), AC28–AC35, boundaries 8,499/8,500, crash counts 3/5, the 300 s window, the CFO example; the M2 completion tests now check `completion_blockers` because `evaluating_post → completed` is retired.
+
+**Tests:** last full run on SQLite + PostgreSQL 16: 696 passed, 4 skipped, plus two failures that were a mid-run doc regeneration and one PG concurrency test whose premise R6 changed (now an owner abort races the dispatch); both re-run green, as did the new AC8/AC9 checks (29/29 gen_eva tests on both dialects). Ruff clean.
+
+**Deviations (new in C5)**
+- **OQ15:** output is not committed to `refs/gen/<run_id>`: M3a has no production repository wired in. `sealed_bundles.output_ref` exists and stays NULL; the artifact's sha256 is the bundle's `artifact_hash`.
+- **Crash at the limit:** R6 has no `running → held` row, so the fifth crash goes `running → queued → held` in one transaction.
+- **Stale runs:** the packet returns to `queued` (R6's new `running → queued`), not to `evaluating_pre` as E7 had it; a BLOCK/HOLD/pending confirmation still defers the move (V2). A soft HOLD on a running packet keeps the run going; the hold takes effect when the run ends.
+- **`failed`:** nothing enters it any more (crashes requeue); it keeps its exits for older rows.
+- **Content address of a blob** is `sha256(json.dumps(value))` (so NULL and '' differ); the bundle hash is `sha256` over `[snapshot_hash, grade, artifact_hash]`.
+- **Split children roll up** when their lineage has a member sealed at `dep_satisfaction_grade_e4`.
+
+**Known issues**
+- K2 (accepted): suite runtime ~11 min on both dialects; profile the views after M3a.
+- `failed` packets from before M3a still have `failed → queued` (retry) and `failed → evaluating_pre`.
+- The kernel tick/daemon that calls `admission_tick`, `next_dispatch`, `complete_generation` and `reconcile_runs` in order is M3b (OQ28); M3a provides and tests the functions.
+
+**Next:** C6 — draft PR to `main` with the AC table and every deviation from R6; Argon's final audit.
+
+---
+
 ## 2026-11-06 — C4 fixup after Argon's conditional pass (K1, D1, D7) (Claude Code)
 
 Argon's audit of C1–C4: **conditional pass**. Landed before any child-spawn code (C5 work was stashed and resumed afterwards).

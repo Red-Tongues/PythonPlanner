@@ -7,6 +7,7 @@ window. Both dialects; FakeProvider only.
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import timedelta
 
 import pytest
@@ -127,7 +128,13 @@ def test_gen_eva_runs_immediately_seals_and_spawns(
     blob = session.execute(
         text("SELECT body FROM content_blobs WHERE hash = :h"), {"h": bundle.snapshot_hash}
     ).scalar()
-    assert hashlib.sha256(blob.encode()).hexdigest() == hashlib.sha256(blob.encode()).hexdigest()
+    from orchestrator.revisions import blob_hash
+
+    assert bundle.snapshot_hash == blob_hash(blob)  # AC9: the stored canonical JSON's address
+    assert bundle.bundle_hash == hashlib.sha256(
+        json.dumps([bundle.snapshot_hash, bundle.composite_grade_e4, bundle.artifact_hash],
+                   sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()  # fmt: skip
     session.refresh(packet)
     assert packet.status is S.SEALED and packet.locked and run.state is R.SUCCEEDED
     assert (child.parent_id, child.lineage_key, child.root_id) == (
@@ -360,3 +367,16 @@ def test_low_grade_tries_the_synth_and_falls_back(session: Session) -> None:
         session, packet, artifact_hash="h", grade_e4=6000, synth=lambda t, grade_e4: "rewritten"
     ) == template.replace("4000", "6000")
     assert bundle
+
+
+def test_claim_and_seal_refuse_undrained_revisions(session: Session) -> None:
+    """AC8: a raw SQL edit leaves outbox rows; the claim refuses until they are drained."""
+    from orchestrator.queue import ClaimError
+    from orchestrator.revisions import drain_outbox
+
+    packet = queued_packet(session)
+    session.execute(text("UPDATE packets SET manual_boost = 4 WHERE id = :id"), {"id": packet.id})
+    with pytest.raises(ClaimError, match="undrained"):
+        claim(session, packet.ref, "kernel-a")
+    drain_outbox(session)
+    assert claim(session, packet.ref, "kernel-a").claim_content_revision == 1
