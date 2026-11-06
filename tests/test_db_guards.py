@@ -27,7 +27,7 @@ from orchestrator.sql.views import RUN_VIEWS
 from orchestrator.transitions import PACKET_TRANSITIONS, RUN_TRANSITIONS
 
 NOW = "2026-11-04 12:00:00"
-LOCKING = {"completed", "archived", "closed_unverified"}
+LOCKING = {"completed", "archived", "closed_unverified", "sealed"}
 
 
 @pytest.mark.parametrize("dialect", ["sqlite", "postgresql"])

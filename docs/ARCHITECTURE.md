@@ -211,6 +211,7 @@ change (DB-enforced).
 | `evaluating_post` → `completed` | kernel / user | completion | E5: every required post field complete, accepted and current for M from C29-verified evaluators; scan bound to the commit SHA; quality policy (C30); all hard gates; no hold or block; locks | P2 |
 | `evaluating_post` → `held` | kernel | alignment < 7,500 (governor) | — |  |
 | `evaluating_post` → `needs_review` | kernel | post-eval failed / returned required-scan gate ERROR | E6: a gate ERROR bound to the commit SHA also raises a confirmation |  |
+| `evaluating_post` → `sealed` | kernel | gen_eva seal (M3a, R6 OQ13) | a gen_eva grade; outbox drained; one sealed_bundles row (UNIQUE packet_id) from the claim-time content revision; locks; exactly one child genPacket spawned |  |
 | `evaluating_pre` → `awaiting_confirmation` | kernel | promotion/branch | scope = confirm |  |
 | `evaluating_pre` → `blocked` | user | BLOCK, incl. branch kill (D9-R1: a branch-scope BLOCK, reversible) | G bumped in scope (C35) |  |
 | `evaluating_pre` → `closed_unverified` | user | explicit owner close (branch kill is a BLOCK, not a close: D9-R1) | reason required; locks; in-flight runs staled |  |

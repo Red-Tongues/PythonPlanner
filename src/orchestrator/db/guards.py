@@ -36,7 +36,10 @@ from orchestrator.db.models import (
     ChannelRun,
     ChannelRunOutcome,
     Confirmation,
+    ContentBlob,
     ControlState,
+    CrashEvent,
+    EvaDiscardLog,
     EvaluationCycle,
     EvaluationPass,
     EvaluationPassItem,
@@ -44,7 +47,9 @@ from orchestrator.db.models import (
     EvaPreset,
     Event,
     Exemplar,
+    FeedbackEvent,
     FieldRegistryRevision,
+    FieldRevision,
     GenerationRun,
     GovernorEvent,
     GovernorState,
@@ -55,8 +60,11 @@ from orchestrator.db.models import (
     Project,
     QualityReport,
     QueueAdmission,
+    QueueEpochSnapshot,
     QueueOverride,
     Revocation,
+    RouteHealth,
+    SealedBundle,
     Setting,
     Threshold,
     Waiver,
@@ -82,6 +90,14 @@ APPEND_ONLY_MODELS: tuple[type, ...] = (
     BudgetReservation,
     BudgetReconciliation,
     BudgetTopup,
+    # M3a (R6): history, seals and queue records
+    ContentBlob,
+    FieldRevision,
+    SealedBundle,
+    EvaDiscardLog,
+    QueueEpochSnapshot,
+    FeedbackEvent,
+    CrashEvent,
 )
 LOCKABLE_MODELS: tuple[type, ...] = (Project, Objective, Packet)
 VERSIONED_MODELS: tuple[type, ...] = (Setting, CandidateFieldDefinitionRow, Threshold)
@@ -122,6 +138,11 @@ ENTITY_TYPES: dict[type, str] = {
     BudgetReservation: "budget_reservation",
     BudgetReconciliation: "budget_reconciliation",
     BudgetTopup: "budget_topup",
+    SealedBundle: "sealed_bundle",
+    FeedbackEvent: "feedback_event",
+    CrashEvent: "crash_event",
+    RouteHealth: "route_health",
+    EvaDiscardLog: "eva_discard_log",
 }
 
 

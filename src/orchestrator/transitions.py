@@ -56,7 +56,9 @@ OVERRIDABLE: frozenset[PacketStatus] = frozenset(
     }
 )
 #: terminal packet statuses: locked, no exits (``archived`` is legacy, see deviation P4)
-TERMINAL: frozenset[PacketStatus] = frozenset({S.COMPLETED, S.CLOSED_UNVERIFIED, S.ARCHIVED})
+TERMINAL: frozenset[PacketStatus] = frozenset(
+    {S.COMPLETED, S.CLOSED_UNVERIFIED, S.ARCHIVED, S.SEALED}
+)
 NON_TERMINAL: frozenset[PacketStatus] = frozenset(PacketStatus) - TERMINAL
 #: M1 statuses kept so old rows stay valid; they only have exits (deviation P3)
 LEGACY: frozenset[PacketStatus] = frozenset({S.EVALUATING, S.IN_PROGRESS, S.PROCESSED})
@@ -167,6 +169,14 @@ _PACKET_RULES: list[Rule] = [
         "evaluators; scan bound to the commit SHA; quality policy (C30); all hard gates; no "
         "hold or block; locks",
         deviation="P2",
+    ),
+    *_p(
+        S.EVALUATING_POST,
+        S.SEALED,
+        K,
+        "gen_eva seal (M3a, R6 OQ13)",
+        "a gen_eva grade; outbox drained; one sealed_bundles row (UNIQUE packet_id) from the "
+        "claim-time content revision; locks; exactly one child genPacket spawned",
     ),
     *_p(
         S.EVALUATING_POST,

@@ -64,6 +64,7 @@ TABLES: tuple[str, ...] = (
     "budget_topups",
     "candidate_field_definitions",
     "confirmations",
+    "content_blobs",
     "control_state",
     "eva_presets",
     "events",
@@ -73,23 +74,32 @@ TABLES: tuple[str, ...] = (
     "governor_states",
     "kernel_leases",
     "projects",
+    "raw_revision_outbox",
     "ref_counters",
     "revocations",
+    "route_health",
     "settings",
     "thresholds",
+    "field_revisions",
     "objectives",
     "packets",
     "branch_applications",
     "evaluation_cycles",
+    "feedback_events",
     "generation_runs",
     "packet_dependencies",
     "queue_admissions",
+    "queue_epoch_snapshot",
     "queue_overrides",
     "waivers",
     "budget_reservations",
+    "crash_events",
+    "eva_discard_log",
     "eva_packets",
+    "sealed_bundles",
     "budget_reconciliations",
     "channel_runs",
+    "eva_context_links",
     "evaluation_passes",
     "artifacts",
     "channel_run_outcomes",
@@ -118,6 +128,7 @@ FUNCTIONS: tuple[str, ...] = (
     "orch_append_only_guard",
     "orch_artifacts_guard",
     "orch_autonomy_fixed_guard",
+    "orch_eva_context_links_guard",
     "orch_eva_packets_guard",
     "orch_eva_packets_identity_guard",
     "orch_evaluation_cycles_guard",
@@ -127,13 +138,19 @@ FUNCTIONS: tuple[str, ...] = (
     "orch_kernel_leases_guard",
     "orch_locked_guard",
     "orch_no_delete_guard",
+    "orch_objectives_content_revision",
     "orch_objectives_lineage_guard",
+    "orch_objectives_outbox",
     "orch_packets_closed_guard",
     "orch_packets_completion_guard",
+    "orch_packets_content_revision",
     "orch_packets_kind_guard",
     "orch_packets_lineage_guard",
+    "orch_packets_outbox",
     "orch_packets_transition_guard",
+    "orch_projects_content_revision",
     "orch_projects_lineage_guard",
+    "orch_projects_outbox",
 )
 
 STATEMENTS: dict[str, list[str]] = {
@@ -221,6 +238,12 @@ STATEMENTS: dict[str, list[str]] = {
 )""",
         """CREATE INDEX ix_confirmations_status ON confirmations (status)""",
         """CREATE UNIQUE INDEX uq_confirmations_pending_entity ON confirmations (stage, entity_type, entity_id) WHERE status = 'pending'""",
+        """CREATE TABLE content_blobs (
+	hash VARCHAR(64) NOT NULL,
+	body TEXT,
+	created_at DATETIME NOT NULL,
+	CONSTRAINT pk_content_blobs PRIMARY KEY (hash)
+)""",
         """CREATE TABLE control_state (
 	id INTEGER NOT NULL,
 	paused BOOLEAN NOT NULL,
@@ -346,6 +369,8 @@ STATEMENTS: dict[str, list[str]] = {
 	source_path TEXT,
 	source_sha256 VARCHAR(64),
 	tree_contract VARCHAR(64),
+	content_revision INTEGER DEFAULT 0 NOT NULL,
+	last_producer VARCHAR(64) DEFAULT 'kernel' NOT NULL,
 	version INTEGER NOT NULL,
 	supersedes_id VARCHAR(36),
 	locked BOOLEAN NOT NULL,
@@ -357,6 +382,21 @@ STATEMENTS: dict[str, list[str]] = {
 	CONSTRAINT fk_projects_supersedes_id_projects FOREIGN KEY(supersedes_id) REFERENCES projects (id)
 )""",
         """CREATE INDEX ix_projects_ref ON projects (ref)""",
+        """CREATE TABLE raw_revision_outbox (
+	id INTEGER NOT NULL,
+	tx_id VARCHAR(64) NOT NULL,
+	entity_type VARCHAR(16) NOT NULL,
+	entity_id VARCHAR(36) NOT NULL,
+	field_name VARCHAR(64) NOT NULL,
+	old_value TEXT,
+	new_value TEXT,
+	producer VARCHAR(64) NOT NULL,
+	content_revision INTEGER NOT NULL,
+	captured_at DATETIME NOT NULL,
+	CONSTRAINT pk_raw_revision_outbox PRIMARY KEY (id)
+)""",
+        """CREATE INDEX ix_raw_revision_outbox_entity_id ON raw_revision_outbox (entity_id)""",
+        """CREATE INDEX ix_raw_revision_outbox_entity_type ON raw_revision_outbox (entity_type)""",
         """CREATE TABLE ref_counters (
 	name VARCHAR(64) NOT NULL,
 	value INTEGER NOT NULL,
@@ -372,6 +412,13 @@ STATEMENTS: dict[str, list[str]] = {
 	CONSTRAINT pk_revocations PRIMARY KEY (id),
 	CONSTRAINT uq_revocations_target_type UNIQUE (target_type, target_id),
 	CONSTRAINT ck_revocations_target_type CHECK (target_type IN ('waiver', 'override', 'dependency'))
+)""",
+        """CREATE TABLE route_health (
+	channel VARCHAR(32) NOT NULL,
+	unhealthy_until DATETIME,
+	crashes INTEGER NOT NULL,
+	updated_at DATETIME NOT NULL,
+	CONSTRAINT pk_route_health PRIMARY KEY (channel)
 )""",
         """CREATE TABLE settings (
 	"key" VARCHAR(128) NOT NULL,
@@ -400,6 +447,24 @@ STATEMENTS: dict[str, list[str]] = {
 	CONSTRAINT ck_thresholds_thresholdoperator CHECK (operator IN ('>=', '>', '<=', '<', '=', '!=', 'has_tag', 'status_is')),
 	CONSTRAINT ck_thresholds_thresholdaction CHECK (action IN ('require_approval', 'split', 'route_workbench_production', 'route_local_generation'))
 )""",
+        """CREATE TABLE field_revisions (
+	id VARCHAR(36) NOT NULL,
+	entity_type VARCHAR(16) NOT NULL,
+	entity_id VARCHAR(36) NOT NULL,
+	field_name VARCHAR(64) NOT NULL,
+	old_hash VARCHAR(64) NOT NULL,
+	new_hash VARCHAR(64) NOT NULL,
+	based_on_hash VARCHAR(64),
+	producer VARCHAR(64) NOT NULL,
+	content_revision INTEGER NOT NULL,
+	revision_group_id VARCHAR(64) NOT NULL,
+	manifest_hash VARCHAR(64) NOT NULL,
+	created_at DATETIME NOT NULL,
+	CONSTRAINT pk_field_revisions PRIMARY KEY (id),
+	CONSTRAINT fk_field_revisions_old_hash_content_blobs FOREIGN KEY(old_hash) REFERENCES content_blobs (hash),
+	CONSTRAINT fk_field_revisions_new_hash_content_blobs FOREIGN KEY(new_hash) REFERENCES content_blobs (hash)
+)""",
+        """CREATE INDEX ix_field_revisions_entity_id ON field_revisions (entity_id)""",
         """CREATE TABLE objectives (
 	id VARCHAR(36) NOT NULL,
 	ref VARCHAR(16) NOT NULL,
@@ -411,6 +476,8 @@ STATEMENTS: dict[str, list[str]] = {
 	tags JSON NOT NULL,
 	scores JSON NOT NULL,
 	source VARCHAR(64) NOT NULL,
+	content_revision INTEGER DEFAULT 0 NOT NULL,
+	last_producer VARCHAR(64) DEFAULT 'kernel' NOT NULL,
 	version INTEGER NOT NULL,
 	supersedes_id VARCHAR(36),
 	locked BOOLEAN NOT NULL,
@@ -460,6 +527,15 @@ STATEMENTS: dict[str, list[str]] = {
 	fencing_token INTEGER DEFAULT 0 NOT NULL,
 	active_run_id VARCHAR(36),
 	recovery_pending BOOLEAN DEFAULT 0 NOT NULL,
+	content_revision INTEGER DEFAULT 0 NOT NULL,
+	last_producer VARCHAR(64) DEFAULT 'kernel' NOT NULL,
+	crash_count INTEGER DEFAULT 0 NOT NULL,
+	cooldown_until DATETIME,
+	hold_reason VARCHAR(32),
+	ready_since DATETIME,
+	lineage_depth INTEGER DEFAULT 0 NOT NULL,
+	parent_bundle_id VARCHAR(36),
+	parent_bundle_hash VARCHAR(64),
 	created_at DATETIME NOT NULL,
 	updated_at DATETIME NOT NULL,
 	CONSTRAINT pk_packets PRIMARY KEY (id),
@@ -468,13 +544,15 @@ STATEMENTS: dict[str, list[str]] = {
 	CONSTRAINT fk_packets_objective_id_objectives FOREIGN KEY(objective_id) REFERENCES objectives (id),
 	CONSTRAINT ck_packets_packetkind CHECK (packet_kind IN ('task', 'content_eval')),
 	CONSTRAINT ck_packets_channel CHECK (channel IN ('quickfire_evaluation', 'local_generation', 'workbench_production')),
-	CONSTRAINT ck_packets_packetstatus CHECK (status IN ('draft', 'evaluating_pre', 'ready', 'queued', 'running', 'evaluating_post', 'completed', 'needs_review', 'held', 'blocked', 'failed', 'awaiting_confirmation', 'waiting_for_children', 'archived', 'closed_unverified', 'evaluating', 'in_progress', 'processed')),
+	CONSTRAINT ck_packets_packetstatus CHECK (status IN ('draft', 'evaluating_pre', 'ready', 'queued', 'running', 'evaluating_post', 'completed', 'needs_review', 'held', 'blocked', 'failed', 'awaiting_confirmation', 'waiting_for_children', 'archived', 'closed_unverified', 'sealed', 'evaluating', 'in_progress', 'processed')),
 	CONSTRAINT uq_packets_supersedes_id UNIQUE (supersedes_id),
 	CONSTRAINT fk_packets_supersedes_id_packets FOREIGN KEY(supersedes_id) REFERENCES packets (id),
 	CONSTRAINT fk_packets_parent_id_packets FOREIGN KEY(parent_id) REFERENCES packets (id),
-	CONSTRAINT fk_packets_root_id_packets FOREIGN KEY(root_id) REFERENCES packets (id)
+	CONSTRAINT fk_packets_root_id_packets FOREIGN KEY(root_id) REFERENCES packets (id),
+	CONSTRAINT fk_packets_parent_bundle_id_sealed_bundles FOREIGN KEY(parent_bundle_id) REFERENCES sealed_bundles (id)
 )""",
         """CREATE INDEX ix_packets_objective_id ON packets (objective_id)""",
+        """CREATE INDEX ix_packets_objective_position_lineage ON packets (objective_id, position, lineage_depth)""",
         """CREATE INDEX ix_packets_parent_id ON packets (parent_id)""",
         """CREATE INDEX ix_packets_project_id ON packets (project_id)""",
         """CREATE INDEX ix_packets_ref ON packets (ref)""",
@@ -519,6 +597,18 @@ STATEMENTS: dict[str, list[str]] = {
 	CONSTRAINT ck_evaluation_cycles_cyclestate CHECK (state IN ('open', 'complete', 'superseded', 'legacy'))
 )""",
         """CREATE INDEX ix_evaluation_cycles_packet_id ON evaluation_cycles (packet_id)""",
+        """CREATE TABLE feedback_events (
+	id VARCHAR(36) NOT NULL,
+	packet_id VARCHAR(36) NOT NULL,
+	actor VARCHAR(64) NOT NULL,
+	kind VARCHAR(16) NOT NULL,
+	reason TEXT NOT NULL,
+	created_at DATETIME NOT NULL,
+	CONSTRAINT pk_feedback_events PRIMARY KEY (id),
+	CONSTRAINT ck_feedback_events_kind CHECK (kind IN ('boost', 'nudge', 'demote', 'pin')),
+	CONSTRAINT fk_feedback_events_packet_id_packets FOREIGN KEY(packet_id) REFERENCES packets (id)
+)""",
+        """CREATE INDEX ix_feedback_events_packet_id ON feedback_events (packet_id)""",
         """CREATE TABLE generation_runs (
 	id VARCHAR(36) NOT NULL,
 	packet_id VARCHAR(36) NOT NULL,
@@ -548,6 +638,7 @@ STATEMENTS: dict[str, list[str]] = {
 	charged BOOLEAN DEFAULT 0 NOT NULL,
 	stale_reason TEXT,
 	finished_at DATETIME,
+	claim_content_revision INTEGER,
 	CONSTRAINT pk_generation_runs PRIMARY KEY (id),
 	CONSTRAINT fk_generation_runs_packet_id_packets FOREIGN KEY(packet_id) REFERENCES packets (id),
 	CONSTRAINT fk_generation_runs_channel_run_id_channel_runs FOREIGN KEY(channel_run_id) REFERENCES channel_runs (id),
@@ -579,6 +670,21 @@ STATEMENTS: dict[str, list[str]] = {
 	CONSTRAINT fk_queue_admissions_packet_id_packets FOREIGN KEY(packet_id) REFERENCES packets (id)
 )""",
         """CREATE INDEX ix_queue_admissions_packet_id ON queue_admissions (packet_id)""",
+        """CREATE TABLE queue_epoch_snapshot (
+	id VARCHAR(36) NOT NULL,
+	epoch_id INTEGER NOT NULL,
+	packet_id VARCHAR(36) NOT NULL,
+	status VARCHAR(32) NOT NULL,
+	queue_pos INTEGER,
+	is_locked_out BOOLEAN NOT NULL,
+	score_e4 INTEGER,
+	cause VARCHAR(32) NOT NULL,
+	created_at DATETIME NOT NULL,
+	CONSTRAINT pk_queue_epoch_snapshot PRIMARY KEY (id),
+	CONSTRAINT uq_queue_epoch_snapshot_epoch_id UNIQUE (epoch_id, packet_id),
+	CONSTRAINT fk_queue_epoch_snapshot_packet_id_packets FOREIGN KEY(packet_id) REFERENCES packets (id)
+)""",
+        """CREATE INDEX ix_queue_epoch_snapshot_epoch_id ON queue_epoch_snapshot (epoch_id)""",
         """CREATE TABLE queue_overrides (
 	id VARCHAR(36) NOT NULL,
 	packet_id VARCHAR(36) NOT NULL,
@@ -629,6 +735,33 @@ STATEMENTS: dict[str, list[str]] = {
 	CONSTRAINT fk_budget_reservations_generation_run_id_generation_runs FOREIGN KEY(generation_run_id) REFERENCES generation_runs (id)
 )""",
         """CREATE INDEX ix_budget_reservations_operation_id ON budget_reservations (operation_id)""",
+        """CREATE TABLE crash_events (
+	id VARCHAR(36) NOT NULL,
+	packet_id VARCHAR(36) NOT NULL,
+	run_id VARCHAR(36) NOT NULL,
+	channel VARCHAR(32),
+	reason TEXT NOT NULL,
+	created_at DATETIME NOT NULL,
+	CONSTRAINT pk_crash_events PRIMARY KEY (id),
+	CONSTRAINT fk_crash_events_packet_id_packets FOREIGN KEY(packet_id) REFERENCES packets (id),
+	CONSTRAINT fk_crash_events_run_id_generation_runs FOREIGN KEY(run_id) REFERENCES generation_runs (id)
+)""",
+        """CREATE INDEX ix_crash_events_packet_id ON crash_events (packet_id)""",
+        """CREATE TABLE eva_discard_log (
+	id VARCHAR(36) NOT NULL,
+	packet_id VARCHAR(36) NOT NULL,
+	cycle_id VARCHAR(36),
+	epoch_id INTEGER,
+	expected_content_revision INTEGER NOT NULL,
+	actual_content_revision INTEGER NOT NULL,
+	locked_out BOOLEAN NOT NULL,
+	reason TEXT NOT NULL,
+	created_at DATETIME NOT NULL,
+	CONSTRAINT pk_eva_discard_log PRIMARY KEY (id),
+	CONSTRAINT fk_eva_discard_log_packet_id_packets FOREIGN KEY(packet_id) REFERENCES packets (id),
+	CONSTRAINT fk_eva_discard_log_cycle_id_evaluation_cycles FOREIGN KEY(cycle_id) REFERENCES evaluation_cycles (id)
+)""",
+        """CREATE INDEX ix_eva_discard_log_packet_id ON eva_discard_log (packet_id)""",
         """CREATE TABLE eva_packets (
 	id VARCHAR(36) NOT NULL,
 	packet_id VARCHAR(36) NOT NULL,
@@ -666,6 +799,23 @@ STATEMENTS: dict[str, list[str]] = {
         """CREATE INDEX ix_eva_packets_content_address ON eva_packets (content_address)""",
         """CREATE INDEX ix_eva_packets_cycle_id ON eva_packets (cycle_id)""",
         """CREATE INDEX ix_eva_packets_packet_id ON eva_packets (packet_id)""",
+        """CREATE TABLE sealed_bundles (
+	id VARCHAR(36) NOT NULL,
+	packet_id VARCHAR(36) NOT NULL,
+	run_id VARCHAR(36),
+	claim_content_revision INTEGER NOT NULL,
+	snapshot_hash VARCHAR(64) NOT NULL,
+	bundle_hash VARCHAR(64) NOT NULL,
+	composite_grade_e4 INTEGER NOT NULL,
+	artifact_hash VARCHAR(64),
+	output_ref VARCHAR(200),
+	created_at DATETIME NOT NULL,
+	CONSTRAINT pk_sealed_bundles PRIMARY KEY (id),
+	CONSTRAINT uq_sealed_bundles_packet_id UNIQUE (packet_id),
+	CONSTRAINT fk_sealed_bundles_packet_id_packets FOREIGN KEY(packet_id) REFERENCES packets (id),
+	CONSTRAINT fk_sealed_bundles_run_id_generation_runs FOREIGN KEY(run_id) REFERENCES generation_runs (id),
+	CONSTRAINT fk_sealed_bundles_snapshot_hash_content_blobs FOREIGN KEY(snapshot_hash) REFERENCES content_blobs (hash)
+)""",
         """CREATE TABLE budget_reconciliations (
 	id VARCHAR(36) NOT NULL,
 	reservation_id VARCHAR(36) NOT NULL,
@@ -714,6 +864,29 @@ STATEMENTS: dict[str, list[str]] = {
         """CREATE INDEX ix_channel_runs_generation_run_id ON channel_runs (generation_run_id)""",
         """CREATE INDEX ix_channel_runs_packet_id ON channel_runs (packet_id)""",
         """CREATE UNIQUE INDEX uq_channel_runs_operation_id ON channel_runs (operation_id)""",
+        """CREATE TABLE eva_context_links (
+	id VARCHAR(36) NOT NULL,
+	eva_packet_id VARCHAR(36) NOT NULL,
+	packet_id VARCHAR(36) NOT NULL,
+	field_name VARCHAR(64) NOT NULL,
+	source_type VARCHAR(16) NOT NULL,
+	source_id VARCHAR(64) NOT NULL,
+	source_ref VARCHAR(64),
+	source_hash VARCHAR(64) NOT NULL,
+	source_revision INTEGER NOT NULL,
+	link_strength VARCHAR(16) NOT NULL,
+	link_reason VARCHAR(16) NOT NULL,
+	quote TEXT,
+	is_questioned BOOLEAN DEFAULT 0 NOT NULL,
+	created_at DATETIME NOT NULL,
+	CONSTRAINT pk_eva_context_links PRIMARY KEY (id),
+	CONSTRAINT ck_eva_context_links_strength CHECK (link_strength IN ('direct', 'peripheral')),
+	CONSTRAINT ck_eva_context_links_source_type CHECK (source_type IN ('project', 'objective', 'packet', 'definition')),
+	CONSTRAINT fk_eva_context_links_eva_packet_id_eva_packets FOREIGN KEY(eva_packet_id) REFERENCES eva_packets (id),
+	CONSTRAINT fk_eva_context_links_packet_id_packets FOREIGN KEY(packet_id) REFERENCES packets (id)
+)""",
+        """CREATE INDEX ix_eva_context_links_eva_packet_id ON eva_context_links (eva_packet_id)""",
+        """CREATE INDEX ix_eva_context_links_packet_id ON eva_context_links (packet_id)""",
         """CREATE TABLE evaluation_passes (
 	id VARCHAR(36) NOT NULL,
 	packet_id VARCHAR(36) NOT NULL,
@@ -819,9 +992,9 @@ STATEMENTS: dict[str, list[str]] = {
         """CREATE TRIGGER trg_objectives_locked_no_delete BEFORE DELETE ON objectives FOR EACH ROW WHEN OLD.locked = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: locked row in objectives cannot be deleted'); END""",
         """CREATE TRIGGER trg_packets_locked_no_update BEFORE UPDATE ON packets FOR EACH ROW WHEN OLD.locked = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: locked row in packets cannot be updated'); END""",
         """CREATE TRIGGER trg_packets_locked_no_delete BEFORE DELETE ON packets FOR EACH ROW WHEN OLD.locked = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: locked row in packets cannot be deleted'); END""",
-        """CREATE TRIGGER trg_packets_completion_locks_insert BEFORE INSERT ON packets FOR EACH ROW WHEN NEW.status IN ('archived', 'completed') AND (NEW.locked IS NOT 1 OR NEW.completed_at IS NULL) BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: completed/archived packets must be locked with completed_at set'); END""",
+        """CREATE TRIGGER trg_packets_completion_locks_insert BEFORE INSERT ON packets FOR EACH ROW WHEN NEW.status IN ('archived', 'completed', 'sealed') AND (NEW.locked IS NOT 1 OR NEW.completed_at IS NULL) BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: completed/archived/sealed packets must be locked with completed_at set'); END""",
         """CREATE TRIGGER trg_artifacts_accepted_at_insert BEFORE INSERT ON artifacts FOR EACH ROW WHEN NEW.accepted = 1 AND NEW.accepted_at IS NULL BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: accepted artifacts must have accepted_at set'); END""",
-        """CREATE TRIGGER trg_packets_completion_locks_update BEFORE UPDATE ON packets FOR EACH ROW WHEN NEW.status IN ('archived', 'completed') AND (NEW.locked IS NOT 1 OR NEW.completed_at IS NULL) BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: completed/archived packets must be locked with completed_at set'); END""",
+        """CREATE TRIGGER trg_packets_completion_locks_update BEFORE UPDATE ON packets FOR EACH ROW WHEN NEW.status IN ('archived', 'completed', 'sealed') AND (NEW.locked IS NOT 1 OR NEW.completed_at IS NULL) BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: completed/archived/sealed packets must be locked with completed_at set'); END""",
         """CREATE TRIGGER trg_artifacts_accepted_at_update BEFORE UPDATE ON artifacts FOR EACH ROW WHEN NEW.accepted = 1 AND NEW.accepted_at IS NULL BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: accepted artifacts must have accepted_at set'); END""",
         """CREATE TRIGGER trg_artifacts_accepted_no_update BEFORE UPDATE ON artifacts FOR EACH ROW WHEN OLD.accepted = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: accepted artifact cannot be updated'); END""",
         """CREATE TRIGGER trg_artifacts_accepted_no_delete BEFORE DELETE ON artifacts FOR EACH ROW WHEN OLD.accepted = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: accepted artifact cannot be deleted'); END""",
@@ -880,10 +1053,10 @@ STATEMENTS: dict[str, list[str]] = {
         """CREATE TRIGGER trg_eva_packets_identity_frozen BEFORE UPDATE ON eva_packets FOR EACH ROW WHEN NEW.packet_id IS NOT OLD.packet_id OR NEW.packet_version IS NOT OLD.packet_version OR NEW.cycle_id IS NOT OLD.cycle_id OR NEW.preset_id IS NOT OLD.preset_id OR NEW.field_name IS NOT OLD.field_name OR NEW.definition_version IS NOT OLD.definition_version OR NEW.phase IS NOT OLD.phase OR NEW.plan IS NOT OLD.plan OR NEW.item_keys IS NOT OLD.item_keys OR NEW.target_hash IS NOT OLD.target_hash OR NEW.model_config IS NOT OLD.model_config OR NEW.model_config_hash IS NOT OLD.model_config_hash OR NEW.content_address IS NOT OLD.content_address OR NEW.idempotency_key IS NOT OLD.idempotency_key OR NEW.escalation IS NOT OLD.escalation OR NEW.escalated_from_id IS NOT OLD.escalated_from_id OR NEW.reused_from_id IS NOT OLD.reused_from_id OR NEW.created_at IS NOT OLD.created_at BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: evaPacket identity columns are frozen from insert'); END""",
         """CREATE TRIGGER trg_packet_dependencies_append_only_update BEFORE UPDATE ON packet_dependencies FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: packet_dependencies is append-only (update rejected)'); END""",
         """CREATE TRIGGER trg_packet_dependencies_append_only_delete BEFORE DELETE ON packet_dependencies FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: packet_dependencies is append-only (delete rejected)'); END""",
-        """CREATE TRIGGER trg_packets_transition_table BEFORE UPDATE ON packets FOR EACH ROW WHEN NEW.status IS NOT OLD.status AND (OLD.status || '>' || NEW.status) NOT IN ('awaiting_confirmation>blocked', 'awaiting_confirmation>closed_unverified', 'awaiting_confirmation>completed', 'awaiting_confirmation>evaluating_post', 'awaiting_confirmation>evaluating_pre', 'awaiting_confirmation>held', 'awaiting_confirmation>queued', 'awaiting_confirmation>running', 'awaiting_confirmation>waiting_for_children', 'blocked>closed_unverified', 'blocked>evaluating_post', 'blocked>evaluating_pre', 'blocked>held', 'draft>blocked', 'draft>closed_unverified', 'draft>evaluating_pre', 'draft>held', 'evaluating>closed_unverified', 'evaluating>evaluating_pre', 'evaluating_post>awaiting_confirmation', 'evaluating_post>blocked', 'evaluating_post>closed_unverified', 'evaluating_post>completed', 'evaluating_post>held', 'evaluating_post>needs_review', 'evaluating_pre>awaiting_confirmation', 'evaluating_pre>blocked', 'evaluating_pre>closed_unverified', 'evaluating_pre>held', 'evaluating_pre>needs_review', 'evaluating_pre>ready', 'evaluating_pre>waiting_for_children', 'failed>awaiting_confirmation', 'failed>blocked', 'failed>closed_unverified', 'failed>evaluating_pre', 'failed>held', 'failed>queued', 'held>blocked', 'held>closed_unverified', 'held>evaluating_pre', 'in_progress>closed_unverified', 'in_progress>evaluating_pre', 'needs_review>blocked', 'needs_review>closed_unverified', 'needs_review>evaluating_post', 'needs_review>evaluating_pre', 'needs_review>held', 'processed>closed_unverified', 'processed>evaluating_pre', 'queued>awaiting_confirmation', 'queued>blocked', 'queued>closed_unverified', 'queued>evaluating_pre', 'queued>held', 'queued>running', 'ready>awaiting_confirmation', 'ready>blocked', 'ready>closed_unverified', 'ready>evaluating_pre', 'ready>held', 'ready>queued', 'ready>waiting_for_children', 'running>awaiting_confirmation', 'running>blocked', 'running>closed_unverified', 'running>evaluating_post', 'running>evaluating_pre', 'running>failed', 'waiting_for_children>closed_unverified', 'waiting_for_children>completed') BEGIN SELECT RAISE(ABORT, 'orchestrator-transition: packet status change is not in the M3 transition table'); END""",
+        """CREATE TRIGGER trg_packets_transition_table BEFORE UPDATE ON packets FOR EACH ROW WHEN NEW.status IS NOT OLD.status AND (OLD.status || '>' || NEW.status) NOT IN ('awaiting_confirmation>blocked', 'awaiting_confirmation>closed_unverified', 'awaiting_confirmation>completed', 'awaiting_confirmation>evaluating_post', 'awaiting_confirmation>evaluating_pre', 'awaiting_confirmation>held', 'awaiting_confirmation>queued', 'awaiting_confirmation>running', 'awaiting_confirmation>waiting_for_children', 'blocked>closed_unverified', 'blocked>evaluating_post', 'blocked>evaluating_pre', 'blocked>held', 'draft>blocked', 'draft>closed_unverified', 'draft>evaluating_pre', 'draft>held', 'evaluating>closed_unverified', 'evaluating>evaluating_pre', 'evaluating_post>awaiting_confirmation', 'evaluating_post>blocked', 'evaluating_post>closed_unverified', 'evaluating_post>completed', 'evaluating_post>held', 'evaluating_post>needs_review', 'evaluating_post>sealed', 'evaluating_pre>awaiting_confirmation', 'evaluating_pre>blocked', 'evaluating_pre>closed_unverified', 'evaluating_pre>held', 'evaluating_pre>needs_review', 'evaluating_pre>ready', 'evaluating_pre>waiting_for_children', 'failed>awaiting_confirmation', 'failed>blocked', 'failed>closed_unverified', 'failed>evaluating_pre', 'failed>held', 'failed>queued', 'held>blocked', 'held>closed_unverified', 'held>evaluating_pre', 'in_progress>closed_unverified', 'in_progress>evaluating_pre', 'needs_review>blocked', 'needs_review>closed_unverified', 'needs_review>evaluating_post', 'needs_review>evaluating_pre', 'needs_review>held', 'processed>closed_unverified', 'processed>evaluating_pre', 'queued>awaiting_confirmation', 'queued>blocked', 'queued>closed_unverified', 'queued>evaluating_pre', 'queued>held', 'queued>running', 'ready>awaiting_confirmation', 'ready>blocked', 'ready>closed_unverified', 'ready>evaluating_pre', 'ready>held', 'ready>queued', 'ready>waiting_for_children', 'running>awaiting_confirmation', 'running>blocked', 'running>closed_unverified', 'running>evaluating_post', 'running>evaluating_pre', 'running>failed', 'waiting_for_children>closed_unverified', 'waiting_for_children>completed') BEGIN SELECT RAISE(ABORT, 'orchestrator-transition: packet status change is not in the M3 transition table'); END""",
         """CREATE TRIGGER trg_generation_runs_transition_table BEFORE UPDATE ON generation_runs FOR EACH ROW WHEN NEW.state IS NOT OLD.state AND (OLD.state || '>' || NEW.state) NOT IN ('accepted>stale', 'awaiting_confirmation>dispatched', 'awaiting_confirmation>failed', 'awaiting_confirmation>stale', 'awaiting_result>awaiting_confirmation', 'awaiting_result>failed', 'awaiting_result>stale', 'awaiting_result>validating', 'claimed>stale', 'dispatched>awaiting_result', 'dispatched>failed', 'dispatched>stale', 'planned>dispatched', 'planned>stale', 'validating>accepted', 'validating>awaiting_result', 'validating>failed', 'validating>stale') BEGIN SELECT RAISE(ABORT, 'orchestrator-transition: run state change is not in the M3 transition table'); END""",
         """CREATE TRIGGER trg_generation_runs_final BEFORE UPDATE ON generation_runs FOR EACH ROW WHEN OLD.state IN ('failed', 'stale', 'succeeded', 'abandoned') OR (OLD.state = 'accepted' AND OLD.commit_sha IS NOT NULL) BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: a finished generation run cannot be changed'); END""",
-        """CREATE TRIGGER trg_generation_runs_bindings_frozen BEFORE UPDATE ON generation_runs FOR EACH ROW WHEN NEW.claimed_by IS NOT OLD.claimed_by OR NEW.channel IS NOT OLD.channel OR NEW.fencing_token IS NOT OLD.fencing_token OR NEW.created_at IS NOT OLD.created_at OR (OLD.manifest_hash IS NOT NULL AND NEW.manifest_hash IS NOT OLD.manifest_hash) OR (OLD.commit_sha IS NOT NULL AND NEW.commit_sha IS NOT OLD.commit_sha) OR (NEW.gate_revision IS NOT OLD.gate_revision AND (OLD.gate_revision IS NULL OR NEW.gate_revision IS NOT OLD.gate_revision + 1)) BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: generation run bindings are frozen (gate revision moves by +1 only)'); END""",
+        """CREATE TRIGGER trg_generation_runs_bindings_frozen BEFORE UPDATE ON generation_runs FOR EACH ROW WHEN NEW.claimed_by IS NOT OLD.claimed_by OR NEW.channel IS NOT OLD.channel OR NEW.fencing_token IS NOT OLD.fencing_token OR NEW.claim_content_revision IS NOT OLD.claim_content_revision OR NEW.created_at IS NOT OLD.created_at OR (OLD.manifest_hash IS NOT NULL AND NEW.manifest_hash IS NOT OLD.manifest_hash) OR (OLD.commit_sha IS NOT NULL AND NEW.commit_sha IS NOT OLD.commit_sha) OR (NEW.gate_revision IS NOT OLD.gate_revision AND (OLD.gate_revision IS NULL OR NEW.gate_revision IS NOT OLD.gate_revision + 1)) BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: generation run bindings are frozen (gate revision moves by +1 only)'); END""",
         """CREATE TRIGGER trg_kernel_leases_epoch BEFORE UPDATE ON kernel_leases FOR EACH ROW WHEN NEW.epoch < OLD.epoch OR NEW.name IS NOT OLD.name BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: the kernel lease epoch never decreases'); END""",
         """CREATE TRIGGER trg_governor_states_revision BEFORE UPDATE ON governor_states FOR EACH ROW WHEN NEW.revision <= OLD.revision OR NEW.scope_type IS NOT OLD.scope_type OR NEW.scope_id IS NOT OLD.scope_id BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: a governor state change must increase its revision and keep its scope'); END""",
         """CREATE TRIGGER trg_channel_runs_append_only_update BEFORE UPDATE ON channel_runs FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: channel_runs is append-only (update rejected)'); END""",
@@ -901,6 +1074,66 @@ STATEMENTS: dict[str, list[str]] = {
         """CREATE TRIGGER trg_kernel_leases_no_delete BEFORE DELETE ON kernel_leases FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: kernel_leases rows cannot be deleted'); END""",
         """CREATE TRIGGER trg_governor_states_no_delete BEFORE DELETE ON governor_states FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: governor_states rows cannot be deleted'); END""",
         """CREATE TRIGGER trg_budget_counters_no_delete BEFORE DELETE ON budget_counters FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: budget_counters rows cannot be deleted'); END""",
+        """CREATE TRIGGER trg_content_blobs_append_only_update BEFORE UPDATE ON content_blobs FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: content_blobs is append-only (update rejected)'); END""",
+        """CREATE TRIGGER trg_content_blobs_append_only_delete BEFORE DELETE ON content_blobs FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: content_blobs is append-only (delete rejected)'); END""",
+        """CREATE TRIGGER trg_field_revisions_append_only_update BEFORE UPDATE ON field_revisions FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: field_revisions is append-only (update rejected)'); END""",
+        """CREATE TRIGGER trg_field_revisions_append_only_delete BEFORE DELETE ON field_revisions FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: field_revisions is append-only (delete rejected)'); END""",
+        """CREATE TRIGGER trg_sealed_bundles_append_only_update BEFORE UPDATE ON sealed_bundles FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: sealed_bundles is append-only (update rejected)'); END""",
+        """CREATE TRIGGER trg_sealed_bundles_append_only_delete BEFORE DELETE ON sealed_bundles FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: sealed_bundles is append-only (delete rejected)'); END""",
+        """CREATE TRIGGER trg_eva_discard_log_append_only_update BEFORE UPDATE ON eva_discard_log FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: eva_discard_log is append-only (update rejected)'); END""",
+        """CREATE TRIGGER trg_eva_discard_log_append_only_delete BEFORE DELETE ON eva_discard_log FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: eva_discard_log is append-only (delete rejected)'); END""",
+        """CREATE TRIGGER trg_queue_epoch_snapshot_append_only_update BEFORE UPDATE ON queue_epoch_snapshot FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: queue_epoch_snapshot is append-only (update rejected)'); END""",
+        """CREATE TRIGGER trg_queue_epoch_snapshot_append_only_delete BEFORE DELETE ON queue_epoch_snapshot FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: queue_epoch_snapshot is append-only (delete rejected)'); END""",
+        """CREATE TRIGGER trg_feedback_events_append_only_update BEFORE UPDATE ON feedback_events FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: feedback_events is append-only (update rejected)'); END""",
+        """CREATE TRIGGER trg_feedback_events_append_only_delete BEFORE DELETE ON feedback_events FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: feedback_events is append-only (delete rejected)'); END""",
+        """CREATE TRIGGER trg_crash_events_append_only_update BEFORE UPDATE ON crash_events FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: crash_events is append-only (update rejected)'); END""",
+        """CREATE TRIGGER trg_crash_events_append_only_delete BEFORE DELETE ON crash_events FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: crash_events is append-only (delete rejected)'); END""",
+        """CREATE TRIGGER trg_route_health_no_delete BEFORE DELETE ON route_health FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: route_health rows cannot be deleted'); END""",
+        """CREATE TRIGGER trg_eva_context_links_no_delete BEFORE DELETE ON eva_context_links FOR EACH ROW WHEN 1 = 1 BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: eva_context_links rows cannot be deleted'); END""",
+        """CREATE TRIGGER trg_eva_context_links_frozen BEFORE UPDATE ON eva_context_links FOR EACH ROW WHEN NEW.id IS NOT OLD.id OR NEW.eva_packet_id IS NOT OLD.eva_packet_id OR NEW.packet_id IS NOT OLD.packet_id OR NEW.field_name IS NOT OLD.field_name OR NEW.source_type IS NOT OLD.source_type OR NEW.source_id IS NOT OLD.source_id OR NEW.source_ref IS NOT OLD.source_ref OR NEW.source_hash IS NOT OLD.source_hash OR NEW.source_revision IS NOT OLD.source_revision OR NEW.link_strength IS NOT OLD.link_strength OR NEW.link_reason IS NOT OLD.link_reason OR NEW.quote IS NOT OLD.quote OR NEW.created_at IS NOT OLD.created_at OR (OLD.is_questioned = 1 AND NEW.is_questioned IS NOT 1) BEGIN SELECT RAISE(ABORT, 'orchestrator-immutable: eva_context_links are append-only; only is_questioned may go from false to true'); END""",
+        """CREATE TRIGGER trg_packets_content_revision AFTER UPDATE OF title, prompt_description, response_structure, response_contract, repo_target_path, priority_level, manual_boost ON packets FOR EACH ROW WHEN (OLD.title IS NOT NEW.title OR OLD.prompt_description IS NOT NEW.prompt_description OR OLD.response_structure IS NOT NEW.response_structure OR OLD.response_contract IS NOT NEW.response_contract OR OLD.repo_target_path IS NOT NEW.repo_target_path OR OLD.priority_level IS NOT NEW.priority_level OR OLD.manual_boost IS NOT NEW.manual_boost) AND OLD.content_revision = NEW.content_revision BEGIN UPDATE packets SET content_revision = OLD.content_revision + 1, last_producer = 'user_sql' WHERE id = NEW.id; END""",
+        """CREATE TRIGGER trg_packets_outbox AFTER UPDATE OF title, prompt_description, response_structure, response_contract, repo_target_path, priority_level, manual_boost ON packets FOR EACH ROW WHEN OLD.title IS NOT NEW.title OR OLD.prompt_description IS NOT NEW.prompt_description OR OLD.response_structure IS NOT NEW.response_structure OR OLD.response_contract IS NOT NEW.response_contract OR OLD.repo_target_path IS NOT NEW.repo_target_path OR OLD.priority_level IS NOT NEW.priority_level OR OLD.manual_boost IS NOT NEW.manual_boost
+BEGIN
+INSERT INTO raw_revision_outbox (tx_id, entity_type, entity_id, field_name, old_value, new_value, producer, content_revision, captured_at)
+WITH ctx AS (SELECT lower(hex(randomblob(8))) AS tx)
+SELECT ctx.tx, 'packet', NEW.id, 'title', CAST(OLD.title AS TEXT), CAST(NEW.title AS TEXT), CASE WHEN OLD.content_revision = NEW.content_revision THEN 'user_sql' ELSE NEW.last_producer END, CASE WHEN OLD.content_revision = NEW.content_revision THEN OLD.content_revision + 1 ELSE NEW.content_revision END, CURRENT_TIMESTAMP FROM ctx WHERE OLD.title IS NOT NEW.title
+UNION ALL
+SELECT ctx.tx, 'packet', NEW.id, 'prompt_description', CAST(OLD.prompt_description AS TEXT), CAST(NEW.prompt_description AS TEXT), CASE WHEN OLD.content_revision = NEW.content_revision THEN 'user_sql' ELSE NEW.last_producer END, CASE WHEN OLD.content_revision = NEW.content_revision THEN OLD.content_revision + 1 ELSE NEW.content_revision END, CURRENT_TIMESTAMP FROM ctx WHERE OLD.prompt_description IS NOT NEW.prompt_description
+UNION ALL
+SELECT ctx.tx, 'packet', NEW.id, 'response_structure', CAST(OLD.response_structure AS TEXT), CAST(NEW.response_structure AS TEXT), CASE WHEN OLD.content_revision = NEW.content_revision THEN 'user_sql' ELSE NEW.last_producer END, CASE WHEN OLD.content_revision = NEW.content_revision THEN OLD.content_revision + 1 ELSE NEW.content_revision END, CURRENT_TIMESTAMP FROM ctx WHERE OLD.response_structure IS NOT NEW.response_structure
+UNION ALL
+SELECT ctx.tx, 'packet', NEW.id, 'response_contract', CAST(OLD.response_contract AS TEXT), CAST(NEW.response_contract AS TEXT), CASE WHEN OLD.content_revision = NEW.content_revision THEN 'user_sql' ELSE NEW.last_producer END, CASE WHEN OLD.content_revision = NEW.content_revision THEN OLD.content_revision + 1 ELSE NEW.content_revision END, CURRENT_TIMESTAMP FROM ctx WHERE OLD.response_contract IS NOT NEW.response_contract
+UNION ALL
+SELECT ctx.tx, 'packet', NEW.id, 'repo_target_path', CAST(OLD.repo_target_path AS TEXT), CAST(NEW.repo_target_path AS TEXT), CASE WHEN OLD.content_revision = NEW.content_revision THEN 'user_sql' ELSE NEW.last_producer END, CASE WHEN OLD.content_revision = NEW.content_revision THEN OLD.content_revision + 1 ELSE NEW.content_revision END, CURRENT_TIMESTAMP FROM ctx WHERE OLD.repo_target_path IS NOT NEW.repo_target_path
+UNION ALL
+SELECT ctx.tx, 'packet', NEW.id, 'priority_level', CAST(OLD.priority_level AS TEXT), CAST(NEW.priority_level AS TEXT), CASE WHEN OLD.content_revision = NEW.content_revision THEN 'user_sql' ELSE NEW.last_producer END, CASE WHEN OLD.content_revision = NEW.content_revision THEN OLD.content_revision + 1 ELSE NEW.content_revision END, CURRENT_TIMESTAMP FROM ctx WHERE OLD.priority_level IS NOT NEW.priority_level
+UNION ALL
+SELECT ctx.tx, 'packet', NEW.id, 'manual_boost', CAST(OLD.manual_boost AS TEXT), CAST(NEW.manual_boost AS TEXT), CASE WHEN OLD.content_revision = NEW.content_revision THEN 'user_sql' ELSE NEW.last_producer END, CASE WHEN OLD.content_revision = NEW.content_revision THEN OLD.content_revision + 1 ELSE NEW.content_revision END, CURRENT_TIMESTAMP FROM ctx WHERE OLD.manual_boost IS NOT NEW.manual_boost;
+END""",
+        """CREATE TRIGGER trg_projects_content_revision AFTER UPDATE OF name, brief, industry, scope ON projects FOR EACH ROW WHEN (OLD.name IS NOT NEW.name OR OLD.brief IS NOT NEW.brief OR OLD.industry IS NOT NEW.industry OR OLD.scope IS NOT NEW.scope) AND OLD.content_revision = NEW.content_revision BEGIN UPDATE projects SET content_revision = OLD.content_revision + 1, last_producer = 'user_sql' WHERE id = NEW.id; END""",
+        """CREATE TRIGGER trg_projects_outbox AFTER UPDATE OF name, brief, industry, scope ON projects FOR EACH ROW WHEN OLD.name IS NOT NEW.name OR OLD.brief IS NOT NEW.brief OR OLD.industry IS NOT NEW.industry OR OLD.scope IS NOT NEW.scope
+BEGIN
+INSERT INTO raw_revision_outbox (tx_id, entity_type, entity_id, field_name, old_value, new_value, producer, content_revision, captured_at)
+WITH ctx AS (SELECT lower(hex(randomblob(8))) AS tx)
+SELECT ctx.tx, 'project', NEW.id, 'name', CAST(OLD.name AS TEXT), CAST(NEW.name AS TEXT), CASE WHEN OLD.content_revision = NEW.content_revision THEN 'user_sql' ELSE NEW.last_producer END, CASE WHEN OLD.content_revision = NEW.content_revision THEN OLD.content_revision + 1 ELSE NEW.content_revision END, CURRENT_TIMESTAMP FROM ctx WHERE OLD.name IS NOT NEW.name
+UNION ALL
+SELECT ctx.tx, 'project', NEW.id, 'brief', CAST(OLD.brief AS TEXT), CAST(NEW.brief AS TEXT), CASE WHEN OLD.content_revision = NEW.content_revision THEN 'user_sql' ELSE NEW.last_producer END, CASE WHEN OLD.content_revision = NEW.content_revision THEN OLD.content_revision + 1 ELSE NEW.content_revision END, CURRENT_TIMESTAMP FROM ctx WHERE OLD.brief IS NOT NEW.brief
+UNION ALL
+SELECT ctx.tx, 'project', NEW.id, 'industry', CAST(OLD.industry AS TEXT), CAST(NEW.industry AS TEXT), CASE WHEN OLD.content_revision = NEW.content_revision THEN 'user_sql' ELSE NEW.last_producer END, CASE WHEN OLD.content_revision = NEW.content_revision THEN OLD.content_revision + 1 ELSE NEW.content_revision END, CURRENT_TIMESTAMP FROM ctx WHERE OLD.industry IS NOT NEW.industry
+UNION ALL
+SELECT ctx.tx, 'project', NEW.id, 'scope', CAST(OLD.scope AS TEXT), CAST(NEW.scope AS TEXT), CASE WHEN OLD.content_revision = NEW.content_revision THEN 'user_sql' ELSE NEW.last_producer END, CASE WHEN OLD.content_revision = NEW.content_revision THEN OLD.content_revision + 1 ELSE NEW.content_revision END, CURRENT_TIMESTAMP FROM ctx WHERE OLD.scope IS NOT NEW.scope;
+END""",
+        """CREATE TRIGGER trg_objectives_content_revision AFTER UPDATE OF name, brief, priority_level ON objectives FOR EACH ROW WHEN (OLD.name IS NOT NEW.name OR OLD.brief IS NOT NEW.brief OR OLD.priority_level IS NOT NEW.priority_level) AND OLD.content_revision = NEW.content_revision BEGIN UPDATE objectives SET content_revision = OLD.content_revision + 1, last_producer = 'user_sql' WHERE id = NEW.id; END""",
+        """CREATE TRIGGER trg_objectives_outbox AFTER UPDATE OF name, brief, priority_level ON objectives FOR EACH ROW WHEN OLD.name IS NOT NEW.name OR OLD.brief IS NOT NEW.brief OR OLD.priority_level IS NOT NEW.priority_level
+BEGIN
+INSERT INTO raw_revision_outbox (tx_id, entity_type, entity_id, field_name, old_value, new_value, producer, content_revision, captured_at)
+WITH ctx AS (SELECT lower(hex(randomblob(8))) AS tx)
+SELECT ctx.tx, 'objective', NEW.id, 'name', CAST(OLD.name AS TEXT), CAST(NEW.name AS TEXT), CASE WHEN OLD.content_revision = NEW.content_revision THEN 'user_sql' ELSE NEW.last_producer END, CASE WHEN OLD.content_revision = NEW.content_revision THEN OLD.content_revision + 1 ELSE NEW.content_revision END, CURRENT_TIMESTAMP FROM ctx WHERE OLD.name IS NOT NEW.name
+UNION ALL
+SELECT ctx.tx, 'objective', NEW.id, 'brief', CAST(OLD.brief AS TEXT), CAST(NEW.brief AS TEXT), CASE WHEN OLD.content_revision = NEW.content_revision THEN 'user_sql' ELSE NEW.last_producer END, CASE WHEN OLD.content_revision = NEW.content_revision THEN OLD.content_revision + 1 ELSE NEW.content_revision END, CURRENT_TIMESTAMP FROM ctx WHERE OLD.brief IS NOT NEW.brief
+UNION ALL
+SELECT ctx.tx, 'objective', NEW.id, 'priority_level', CAST(OLD.priority_level AS TEXT), CAST(NEW.priority_level AS TEXT), CASE WHEN OLD.content_revision = NEW.content_revision THEN 'user_sql' ELSE NEW.last_producer END, CASE WHEN OLD.content_revision = NEW.content_revision THEN OLD.content_revision + 1 ELSE NEW.content_revision END, CURRENT_TIMESTAMP FROM ctx WHERE OLD.priority_level IS NOT NEW.priority_level;
+END""",
         """CREATE VIEW v_project_heads AS
 WITH RECURSIVE chain(row_id, current_id) AS (
   SELECT id, id FROM projects
@@ -1399,6 +1632,12 @@ LEFT JOIN channel_run_outcomes o ON o.channel_run_id = c.id""",
 )""",
         """CREATE INDEX ix_confirmations_status ON confirmations (status)""",
         """CREATE UNIQUE INDEX uq_confirmations_pending_entity ON confirmations (stage, entity_type, entity_id) WHERE status = 'pending'""",
+        """CREATE TABLE content_blobs (
+	hash VARCHAR(64) NOT NULL,
+	body TEXT,
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	CONSTRAINT pk_content_blobs PRIMARY KEY (hash)
+)""",
         """CREATE TABLE control_state (
 	id INTEGER NOT NULL,
 	paused BOOLEAN NOT NULL,
@@ -1524,6 +1763,8 @@ LEFT JOIN channel_run_outcomes o ON o.channel_run_id = c.id""",
 	source_path TEXT,
 	source_sha256 VARCHAR(64),
 	tree_contract VARCHAR(64),
+	content_revision INTEGER DEFAULT 0 NOT NULL,
+	last_producer VARCHAR(64) DEFAULT 'kernel' NOT NULL,
 	version INTEGER NOT NULL,
 	supersedes_id VARCHAR(36),
 	locked BOOLEAN NOT NULL,
@@ -1535,6 +1776,21 @@ LEFT JOIN channel_run_outcomes o ON o.channel_run_id = c.id""",
 	CONSTRAINT fk_projects_supersedes_id_projects FOREIGN KEY(supersedes_id) REFERENCES projects (id)
 )""",
         """CREATE INDEX ix_projects_ref ON projects (ref)""",
+        """CREATE TABLE raw_revision_outbox (
+	id SERIAL NOT NULL,
+	tx_id VARCHAR(64) NOT NULL,
+	entity_type VARCHAR(16) NOT NULL,
+	entity_id VARCHAR(36) NOT NULL,
+	field_name VARCHAR(64) NOT NULL,
+	old_value TEXT,
+	new_value TEXT,
+	producer VARCHAR(64) NOT NULL,
+	content_revision INTEGER NOT NULL,
+	captured_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	CONSTRAINT pk_raw_revision_outbox PRIMARY KEY (id)
+)""",
+        """CREATE INDEX ix_raw_revision_outbox_entity_id ON raw_revision_outbox (entity_id)""",
+        """CREATE INDEX ix_raw_revision_outbox_entity_type ON raw_revision_outbox (entity_type)""",
         """CREATE TABLE ref_counters (
 	name VARCHAR(64) NOT NULL,
 	value INTEGER NOT NULL,
@@ -1550,6 +1806,13 @@ LEFT JOIN channel_run_outcomes o ON o.channel_run_id = c.id""",
 	CONSTRAINT pk_revocations PRIMARY KEY (id),
 	CONSTRAINT uq_revocations_target_type UNIQUE (target_type, target_id),
 	CONSTRAINT ck_revocations_target_type CHECK (target_type IN ('waiver', 'override', 'dependency'))
+)""",
+        """CREATE TABLE route_health (
+	channel VARCHAR(32) NOT NULL,
+	unhealthy_until TIMESTAMP WITH TIME ZONE,
+	crashes INTEGER NOT NULL,
+	updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	CONSTRAINT pk_route_health PRIMARY KEY (channel)
 )""",
         """CREATE TABLE settings (
 	key VARCHAR(128) NOT NULL,
@@ -1578,6 +1841,24 @@ LEFT JOIN channel_run_outcomes o ON o.channel_run_id = c.id""",
 	CONSTRAINT ck_thresholds_thresholdoperator CHECK (operator IN ('>=', '>', '<=', '<', '=', '!=', 'has_tag', 'status_is')),
 	CONSTRAINT ck_thresholds_thresholdaction CHECK (action IN ('require_approval', 'split', 'route_workbench_production', 'route_local_generation'))
 )""",
+        """CREATE TABLE field_revisions (
+	id VARCHAR(36) NOT NULL,
+	entity_type VARCHAR(16) NOT NULL,
+	entity_id VARCHAR(36) NOT NULL,
+	field_name VARCHAR(64) NOT NULL,
+	old_hash VARCHAR(64) NOT NULL,
+	new_hash VARCHAR(64) NOT NULL,
+	based_on_hash VARCHAR(64),
+	producer VARCHAR(64) NOT NULL,
+	content_revision INTEGER NOT NULL,
+	revision_group_id VARCHAR(64) NOT NULL,
+	manifest_hash VARCHAR(64) NOT NULL,
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	CONSTRAINT pk_field_revisions PRIMARY KEY (id),
+	CONSTRAINT fk_field_revisions_old_hash_content_blobs FOREIGN KEY(old_hash) REFERENCES content_blobs (hash),
+	CONSTRAINT fk_field_revisions_new_hash_content_blobs FOREIGN KEY(new_hash) REFERENCES content_blobs (hash)
+)""",
+        """CREATE INDEX ix_field_revisions_entity_id ON field_revisions (entity_id)""",
         """CREATE TABLE objectives (
 	id VARCHAR(36) NOT NULL,
 	ref VARCHAR(16) NOT NULL,
@@ -1589,6 +1870,8 @@ LEFT JOIN channel_run_outcomes o ON o.channel_run_id = c.id""",
 	tags JSON NOT NULL,
 	scores JSON NOT NULL,
 	source VARCHAR(64) NOT NULL,
+	content_revision INTEGER DEFAULT 0 NOT NULL,
+	last_producer VARCHAR(64) DEFAULT 'kernel' NOT NULL,
 	version INTEGER NOT NULL,
 	supersedes_id VARCHAR(36),
 	locked BOOLEAN NOT NULL,
@@ -1638,6 +1921,15 @@ LEFT JOIN channel_run_outcomes o ON o.channel_run_id = c.id""",
 	fencing_token INTEGER DEFAULT 0 NOT NULL,
 	active_run_id VARCHAR(36),
 	recovery_pending BOOLEAN DEFAULT false NOT NULL,
+	content_revision INTEGER DEFAULT 0 NOT NULL,
+	last_producer VARCHAR(64) DEFAULT 'kernel' NOT NULL,
+	crash_count INTEGER DEFAULT 0 NOT NULL,
+	cooldown_until TIMESTAMP WITH TIME ZONE,
+	hold_reason VARCHAR(32),
+	ready_since TIMESTAMP WITH TIME ZONE,
+	lineage_depth INTEGER DEFAULT 0 NOT NULL,
+	parent_bundle_id VARCHAR(36),
+	parent_bundle_hash VARCHAR(64),
 	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
 	updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
 	CONSTRAINT pk_packets PRIMARY KEY (id),
@@ -1646,13 +1938,14 @@ LEFT JOIN channel_run_outcomes o ON o.channel_run_id = c.id""",
 	CONSTRAINT fk_packets_objective_id_objectives FOREIGN KEY(objective_id) REFERENCES objectives (id),
 	CONSTRAINT ck_packets_packetkind CHECK (packet_kind IN ('task', 'content_eval')),
 	CONSTRAINT ck_packets_channel CHECK (channel IN ('quickfire_evaluation', 'local_generation', 'workbench_production')),
-	CONSTRAINT ck_packets_packetstatus CHECK (status IN ('draft', 'evaluating_pre', 'ready', 'queued', 'running', 'evaluating_post', 'completed', 'needs_review', 'held', 'blocked', 'failed', 'awaiting_confirmation', 'waiting_for_children', 'archived', 'closed_unverified', 'evaluating', 'in_progress', 'processed')),
+	CONSTRAINT ck_packets_packetstatus CHECK (status IN ('draft', 'evaluating_pre', 'ready', 'queued', 'running', 'evaluating_post', 'completed', 'needs_review', 'held', 'blocked', 'failed', 'awaiting_confirmation', 'waiting_for_children', 'archived', 'closed_unverified', 'sealed', 'evaluating', 'in_progress', 'processed')),
 	CONSTRAINT uq_packets_supersedes_id UNIQUE (supersedes_id),
 	CONSTRAINT fk_packets_supersedes_id_packets FOREIGN KEY(supersedes_id) REFERENCES packets (id),
 	CONSTRAINT fk_packets_parent_id_packets FOREIGN KEY(parent_id) REFERENCES packets (id),
 	CONSTRAINT fk_packets_root_id_packets FOREIGN KEY(root_id) REFERENCES packets (id)
 )""",
         """CREATE INDEX ix_packets_objective_id ON packets (objective_id)""",
+        """CREATE INDEX ix_packets_objective_position_lineage ON packets (objective_id, position, lineage_depth)""",
         """CREATE INDEX ix_packets_parent_id ON packets (parent_id)""",
         """CREATE INDEX ix_packets_project_id ON packets (project_id)""",
         """CREATE INDEX ix_packets_ref ON packets (ref)""",
@@ -1697,6 +1990,18 @@ LEFT JOIN channel_run_outcomes o ON o.channel_run_id = c.id""",
 	CONSTRAINT ck_evaluation_cycles_cyclestate CHECK (state IN ('open', 'complete', 'superseded', 'legacy'))
 )""",
         """CREATE INDEX ix_evaluation_cycles_packet_id ON evaluation_cycles (packet_id)""",
+        """CREATE TABLE feedback_events (
+	id VARCHAR(36) NOT NULL,
+	packet_id VARCHAR(36) NOT NULL,
+	actor VARCHAR(64) NOT NULL,
+	kind VARCHAR(16) NOT NULL,
+	reason TEXT NOT NULL,
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	CONSTRAINT pk_feedback_events PRIMARY KEY (id),
+	CONSTRAINT ck_feedback_events_kind CHECK (kind IN ('boost', 'nudge', 'demote', 'pin')),
+	CONSTRAINT fk_feedback_events_packet_id_packets FOREIGN KEY(packet_id) REFERENCES packets (id)
+)""",
+        """CREATE INDEX ix_feedback_events_packet_id ON feedback_events (packet_id)""",
         """CREATE TABLE generation_runs (
 	id VARCHAR(36) NOT NULL,
 	packet_id VARCHAR(36) NOT NULL,
@@ -1726,6 +2031,7 @@ LEFT JOIN channel_run_outcomes o ON o.channel_run_id = c.id""",
 	charged BOOLEAN DEFAULT false NOT NULL,
 	stale_reason TEXT,
 	finished_at TIMESTAMP WITH TIME ZONE,
+	claim_content_revision INTEGER,
 	CONSTRAINT pk_generation_runs PRIMARY KEY (id),
 	CONSTRAINT fk_generation_runs_packet_id_packets FOREIGN KEY(packet_id) REFERENCES packets (id),
 	CONSTRAINT ck_generation_runs_generationrunstate CHECK (state IN ('planned', 'dispatched', 'awaiting_result', 'validating', 'accepted', 'failed', 'stale', 'awaiting_confirmation', 'claimed', 'succeeded', 'abandoned')),
@@ -1756,6 +2062,21 @@ LEFT JOIN channel_run_outcomes o ON o.channel_run_id = c.id""",
 	CONSTRAINT fk_queue_admissions_packet_id_packets FOREIGN KEY(packet_id) REFERENCES packets (id)
 )""",
         """CREATE INDEX ix_queue_admissions_packet_id ON queue_admissions (packet_id)""",
+        """CREATE TABLE queue_epoch_snapshot (
+	id VARCHAR(36) NOT NULL,
+	epoch_id INTEGER NOT NULL,
+	packet_id VARCHAR(36) NOT NULL,
+	status VARCHAR(32) NOT NULL,
+	queue_pos INTEGER,
+	is_locked_out BOOLEAN NOT NULL,
+	score_e4 INTEGER,
+	cause VARCHAR(32) NOT NULL,
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	CONSTRAINT pk_queue_epoch_snapshot PRIMARY KEY (id),
+	CONSTRAINT uq_queue_epoch_snapshot_epoch_id UNIQUE (epoch_id, packet_id),
+	CONSTRAINT fk_queue_epoch_snapshot_packet_id_packets FOREIGN KEY(packet_id) REFERENCES packets (id)
+)""",
+        """CREATE INDEX ix_queue_epoch_snapshot_epoch_id ON queue_epoch_snapshot (epoch_id)""",
         """CREATE TABLE queue_overrides (
 	id VARCHAR(36) NOT NULL,
 	packet_id VARCHAR(36) NOT NULL,
@@ -1806,6 +2127,33 @@ LEFT JOIN channel_run_outcomes o ON o.channel_run_id = c.id""",
 	CONSTRAINT fk_budget_reservations_generation_run_id_generation_runs FOREIGN KEY(generation_run_id) REFERENCES generation_runs (id)
 )""",
         """CREATE INDEX ix_budget_reservations_operation_id ON budget_reservations (operation_id)""",
+        """CREATE TABLE crash_events (
+	id VARCHAR(36) NOT NULL,
+	packet_id VARCHAR(36) NOT NULL,
+	run_id VARCHAR(36) NOT NULL,
+	channel VARCHAR(32),
+	reason TEXT NOT NULL,
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	CONSTRAINT pk_crash_events PRIMARY KEY (id),
+	CONSTRAINT fk_crash_events_packet_id_packets FOREIGN KEY(packet_id) REFERENCES packets (id),
+	CONSTRAINT fk_crash_events_run_id_generation_runs FOREIGN KEY(run_id) REFERENCES generation_runs (id)
+)""",
+        """CREATE INDEX ix_crash_events_packet_id ON crash_events (packet_id)""",
+        """CREATE TABLE eva_discard_log (
+	id VARCHAR(36) NOT NULL,
+	packet_id VARCHAR(36) NOT NULL,
+	cycle_id VARCHAR(36),
+	epoch_id INTEGER,
+	expected_content_revision INTEGER NOT NULL,
+	actual_content_revision INTEGER NOT NULL,
+	locked_out BOOLEAN NOT NULL,
+	reason TEXT NOT NULL,
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	CONSTRAINT pk_eva_discard_log PRIMARY KEY (id),
+	CONSTRAINT fk_eva_discard_log_packet_id_packets FOREIGN KEY(packet_id) REFERENCES packets (id),
+	CONSTRAINT fk_eva_discard_log_cycle_id_evaluation_cycles FOREIGN KEY(cycle_id) REFERENCES evaluation_cycles (id)
+)""",
+        """CREATE INDEX ix_eva_discard_log_packet_id ON eva_discard_log (packet_id)""",
         """CREATE TABLE eva_packets (
 	id VARCHAR(36) NOT NULL,
 	packet_id VARCHAR(36) NOT NULL,
@@ -1843,6 +2191,23 @@ LEFT JOIN channel_run_outcomes o ON o.channel_run_id = c.id""",
         """CREATE INDEX ix_eva_packets_content_address ON eva_packets (content_address)""",
         """CREATE INDEX ix_eva_packets_cycle_id ON eva_packets (cycle_id)""",
         """CREATE INDEX ix_eva_packets_packet_id ON eva_packets (packet_id)""",
+        """CREATE TABLE sealed_bundles (
+	id VARCHAR(36) NOT NULL,
+	packet_id VARCHAR(36) NOT NULL,
+	run_id VARCHAR(36),
+	claim_content_revision INTEGER NOT NULL,
+	snapshot_hash VARCHAR(64) NOT NULL,
+	bundle_hash VARCHAR(64) NOT NULL,
+	composite_grade_e4 INTEGER NOT NULL,
+	artifact_hash VARCHAR(64),
+	output_ref VARCHAR(200),
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	CONSTRAINT pk_sealed_bundles PRIMARY KEY (id),
+	CONSTRAINT uq_sealed_bundles_packet_id UNIQUE (packet_id),
+	CONSTRAINT fk_sealed_bundles_packet_id_packets FOREIGN KEY(packet_id) REFERENCES packets (id),
+	CONSTRAINT fk_sealed_bundles_run_id_generation_runs FOREIGN KEY(run_id) REFERENCES generation_runs (id),
+	CONSTRAINT fk_sealed_bundles_snapshot_hash_content_blobs FOREIGN KEY(snapshot_hash) REFERENCES content_blobs (hash)
+)""",
         """CREATE TABLE budget_reconciliations (
 	id VARCHAR(36) NOT NULL,
 	reservation_id VARCHAR(36) NOT NULL,
@@ -1891,6 +2256,29 @@ LEFT JOIN channel_run_outcomes o ON o.channel_run_id = c.id""",
         """CREATE INDEX ix_channel_runs_generation_run_id ON channel_runs (generation_run_id)""",
         """CREATE INDEX ix_channel_runs_packet_id ON channel_runs (packet_id)""",
         """CREATE UNIQUE INDEX uq_channel_runs_operation_id ON channel_runs (operation_id)""",
+        """CREATE TABLE eva_context_links (
+	id VARCHAR(36) NOT NULL,
+	eva_packet_id VARCHAR(36) NOT NULL,
+	packet_id VARCHAR(36) NOT NULL,
+	field_name VARCHAR(64) NOT NULL,
+	source_type VARCHAR(16) NOT NULL,
+	source_id VARCHAR(64) NOT NULL,
+	source_ref VARCHAR(64),
+	source_hash VARCHAR(64) NOT NULL,
+	source_revision INTEGER NOT NULL,
+	link_strength VARCHAR(16) NOT NULL,
+	link_reason VARCHAR(16) NOT NULL,
+	quote TEXT,
+	is_questioned BOOLEAN DEFAULT false NOT NULL,
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	CONSTRAINT pk_eva_context_links PRIMARY KEY (id),
+	CONSTRAINT ck_eva_context_links_strength CHECK (link_strength IN ('direct', 'peripheral')),
+	CONSTRAINT ck_eva_context_links_source_type CHECK (source_type IN ('project', 'objective', 'packet', 'definition')),
+	CONSTRAINT fk_eva_context_links_eva_packet_id_eva_packets FOREIGN KEY(eva_packet_id) REFERENCES eva_packets (id),
+	CONSTRAINT fk_eva_context_links_packet_id_packets FOREIGN KEY(packet_id) REFERENCES packets (id)
+)""",
+        """CREATE INDEX ix_eva_context_links_eva_packet_id ON eva_context_links (eva_packet_id)""",
+        """CREATE INDEX ix_eva_context_links_packet_id ON eva_context_links (packet_id)""",
         """CREATE TABLE evaluation_passes (
 	id VARCHAR(36) NOT NULL,
 	packet_id VARCHAR(36) NOT NULL,
@@ -1990,6 +2378,7 @@ LEFT JOIN channel_run_outcomes o ON o.channel_run_id = c.id""",
 )""",
         """CREATE INDEX ix_quality_reports_artifact_id ON quality_reports (artifact_id)""",
         """CREATE INDEX ix_quality_reports_packet_id ON quality_reports (packet_id)""",
+        """ALTER TABLE packets ADD CONSTRAINT fk_packets_parent_bundle_id_sealed_bundles FOREIGN KEY(parent_bundle_id) REFERENCES sealed_bundles (id)""",
         """ALTER TABLE generation_runs ADD CONSTRAINT fk_generation_runs_channel_run_id_channel_runs FOREIGN KEY(channel_run_id) REFERENCES channel_runs (id)""",
         """CREATE OR REPLACE FUNCTION orch_locked_guard() RETURNS trigger LANGUAGE plpgsql AS $fn$
 BEGIN
@@ -2004,9 +2393,9 @@ END;
 $fn$""",
         """CREATE OR REPLACE FUNCTION orch_packets_completion_guard() RETURNS trigger LANGUAGE plpgsql AS $fn$
 BEGIN
-  IF NEW.status IN ('archived', 'completed')
+  IF NEW.status IN ('archived', 'completed', 'sealed')
      AND (NOT NEW.locked OR NEW.completed_at IS NULL) THEN
-    RAISE EXCEPTION 'orchestrator-immutable: completed/archived packets must be locked with completed_at set' USING ERRCODE = '23001';
+    RAISE EXCEPTION 'orchestrator-immutable: completed/archived/sealed packets must be locked with completed_at set' USING ERRCODE = '23001';
   END IF;
   IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
   RETURN NEW;
@@ -2288,7 +2677,7 @@ $fn$""",
         """CREATE OR REPLACE FUNCTION orch_packets_transition_guard() RETURNS trigger LANGUAGE plpgsql AS $fn$
 BEGIN
   IF NEW.status IS DISTINCT FROM OLD.status
-     AND (OLD.status || '>' || NEW.status) NOT IN ('awaiting_confirmation>blocked', 'awaiting_confirmation>closed_unverified', 'awaiting_confirmation>completed', 'awaiting_confirmation>evaluating_post', 'awaiting_confirmation>evaluating_pre', 'awaiting_confirmation>held', 'awaiting_confirmation>queued', 'awaiting_confirmation>running', 'awaiting_confirmation>waiting_for_children', 'blocked>closed_unverified', 'blocked>evaluating_post', 'blocked>evaluating_pre', 'blocked>held', 'draft>blocked', 'draft>closed_unverified', 'draft>evaluating_pre', 'draft>held', 'evaluating>closed_unverified', 'evaluating>evaluating_pre', 'evaluating_post>awaiting_confirmation', 'evaluating_post>blocked', 'evaluating_post>closed_unverified', 'evaluating_post>completed', 'evaluating_post>held', 'evaluating_post>needs_review', 'evaluating_pre>awaiting_confirmation', 'evaluating_pre>blocked', 'evaluating_pre>closed_unverified', 'evaluating_pre>held', 'evaluating_pre>needs_review', 'evaluating_pre>ready', 'evaluating_pre>waiting_for_children', 'failed>awaiting_confirmation', 'failed>blocked', 'failed>closed_unverified', 'failed>evaluating_pre', 'failed>held', 'failed>queued', 'held>blocked', 'held>closed_unverified', 'held>evaluating_pre', 'in_progress>closed_unverified', 'in_progress>evaluating_pre', 'needs_review>blocked', 'needs_review>closed_unverified', 'needs_review>evaluating_post', 'needs_review>evaluating_pre', 'needs_review>held', 'processed>closed_unverified', 'processed>evaluating_pre', 'queued>awaiting_confirmation', 'queued>blocked', 'queued>closed_unverified', 'queued>evaluating_pre', 'queued>held', 'queued>running', 'ready>awaiting_confirmation', 'ready>blocked', 'ready>closed_unverified', 'ready>evaluating_pre', 'ready>held', 'ready>queued', 'ready>waiting_for_children', 'running>awaiting_confirmation', 'running>blocked', 'running>closed_unverified', 'running>evaluating_post', 'running>evaluating_pre', 'running>failed', 'waiting_for_children>closed_unverified', 'waiting_for_children>completed') THEN
+     AND (OLD.status || '>' || NEW.status) NOT IN ('awaiting_confirmation>blocked', 'awaiting_confirmation>closed_unverified', 'awaiting_confirmation>completed', 'awaiting_confirmation>evaluating_post', 'awaiting_confirmation>evaluating_pre', 'awaiting_confirmation>held', 'awaiting_confirmation>queued', 'awaiting_confirmation>running', 'awaiting_confirmation>waiting_for_children', 'blocked>closed_unverified', 'blocked>evaluating_post', 'blocked>evaluating_pre', 'blocked>held', 'draft>blocked', 'draft>closed_unverified', 'draft>evaluating_pre', 'draft>held', 'evaluating>closed_unverified', 'evaluating>evaluating_pre', 'evaluating_post>awaiting_confirmation', 'evaluating_post>blocked', 'evaluating_post>closed_unverified', 'evaluating_post>completed', 'evaluating_post>held', 'evaluating_post>needs_review', 'evaluating_post>sealed', 'evaluating_pre>awaiting_confirmation', 'evaluating_pre>blocked', 'evaluating_pre>closed_unverified', 'evaluating_pre>held', 'evaluating_pre>needs_review', 'evaluating_pre>ready', 'evaluating_pre>waiting_for_children', 'failed>awaiting_confirmation', 'failed>blocked', 'failed>closed_unverified', 'failed>evaluating_pre', 'failed>held', 'failed>queued', 'held>blocked', 'held>closed_unverified', 'held>evaluating_pre', 'in_progress>closed_unverified', 'in_progress>evaluating_pre', 'needs_review>blocked', 'needs_review>closed_unverified', 'needs_review>evaluating_post', 'needs_review>evaluating_pre', 'needs_review>held', 'processed>closed_unverified', 'processed>evaluating_pre', 'queued>awaiting_confirmation', 'queued>blocked', 'queued>closed_unverified', 'queued>evaluating_pre', 'queued>held', 'queued>running', 'ready>awaiting_confirmation', 'ready>blocked', 'ready>closed_unverified', 'ready>evaluating_pre', 'ready>held', 'ready>queued', 'ready>waiting_for_children', 'running>awaiting_confirmation', 'running>blocked', 'running>closed_unverified', 'running>evaluating_post', 'running>evaluating_pre', 'running>failed', 'waiting_for_children>closed_unverified', 'waiting_for_children>completed') THEN
     RAISE EXCEPTION 'orchestrator-transition: packet status change is not in the M3 transition table' USING ERRCODE = '23001';
   END IF;
   IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
@@ -2308,6 +2697,7 @@ BEGIN
   IF NEW.claimed_by IS DISTINCT FROM OLD.claimed_by
      OR NEW.channel IS DISTINCT FROM OLD.channel
      OR NEW.fencing_token IS DISTINCT FROM OLD.fencing_token
+     OR NEW.claim_content_revision IS DISTINCT FROM OLD.claim_content_revision
      OR NEW.created_at IS DISTINCT FROM OLD.created_at
      OR (OLD.manifest_hash IS NOT NULL AND NEW.manifest_hash IS DISTINCT FROM OLD.manifest_hash)
      OR (OLD.commit_sha IS NOT NULL AND NEW.commit_sha IS DISTINCT FROM OLD.commit_sha)
@@ -2372,6 +2762,171 @@ $fn$""",
         """CREATE TRIGGER trg_kernel_leases_no_truncate BEFORE TRUNCATE ON kernel_leases FOR EACH STATEMENT EXECUTE FUNCTION orch_no_delete_guard()""",
         """CREATE TRIGGER trg_governor_states_no_truncate BEFORE TRUNCATE ON governor_states FOR EACH STATEMENT EXECUTE FUNCTION orch_no_delete_guard()""",
         """CREATE TRIGGER trg_budget_counters_no_truncate BEFORE TRUNCATE ON budget_counters FOR EACH STATEMENT EXECUTE FUNCTION orch_no_delete_guard()""",
+        """CREATE OR REPLACE FUNCTION orch_eva_context_links_guard() RETURNS trigger LANGUAGE plpgsql AS $fn$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'orchestrator-immutable: eva_context_links rows cannot be deleted' USING ERRCODE = '23001';
+  END IF;
+  IF NEW.id IS DISTINCT FROM OLD.id
+     OR NEW.eva_packet_id IS DISTINCT FROM OLD.eva_packet_id
+     OR NEW.packet_id IS DISTINCT FROM OLD.packet_id
+     OR NEW.field_name IS DISTINCT FROM OLD.field_name
+     OR NEW.source_type IS DISTINCT FROM OLD.source_type
+     OR NEW.source_id IS DISTINCT FROM OLD.source_id
+     OR NEW.source_ref IS DISTINCT FROM OLD.source_ref
+     OR NEW.source_hash IS DISTINCT FROM OLD.source_hash
+     OR NEW.source_revision IS DISTINCT FROM OLD.source_revision
+     OR NEW.link_strength IS DISTINCT FROM OLD.link_strength
+     OR NEW.link_reason IS DISTINCT FROM OLD.link_reason
+     OR NEW.quote IS DISTINCT FROM OLD.quote
+     OR NEW.created_at IS DISTINCT FROM OLD.created_at
+     OR (OLD.is_questioned AND NOT NEW.is_questioned) THEN
+    RAISE EXCEPTION 'orchestrator-immutable: eva_context_links are append-only; only is_questioned may go from false to true' USING ERRCODE = '23001';
+  END IF;
+  IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+  RETURN NEW;
+END;
+$fn$""",
+        """CREATE OR REPLACE FUNCTION orch_packets_content_revision() RETURNS trigger LANGUAGE plpgsql AS $fn$
+BEGIN
+  IF (OLD.title IS DISTINCT FROM NEW.title
+     OR OLD.prompt_description IS DISTINCT FROM NEW.prompt_description
+     OR OLD.response_structure IS DISTINCT FROM NEW.response_structure
+     OR OLD.response_contract IS DISTINCT FROM NEW.response_contract
+     OR OLD.repo_target_path IS DISTINCT FROM NEW.repo_target_path
+     OR OLD.priority_level IS DISTINCT FROM NEW.priority_level
+     OR OLD.manual_boost IS DISTINCT FROM NEW.manual_boost)
+     AND OLD.content_revision = NEW.content_revision THEN
+    NEW.content_revision := OLD.content_revision + 1;
+    NEW.last_producer := 'user_sql';
+  END IF;
+  IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+  RETURN NEW;
+END;
+$fn$""",
+        """CREATE OR REPLACE FUNCTION orch_packets_outbox() RETURNS trigger LANGUAGE plpgsql AS $fn$
+DECLARE v_tx text := pg_current_xact_id()::text;
+BEGIN
+  IF OLD.title IS DISTINCT FROM NEW.title THEN
+    INSERT INTO raw_revision_outbox (tx_id, entity_type, entity_id, field_name, old_value, new_value, producer, content_revision, captured_at)
+    VALUES (v_tx, 'packet', NEW.id, 'title', OLD.title::text, NEW.title::text, NEW.last_producer, NEW.content_revision, now());
+  END IF;
+  IF OLD.prompt_description IS DISTINCT FROM NEW.prompt_description THEN
+    INSERT INTO raw_revision_outbox (tx_id, entity_type, entity_id, field_name, old_value, new_value, producer, content_revision, captured_at)
+    VALUES (v_tx, 'packet', NEW.id, 'prompt_description', OLD.prompt_description::text, NEW.prompt_description::text, NEW.last_producer, NEW.content_revision, now());
+  END IF;
+  IF OLD.response_structure IS DISTINCT FROM NEW.response_structure THEN
+    INSERT INTO raw_revision_outbox (tx_id, entity_type, entity_id, field_name, old_value, new_value, producer, content_revision, captured_at)
+    VALUES (v_tx, 'packet', NEW.id, 'response_structure', OLD.response_structure::text, NEW.response_structure::text, NEW.last_producer, NEW.content_revision, now());
+  END IF;
+  IF OLD.response_contract IS DISTINCT FROM NEW.response_contract THEN
+    INSERT INTO raw_revision_outbox (tx_id, entity_type, entity_id, field_name, old_value, new_value, producer, content_revision, captured_at)
+    VALUES (v_tx, 'packet', NEW.id, 'response_contract', OLD.response_contract::text, NEW.response_contract::text, NEW.last_producer, NEW.content_revision, now());
+  END IF;
+  IF OLD.repo_target_path IS DISTINCT FROM NEW.repo_target_path THEN
+    INSERT INTO raw_revision_outbox (tx_id, entity_type, entity_id, field_name, old_value, new_value, producer, content_revision, captured_at)
+    VALUES (v_tx, 'packet', NEW.id, 'repo_target_path', OLD.repo_target_path::text, NEW.repo_target_path::text, NEW.last_producer, NEW.content_revision, now());
+  END IF;
+  IF OLD.priority_level IS DISTINCT FROM NEW.priority_level THEN
+    INSERT INTO raw_revision_outbox (tx_id, entity_type, entity_id, field_name, old_value, new_value, producer, content_revision, captured_at)
+    VALUES (v_tx, 'packet', NEW.id, 'priority_level', OLD.priority_level::text, NEW.priority_level::text, NEW.last_producer, NEW.content_revision, now());
+  END IF;
+  IF OLD.manual_boost IS DISTINCT FROM NEW.manual_boost THEN
+    INSERT INTO raw_revision_outbox (tx_id, entity_type, entity_id, field_name, old_value, new_value, producer, content_revision, captured_at)
+    VALUES (v_tx, 'packet', NEW.id, 'manual_boost', OLD.manual_boost::text, NEW.manual_boost::text, NEW.last_producer, NEW.content_revision, now());
+  END IF;
+  RETURN NULL;
+END;
+$fn$""",
+        """CREATE TRIGGER trg_packets_content_revision BEFORE UPDATE OF title, prompt_description, response_structure, response_contract, repo_target_path, priority_level, manual_boost ON packets FOR EACH ROW EXECUTE FUNCTION orch_packets_content_revision()""",
+        """CREATE TRIGGER trg_packets_outbox AFTER UPDATE OF title, prompt_description, response_structure, response_contract, repo_target_path, priority_level, manual_boost ON packets FOR EACH ROW EXECUTE FUNCTION orch_packets_outbox()""",
+        """CREATE OR REPLACE FUNCTION orch_projects_content_revision() RETURNS trigger LANGUAGE plpgsql AS $fn$
+BEGIN
+  IF (OLD.name IS DISTINCT FROM NEW.name
+     OR OLD.brief IS DISTINCT FROM NEW.brief
+     OR OLD.industry IS DISTINCT FROM NEW.industry
+     OR OLD.scope IS DISTINCT FROM NEW.scope)
+     AND OLD.content_revision = NEW.content_revision THEN
+    NEW.content_revision := OLD.content_revision + 1;
+    NEW.last_producer := 'user_sql';
+  END IF;
+  IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+  RETURN NEW;
+END;
+$fn$""",
+        """CREATE OR REPLACE FUNCTION orch_projects_outbox() RETURNS trigger LANGUAGE plpgsql AS $fn$
+DECLARE v_tx text := pg_current_xact_id()::text;
+BEGIN
+  IF OLD.name IS DISTINCT FROM NEW.name THEN
+    INSERT INTO raw_revision_outbox (tx_id, entity_type, entity_id, field_name, old_value, new_value, producer, content_revision, captured_at)
+    VALUES (v_tx, 'project', NEW.id, 'name', OLD.name::text, NEW.name::text, NEW.last_producer, NEW.content_revision, now());
+  END IF;
+  IF OLD.brief IS DISTINCT FROM NEW.brief THEN
+    INSERT INTO raw_revision_outbox (tx_id, entity_type, entity_id, field_name, old_value, new_value, producer, content_revision, captured_at)
+    VALUES (v_tx, 'project', NEW.id, 'brief', OLD.brief::text, NEW.brief::text, NEW.last_producer, NEW.content_revision, now());
+  END IF;
+  IF OLD.industry IS DISTINCT FROM NEW.industry THEN
+    INSERT INTO raw_revision_outbox (tx_id, entity_type, entity_id, field_name, old_value, new_value, producer, content_revision, captured_at)
+    VALUES (v_tx, 'project', NEW.id, 'industry', OLD.industry::text, NEW.industry::text, NEW.last_producer, NEW.content_revision, now());
+  END IF;
+  IF OLD.scope IS DISTINCT FROM NEW.scope THEN
+    INSERT INTO raw_revision_outbox (tx_id, entity_type, entity_id, field_name, old_value, new_value, producer, content_revision, captured_at)
+    VALUES (v_tx, 'project', NEW.id, 'scope', OLD.scope::text, NEW.scope::text, NEW.last_producer, NEW.content_revision, now());
+  END IF;
+  RETURN NULL;
+END;
+$fn$""",
+        """CREATE TRIGGER trg_projects_content_revision BEFORE UPDATE OF name, brief, industry, scope ON projects FOR EACH ROW EXECUTE FUNCTION orch_projects_content_revision()""",
+        """CREATE TRIGGER trg_projects_outbox AFTER UPDATE OF name, brief, industry, scope ON projects FOR EACH ROW EXECUTE FUNCTION orch_projects_outbox()""",
+        """CREATE OR REPLACE FUNCTION orch_objectives_content_revision() RETURNS trigger LANGUAGE plpgsql AS $fn$
+BEGIN
+  IF (OLD.name IS DISTINCT FROM NEW.name
+     OR OLD.brief IS DISTINCT FROM NEW.brief
+     OR OLD.priority_level IS DISTINCT FROM NEW.priority_level)
+     AND OLD.content_revision = NEW.content_revision THEN
+    NEW.content_revision := OLD.content_revision + 1;
+    NEW.last_producer := 'user_sql';
+  END IF;
+  IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+  RETURN NEW;
+END;
+$fn$""",
+        """CREATE OR REPLACE FUNCTION orch_objectives_outbox() RETURNS trigger LANGUAGE plpgsql AS $fn$
+DECLARE v_tx text := pg_current_xact_id()::text;
+BEGIN
+  IF OLD.name IS DISTINCT FROM NEW.name THEN
+    INSERT INTO raw_revision_outbox (tx_id, entity_type, entity_id, field_name, old_value, new_value, producer, content_revision, captured_at)
+    VALUES (v_tx, 'objective', NEW.id, 'name', OLD.name::text, NEW.name::text, NEW.last_producer, NEW.content_revision, now());
+  END IF;
+  IF OLD.brief IS DISTINCT FROM NEW.brief THEN
+    INSERT INTO raw_revision_outbox (tx_id, entity_type, entity_id, field_name, old_value, new_value, producer, content_revision, captured_at)
+    VALUES (v_tx, 'objective', NEW.id, 'brief', OLD.brief::text, NEW.brief::text, NEW.last_producer, NEW.content_revision, now());
+  END IF;
+  IF OLD.priority_level IS DISTINCT FROM NEW.priority_level THEN
+    INSERT INTO raw_revision_outbox (tx_id, entity_type, entity_id, field_name, old_value, new_value, producer, content_revision, captured_at)
+    VALUES (v_tx, 'objective', NEW.id, 'priority_level', OLD.priority_level::text, NEW.priority_level::text, NEW.last_producer, NEW.content_revision, now());
+  END IF;
+  RETURN NULL;
+END;
+$fn$""",
+        """CREATE TRIGGER trg_objectives_content_revision BEFORE UPDATE OF name, brief, priority_level ON objectives FOR EACH ROW EXECUTE FUNCTION orch_objectives_content_revision()""",
+        """CREATE TRIGGER trg_objectives_outbox AFTER UPDATE OF name, brief, priority_level ON objectives FOR EACH ROW EXECUTE FUNCTION orch_objectives_outbox()""",
+        """CREATE TRIGGER trg_content_blobs_append_only BEFORE UPDATE OR DELETE ON content_blobs FOR EACH ROW EXECUTE FUNCTION orch_append_only_guard()""",
+        """CREATE TRIGGER trg_content_blobs_no_truncate BEFORE TRUNCATE ON content_blobs FOR EACH STATEMENT EXECUTE FUNCTION orch_append_only_guard()""",
+        """CREATE TRIGGER trg_field_revisions_append_only BEFORE UPDATE OR DELETE ON field_revisions FOR EACH ROW EXECUTE FUNCTION orch_append_only_guard()""",
+        """CREATE TRIGGER trg_field_revisions_no_truncate BEFORE TRUNCATE ON field_revisions FOR EACH STATEMENT EXECUTE FUNCTION orch_append_only_guard()""",
+        """CREATE TRIGGER trg_sealed_bundles_append_only BEFORE UPDATE OR DELETE ON sealed_bundles FOR EACH ROW EXECUTE FUNCTION orch_append_only_guard()""",
+        """CREATE TRIGGER trg_sealed_bundles_no_truncate BEFORE TRUNCATE ON sealed_bundles FOR EACH STATEMENT EXECUTE FUNCTION orch_append_only_guard()""",
+        """CREATE TRIGGER trg_eva_discard_log_append_only BEFORE UPDATE OR DELETE ON eva_discard_log FOR EACH ROW EXECUTE FUNCTION orch_append_only_guard()""",
+        """CREATE TRIGGER trg_eva_discard_log_no_truncate BEFORE TRUNCATE ON eva_discard_log FOR EACH STATEMENT EXECUTE FUNCTION orch_append_only_guard()""",
+        """CREATE TRIGGER trg_queue_epoch_snapshot_append_only BEFORE UPDATE OR DELETE ON queue_epoch_snapshot FOR EACH ROW EXECUTE FUNCTION orch_append_only_guard()""",
+        """CREATE TRIGGER trg_queue_epoch_snapshot_no_truncate BEFORE TRUNCATE ON queue_epoch_snapshot FOR EACH STATEMENT EXECUTE FUNCTION orch_append_only_guard()""",
+        """CREATE TRIGGER trg_feedback_events_append_only BEFORE UPDATE OR DELETE ON feedback_events FOR EACH ROW EXECUTE FUNCTION orch_append_only_guard()""",
+        """CREATE TRIGGER trg_feedback_events_no_truncate BEFORE TRUNCATE ON feedback_events FOR EACH STATEMENT EXECUTE FUNCTION orch_append_only_guard()""",
+        """CREATE TRIGGER trg_crash_events_append_only BEFORE UPDATE OR DELETE ON crash_events FOR EACH ROW EXECUTE FUNCTION orch_append_only_guard()""",
+        """CREATE TRIGGER trg_crash_events_no_truncate BEFORE TRUNCATE ON crash_events FOR EACH STATEMENT EXECUTE FUNCTION orch_append_only_guard()""",
+        """CREATE TRIGGER trg_route_health_no_delete BEFORE DELETE ON route_health FOR EACH ROW EXECUTE FUNCTION orch_no_delete_guard()""",
+        """CREATE TRIGGER trg_eva_context_links_guard BEFORE UPDATE OR DELETE ON eva_context_links FOR EACH ROW EXECUTE FUNCTION orch_eva_context_links_guard()""",
         """CREATE VIEW v_project_heads AS
 WITH RECURSIVE chain(row_id, current_id) AS (
   SELECT id, id FROM projects
