@@ -13,6 +13,38 @@ Newest entries first. Every agent session appends an entry: what changed, decisi
 
 ---
 
+## 2026-11-06 — M3a checkpoint 2 (after C4), for Argon's audit (Claude Code)
+
+**What landed since checkpoint 1**
+- **c1b2f60 — docs only:** R6 folded into the M3a spec (every OQ marked *resolved per R6*, OQ29–OQ35 listed, contradicting ACs fixed: AC17/18/20/21/25/26/30/33/34; F1/F2 not adopted). Requirement F (PROJECT_PLAN table and §-text) and CLAUDE.md Golden Rule 1 carry the OQ26 wording. R6 untouched.
+- **C2 b326816 / C3 10ef23b** (split as asked) also gained: a drain-failure test and a re-verify-failure test (whole edit rolls back: zero outbox and `field_revisions` rows, `content_revision` unchanged, both dialects), and "gate-only changes do not bump `content_revision`".
+- **C4 e8f12b6 — queues, readiness, admission.**
+  - `sql/genqueue.py`: `v_packet_mandatory_fields`, `v_packet_field_health`, `v_packet_relational_centrality`, `v_packet_user_feedback`, `v_packet_queue_score`, `v_gen_queue`, `v_eva_queue`; `v_queue` removed. Integer-only arithmetic: settings cast to INTEGER, whole-second epochs (`strftime('%s')` / `FLOOR(EXTRACT(EPOCH))`), non-negative integer division, explicit floor for halving negatives, `(x + 5000) / 10000` rounding.
+  - `admission_tick` (drain → demote → promote → snapshot), `write_epoch_snapshot` with OQ3 lockout flags, `is_locked_out` (reads the newest snapshot only), `next_dispatch` (OQ25: oldest every 5th, incumbency margin 250, snapshot-based), `add_feedback`.
+  - Readiness: mandatory sets (Python `mandatory_fields_for_packet` parity-tested against the view), ambiguity ≤ 4,000, lineage-based dependency satisfaction at `dep_satisfaction_grade_e4`.
+  - Evaluator: lockout refusal with an event; OQ30 commit CAS → `eva_discard_log`; `evaluate_pending` works from `v_eva_queue`.
+  - Catalogue: `risk_assessment`, `interface_stability`, `downstream_contract_clarity`, `sonar_hotspot_alignment` (task-level scores) with pre-phase presets for all 8 universal/relational fields (tier 2, `required = false`: mandatoriness is relational) and post presets for the two new composite-grade fields.
+  - Removed: `enforce_failure_budgets`, failure-budget confirmations, the `priority.*` and failure-budget settings, fair FORCE/PIN admission. New transition row `queued → ready` (OQ12).
+  - Boundary fixtures (PM rule 4): ageing 49:59 / 50:00, question cap 2,250, dependency grade 6,999 / 7,000, depth 2/3 (low floor), wait 7,199 / 7,200 s (bypass), feedback ×1 / ×0.5 / 0 at 24 h / 72 h and the ±3,000 clamp, 21-way tie ordered by `packet_id`.
+
+**Tests:** last full run on both dialects: 664 passed, 4 skipped (dialect-specific skips), 1 failure that was an order-dependent baseline-text issue, fixed in C4 (deferred foreign keys are now sorted); the affected schema tests re-run green. Ruff clean. The suite now takes ~10 min on both dialects (was ~5): the queue views are evaluated per packet.
+
+**Deviations (new in C4)**
+- **AC18 subset:** R6 OQ2 limits genQueue to running/queued/ready, so `draft`/`evaluating_pre` rows of `v_eva_queue` are not genQueue rows; the subset holds for ready/queued rows (spec AC18 updated).
+- **Demotion hysteresis:** a queued packet is measured against the floor at the queued depth *without itself*, otherwise a root admitted under the low floor (depth < 3) is demoted at depth 3 and re-admitted the next tick, forever.
+- **`missing_local_drafts`** is reported (`packets.examples_hash`, new) but is **not** an evaQueue inclusion trigger: nothing in M3a can produce local drafts, so it would keep every packet in evaQueue permanently.
+- **`is_critical_objective_path`** (OQ8) is defined as "the packet's objective has `priority_level >= centrality.critical_priority` (8)"; R6 does not define it.
+- **Dependents/lineage key:** edges target `COALESCE(root_id, id)` per OQ13; because split children and re-imagined children share `root_id`, a split tree counts as one lineage for satisfaction, centrality and lockout (known issue below).
+- **Ambiguity bound:** with FakeProvider scores, 2 of the 15 sample packets now go to `needs_review` (`test_cli_acceptance_chain` updated from 15 to 13 ready + 2 review).
+
+**Known issues**
+- Split trees and re-imagination lineages share `root_id` (R6 OQ24 sets `root_id = coalesce(parent.root_id, parent.id)`), so a sealed sibling in a split tree can satisfy an edge aimed at another member. Needs a CFO/Argon decision if it matters (a separate lineage key).
+- Suite runtime doubled (views). Not optimised yet.
+
+**Next (in order):** C5 — `gen_eva` + seal + child spawn + crash path, binding changes in `runs.py`, the remaining R6 transition-table changes (add `draft → ready`, `running → queued`; remove `ready/queued → evaluating_pre`, `running → failed`, `evaluating_post → completed` for genPackets), AC28–AC35 incl. 8,499/8,500 and crash 3/5 + 300 s boundaries, OQ17 placeholder; then C6 (ARCHITECTURE §7.3, PR).
+
+---
+
 ## 2026-11-06 — M3a checkpoint 1 (after C3), for Argon's audit (Claude Code)
 
 Branch `m3a/genpacket-loop` (from `docs/t1c-v3-m3a-spec` @ 8d7058d, R6 included). Pushed after each commit. Not merged; no PR yet.
