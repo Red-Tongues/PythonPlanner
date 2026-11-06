@@ -269,7 +269,10 @@ def seal_packet(
         bundle_hash=bundle_hash,
         composite_grade_e4=grade_e4,
         artifact_hash=artifact.sha256,
-        output_ref=None,  # OQ15: no production repository in M3a
+        # @ORCHESTRATOR:PLACEHOLDER (M3b: OQ15 refs/gen wiring) — the output is not committed
+        # to refs/gen/<run_id> before gen_eva and output_ref stays NULL: M3a has no production
+        # repository. Mandatory M3b acceptance criterion (M3a spec, "Carry-over to M3b").
+        output_ref=None,
     )
     session.add(bundle)
     record_event(

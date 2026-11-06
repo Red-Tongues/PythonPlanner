@@ -365,6 +365,17 @@ The directive's code sketches are non-production references. Each gap or contrad
   - Step 3 lists only (a)–(e).
   - Confirm that the kernel tick loop, the CLI and pause/branch belong to a later M3a part or to M3b, and not to this spec.
 
+## Carry-over to M3b
+
+Items M3a leaves as `@ORCHESTRATOR:PLACEHOLDER` (Argon's final audit of PR #6):
+
+| Item | Where in M3a | M3b requirement |
+|---|---|---|
+| **OQ15 `refs/gen/<run_id>` commits and `sealed_bundles.output_ref` population** | `evaluation/gen_eva.seal_packet` leaves `output_ref` NULL; no git ref is written | **Mandatory M3b acceptance criterion** (Argon E1): before `gen_eva` grades a generation, its output is committed to `refs/gen/<run_id>` in the production repo; the bundle records that commit in `output_ref`; the target branch is fast-forwarded only when grade ≥ 7,000 and above any prior sibling. Tested on both dialects. |
+| OQ17 `fast_synth` LLM rewrite | `evaluation/gen_eva.fast_synth_placeholder` (always declines; template used) | wire a stateless, Pydantic-validated local model call behind the same protocol |
+| Local-drafts trigger (`missing_local_drafts`) | `sql/genqueue.py` (reported, not an evaQueue need) | wire a drafting channel and make it an evaQueue trigger |
+| Kernel tick / daemon (OQ28) | functions only: `admission_tick`, `next_dispatch`, `complete_generation`, `reconcile_runs` | the unattended loop that calls them in order |
+
 ## Deviations from the directive and R6
 
 Recorded in `docs/PROGRESS.md` and in the M3a PR description as they arise. The directive's file/line references (C.i) predate PR #3's final tree, and the table above uses the current approximate locations.

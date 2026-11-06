@@ -13,6 +13,22 @@ Newest entries first. Every agent session appends an entry: what changed, decisi
 
 ---
 
+## 2026-11-06 — Argon's final audit of PR #6: conditions E1, E2, E4 met (Claude Code)
+
+Argon's final audit: **conditional pass**; E3, E5, E6 accepted as-is. M3a stops here (no M3b work).
+
+- **E1 / OQ15:** the seal site in `evaluation/gen_eva.seal_packet` is tagged `@ORCHESTRATOR:PLACEHOLDER (M3b: OQ15 refs/gen wiring)`; the M3a spec has a new *Carry-over to M3b* section that makes `refs/gen/<run_id>` commits and `sealed_bundles.output_ref` population a **mandatory M3b acceptance criterion** (it also lists the `fast_synth`, local-drafts and kernel-tick placeholders).
+- **E2 (5th crash):** `record_crash` makes `running → queued → held` in the caller's single transaction. New test (both dialects): with the 5th crash written but not committed, a second session still sees `running` and its claim fails; after the commit it sees `held` (`crash_limit`), both moves are evented, and a claim still fails. `queued` is never visible to another session.
+- **E4 (soft HOLD during a run):** the seal, the child spawn and the child's starting status commit together. New test (both dialects): before the commit another session sees the parent `running`, no bundle and no child; after it, the parent is `sealed` and locked and the child exists.
+  - **Which packet ends up held — stated, not changed:** none, because of the user's HOLD. A HOLD is a queue override keyed by the packet's ref; it never stops the run (OQ19). At the seal the parent is sealed and locked, and the override stays on the parent's ref, where it has no further effect. The child has a new ref, so the HOLD does **not** carry to it; the child is held only when the parent's grade is ≥ 8,500 (`grade_met`). If the HOLD should land on the child, that needs a ruling (carry active HOLD/BLOCK overrides to the child at spawn).
+  - **Correction:** checkpoint 3 said a soft HOLD on a running packet "takes effect when the run ends". That was wrong, as described above.
+
+**Tests:** full run on SQLite + PostgreSQL 16: 704 passed, 4 skipped (pre-existing dialect skips), 0 failed, in one run (11 min 45 s). Ruff clean.
+
+**Next:** none for M3a. PR #6 stays a draft and unmerged; M3b is not started.
+
+---
+
 ## 2026-11-06 — M3a checkpoint 3 (after C5), for Argon's final audit (Claude Code)
 
 **What landed**

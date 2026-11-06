@@ -380,3 +380,102 @@ def test_claim_and_seal_refuse_undrained_revisions(session: Session) -> None:
         claim(session, packet.ref, "kernel-a")
     drain_outbox(session)
     assert claim(session, packet.ref, "kernel-a").claim_content_revision == 1
+
+
+# --------------------------------------------------------------------------- atomicity (E2, E4)
+
+
+def test_fifth_crash_requeue_and_hold_are_one_transaction(factory: sessionmaker[Session]) -> None:
+    """Argon E2: the 5th crash moves running → queued → held inside one transaction, so another
+    session never sees the packet ``queued`` and cannot claim it between the two steps."""
+    from orchestrator.queue import ClaimError
+
+    t0 = utcnow()
+    with factory() as s:
+        ref = queued_packet(s).ref
+        s.commit()
+    for n in range(1, 5):
+        with factory() as s:
+            run = claim(s, ref, "kernel-a")
+            authorise_dispatch(s, run, lock=held(s))
+            record_crash(s, run, "timeout", lock=held(s), now=t0 + timedelta(hours=n))
+            s.commit()
+    with factory() as s:
+        run = claim(s, ref, "kernel-a")
+        authorise_dispatch(s, run, lock=held(s))
+        s.commit()
+        run_id = run.id
+    a = factory()
+    try:
+        run = a.get(GenerationRun, run_id)
+        assert record_crash(a, run, "timeout", lock=held(a), now=t0 + timedelta(hours=5)) == 5
+        with factory() as b:  # between the two steps, as seen from another session
+            packet = b.scalar(select(Packet).where(Packet.ref == ref))
+            assert packet.status is S.RUNNING  # never 'queued'
+            with pytest.raises(ClaimError):
+                claim(b, ref, "kernel-b")
+            b.rollback()
+        a.commit()
+    finally:
+        a.close()
+    with factory() as b:
+        packet = b.scalar(select(Packet).where(Packet.ref == ref))
+        assert packet.status is S.HELD and packet.hold_reason == "crash_limit"
+        assert packet.crash_count == 5
+        with pytest.raises(ClaimError):
+            claim(b, ref, "kernel-b")
+        from orchestrator.db.models import Event
+
+        moves = [
+            e.after["status"]
+            for e in b.scalars(
+                select(Event)
+                .where(Event.action == "packet.transition", Event.entity_id == packet.id)
+                .order_by(Event.created_at, Event.id)
+            )
+        ]
+        # both steps evented in the same commit (equal timestamps may order either way)
+        assert sorted(moves[-2:]) == ["held", "queued"]
+
+
+def test_a_soft_hold_during_a_run_and_the_seal_are_one_transaction(
+    factory: sessionmaker[Session],
+) -> None:
+    """Argon E4: the seal, the child spawn and everything they decide commit together; another
+    session sees either the running parent with no child, or the sealed parent with its child.
+
+    What a soft HOLD set during the run does (stated, not changed): a HOLD is a queue override
+    keyed by the packet's ref. It never stops the run (R6 OQ19). At the seal the parent is
+    sealed and locked; the override stays on the parent's ref, where it no longer has any
+    effect. The child has a new ref and is therefore *not* held by it — only a parent grade
+    ≥ ``lineage_stop_grade_e4`` holds the child (``grade_met``)."""
+    from orchestrator.contracts import OverrideKind
+    from orchestrator.governance import add_override
+
+    with factory() as s:
+        packet, run = _dispatched(s)
+        add_override(s, packet.ref, OverrideKind.HOLD, actor=USER, reason="soft hold mid-run")
+        s.commit()
+        ref, run_id = packet.ref, run.id
+    a = factory()
+    try:
+        run = a.get(GenerationRun, run_id)
+        result = complete_generation(a, run, "output", FakeProvider(), lock=held(a))
+        assert result.child is not None
+        child_ref = result.child.ref
+        with factory() as b:  # before the commit: nothing of the seal is visible
+            parent = b.scalar(select(Packet).where(Packet.ref == ref))
+            assert parent.status is S.RUNNING and not parent.locked
+            assert b.scalar(select(func.count()).select_from(SealedBundle)) == 0
+            assert b.scalar(select(Packet).where(Packet.ref == child_ref)) is None
+        a.commit()
+    finally:
+        a.close()
+    with factory() as b:
+        parent = b.scalar(select(Packet).where(Packet.ref == ref))
+        child = b.scalar(select(Packet).where(Packet.ref == child_ref))
+        assert parent.status is S.SEALED and parent.locked
+        assert child is not None and child.parent_id == parent.id
+        held_child = (result.grade_e4 or 0) >= 8500
+        assert (child.status is S.HELD) is held_child  # the user's HOLD did not carry over
+        assert child.hold_reason == ("grade_met" if held_child else None)
