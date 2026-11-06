@@ -209,6 +209,9 @@ class GenerationRunState(StrEnum):
     FAILED = "failed"
     STALE = "stale"
     AWAITING_CONFIRMATION = "awaiting_confirmation"
+    #: M3a (R6 OQ18): the generation ended with no gradable output (timeout, disconnect,
+    #: adapter fault). Terminal; never a quality signal.
+    CRASHED = "crashed"
     # legacy (M2)
     CLAIMED = "claimed"
     SUCCEEDED = "succeeded"

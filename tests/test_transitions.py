@@ -68,13 +68,15 @@ def test_llm_actors_never_move_anything() -> None:
 def test_terminal_statuses_have_no_exits_and_archived_no_entries() -> None:
     assert not [k for k in PACKET_TRANSITIONS if S(k[0]) in TERMINAL]
     assert not [k for k in PACKET_TRANSITIONS if k[1] == S.ARCHIVED.value]
-    for state in (R.FAILED, R.STALE, R.SUCCEEDED, R.ABANDONED):
+    for state in (R.FAILED, R.STALE, R.SUCCEEDED, R.ABANDONED, R.CRASHED):
         assert not [k for k in RUN_TRANSITIONS if k[0] == state.value]
 
 
 def test_every_status_is_reachable_or_legacy() -> None:
     reached = {t for _, t in PACKET_TRANSITIONS} | {S.DRAFT.value}
-    legacy = {S.ARCHIVED, S.EVALUATING, S.IN_PROGRESS, S.PROCESSED}
+    # M3a (R6): nothing enters ``failed`` any more (crashes requeue); it keeps its exits for
+    # rows written before M3a
+    legacy = {S.ARCHIVED, S.EVALUATING, S.IN_PROGRESS, S.PROCESSED, S.FAILED}
     assert {s.value for s in PacketStatus} - reached == {s.value for s in legacy}
 
 

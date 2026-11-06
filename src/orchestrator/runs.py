@@ -202,8 +202,12 @@ def _packet_cas(
 def binding_mismatch(
     session: Session, run: GenerationRun, *, now: datetime | None = None, lease: bool = True
 ) -> str | None:
-    """Why ``run`` may no longer act, or ``None`` when every binding holds (C25, C26, E7, E8)."""
-    from orchestrator.gates import current_fingerprint
+    """Why ``run`` may no longer act, or ``None`` when every binding holds (C26, E7; M3a R6 Q7,
+    OQ19). Running generations are never overridden by calculations: a ``gate_revision``,
+    ``content_revision`` or ``input_hash`` change, an evaPacket or a soft HOLD does **not**
+    stale a run. What still stops it: a superseded fencing token or ownership, an expired
+    lease, an owner close (locked) or BLOCK, and a hard GLOBAL_PAUSE (lease revoked)."""
+    from orchestrator.governance import active_overrides
 
     session.refresh(run)
     packet = session.get(Packet, run.packet_id)
@@ -220,13 +224,12 @@ def binding_mismatch(
         return "packet is owned by another run"
     if packet.fencing_token != run.fencing_token:
         return f"fencing token {run.fencing_token} is obsolete (packet has {packet.fencing_token})"
-    if packet.gate_revision != run.gate_revision:
-        return f"gate revision changed ({run.gate_revision} → {packet.gate_revision})"
-    if (
-        packet.input_hash != run.input_hash
-        or current_fingerprint(session, packet) != run.input_hash
+    if PacketStatus(packet.status) is S.BLOCKED or any(
+        OverrideKind(o.kind) is OverrideKind.BLOCK for o in active_overrides(session, packet)
     ):
-        return "context fingerprint changed"
+        return "owner BLOCK"
+    if scope_status(session, "global", "*") is ScopeStatus.PAUSED:
+        return "global pause (hard halt: lease revoked)"
     if lease and run.lease_expires_at is not None and run.lease_expires_at < (now or utcnow()):
         return "lease expired"
     return None
@@ -243,8 +246,6 @@ def _binding_conditions(run: GenerationRun, status: PacketStatus) -> list[Any]:
         table.c.locked.is_(False),
         table.c.active_run_id == run.id,
         table.c.fencing_token == run.fencing_token,
-        table.c.gate_revision == run.gate_revision,
-        table.c.input_hash == run.input_hash,
         ~select(successor.c.id).where(successor.c.supersedes_id == table.c.id).exists(),
     ]
 
@@ -253,9 +254,10 @@ def guard_bindings(
     session: Session, run: GenerationRun, *, status: PacketStatus = PacketStatus.RUNNING
 ) -> None:
     """MR1: make the binding check part of the write. One compare-and-set on the packet row in
-    the caller's transaction re-checks version, status, lock, ownership (active run and F), G,
-    H and headship; it also takes the row lock (PostgreSQL) or the write lock (SQLite), so a
-    governance write committed after ``binding_mismatch`` read the row makes it match nothing.
+    the caller's transaction re-checks version, status, lock, ownership (active run and F) and
+    headship (M3a, R6 OQ19: not G or H); it also takes the row lock (PostgreSQL) or the write
+    lock (SQLite), so an ownership change committed after ``binding_mismatch`` read the row makes
+    it match nothing.
     Raises ``StaleRun``; the caller rolls back (or records a stale disposition)."""
     if run.fencing_token is None or run.gate_revision is None:
         raise StaleRun(f"run {run.id}: legacy run without a fencing token")
@@ -271,15 +273,13 @@ def guard_bindings(
 
 
 def _restricted(session: Session, packet: Packet) -> str | None:
-    """A hold, block, pause or confirmation that keeps a packet where it is (C25 / V2 / E7)."""
+    """A hold, block or confirmation that keeps a packet where it is (C25 / V2 / E7). A pause no
+    longer does: R6 OQ19 makes a hard pause revoke the lease (``running → queued``)."""
     from orchestrator.governance import active_overrides
 
     for o in active_overrides(session, packet):
         if OverrideKind(o.kind) in (OverrideKind.BLOCK, OverrideKind.HOLD):
             return f"{OverrideKind(o.kind).value} override"
-    for scope in packet_scopes(session, packet):
-        if scope_status(session, *scope) is ScopeStatus.PAUSED:
-            return f"scope {scope[0]}:{scope[1]} paused"
     pending = session.scalar(
         select(Confirmation.id).where(
             Confirmation.entity_id.in_([packet.id, packet.active_run_id or ""]),
@@ -310,10 +310,19 @@ def packet_scopes(session: Session, packet: Packet) -> list[tuple[str, str]]:
 # --------------------------------------------------------------------------- staleness
 
 
+#: where an owned, unrestricted packet goes when its run becomes stale (M3a, R6 OQ12/OQ19: a
+#: running genPacket is never demoted to evaluating_pre; its lease is revoked → queued)
+_RECOVER_TO: dict[PacketStatus, PacketStatus] = {
+    S.RUNNING: S.QUEUED,
+    S.AWAITING_CONFIRMATION: S.EVALUATING_PRE,
+}
+
+
 def stale_run(session: Session, run: GenerationRun, reason: str, *, actor: Actor = KERNEL) -> None:
-    """Make ``run`` stale (evented). The packet returns to ``evaluating_pre`` only when it is
-    still ``running`` and owned by this run with this run's F, and nothing restricts it (E7);
-    otherwise its state and restrictions are kept. Terminal packets are never touched."""
+    """Make ``run`` stale (evented). The packet returns to the queue (``running → queued``; a
+    parked one to ``evaluating_pre``) only when it is still owned by this run with this run's F
+    and nothing restricts it (E7); otherwise its state and restrictions are kept. Terminal
+    packets are never touched."""
     move_run(session, run, R.STALE, actor, reason, stale_reason=reason)
     _retire_parked_confirmations(session, run, actor, reason)
     packet = session.get(Packet, run.packet_id)
@@ -335,7 +344,7 @@ def stale_run(session: Session, run: GenerationRun, reason: str, *, actor: Actor
         _packet_cas(
             session,
             packet,
-            S.EVALUATING_PRE,
+            _RECOVER_TO[status],
             actor,
             f"run {run.id} stale: {reason}",
             where=owner,
@@ -453,7 +462,7 @@ def _recover_deferred(session: Session, packet: Packet, run: GenerationRun, acto
     _packet_cas(
         session,
         packet,
-        S.EVALUATING_PRE,
+        _RECOVER_TO[PacketStatus(packet.status)],
         actor,
         f"deferred recovery after stale run {run.id}",
         where=[
@@ -805,16 +814,18 @@ def assert_publishable(
 
 
 def _bump_pair(session: Session, packet: Packet, run: GenerationRun, cause: str, actor: Actor):
-    """R1 / Q5: check ``run.G == packet.G`` and move both to G + 1 in one transaction, so a
-    decision aimed at this run does not stale it. Any concurrent governance write loses here."""
+    """R1 as amended by R6 OQ19: a decision aimed at a parked run binds its confirmation (decided
+    once, by CAS) and the fencing token — not the gate revision. Packet and run gate revisions
+    each move by +1 in the same transaction (governance record); the packet-side UPDATE also
+    re-checks every remaining binding (MR1)."""
     table, runs = Packet.__table__, GenerationRun.__table__
     observed = run.gate_revision
-    if observed is None or packet.gate_revision != observed:
-        raise StaleRun(f"run {run.id}: gate revision changed")
-    a = session.connection().execute(  # MR1: every binding, not only G, in the same CAS
+    if observed is None:
+        raise StaleRun(f"run {run.id}: legacy run without a gate revision")
+    a = session.connection().execute(
         update(table)
         .where(*_binding_conditions(run, PacketStatus.AWAITING_CONFIRMATION))
-        .values(gate_revision=observed + 1)
+        .values(gate_revision=table.c.gate_revision + 1)
     )
     b = session.connection().execute(
         update(runs)
@@ -822,8 +833,13 @@ def _bump_pair(session: Session, packet: Packet, run: GenerationRun, cause: str,
         .values(gate_revision=observed + 1)
     )
     if a.rowcount != 1 or b.rowcount != 1:
-        raise LostRace(f"run {run.id}: a governance write changed the gate first")
-    set_committed_value(packet, "gate_revision", observed + 1)
+        raise LostRace(f"run {run.id}: the packet or run changed first")
+    new_gate = (
+        session.connection()
+        .execute(select(table.c.gate_revision).where(table.c.id == packet.id))
+        .scalar_one()
+    )
+    set_committed_value(packet, "gate_revision", new_gate)
     set_committed_value(run, "gate_revision", observed + 1)
     record_event(
         session,
@@ -833,8 +849,8 @@ def _bump_pair(session: Session, packet: Packet, run: GenerationRun, cause: str,
         entity_id=packet.id,
         entity_ref=packet.ref,
         entity_version=packet.version,
-        after={"gate_revision": observed + 1, "run": run.id, "cause": cause},
-        reason="decision aimed at this run (R1): packet and run bumped together",
+        after={"gate_revision": new_gate, "run": run.id, "cause": cause},
+        reason="decision aimed at this run (R1 / R6 OQ19): packet and run bumped together",
     )
     session.flush()
 
@@ -1107,3 +1123,149 @@ def try_claim(
                 log.info("%s: SQLite lock during claim; retry next tick (ruling 5)", ref)
                 return None
             raise
+
+
+# --------------------------------------------------------------------------- crashes (R6 OQ18)
+
+
+def crash_cooldown_seconds(session: Session, crash_count: int) -> int:
+    """``min(max, base · 2^(crash_count − 1))`` in whole seconds (integer only)."""
+    from orchestrator.settings_store import get_int
+
+    base = get_int(session, "crash.cooldown_base_sec", 30)
+    cap = get_int(session, "crash.cooldown_max_sec", 3600)
+    return min(cap, base * (2 ** max(0, crash_count - 1)))
+
+
+def record_crash(
+    session: Session,
+    run: GenerationRun,
+    reason: str,
+    *,
+    actor: Actor = KERNEL,
+    now: datetime | None = None,
+    lock: KernelLock | None = None,
+) -> int:
+    """A generation that ended with **no gradable output** (R6 OQ18; Q4 crash ≠ grade).
+
+    The run becomes ``crashed``; ``crash_count + 1``; the packet goes ``running → queued`` with
+    a cooldown ``min(3600, 30 · 2^(n−1))`` s and its ownership and lease released; at
+    ``crash.limit`` (5) it is then held (``hold_reason = crash_limit``). A ``crash_events`` row
+    feeds route health: 3 crashes on a channel within 300 s make the route unhealthy for 600 s.
+    No grade, no seal, no child, no ``gen_eva``. Returns the new crash count."""
+    from datetime import timedelta as _td
+
+    from orchestrator.db.models import CrashEvent, RouteHealth
+    from orchestrator.lifecycle import transition
+    from orchestrator.settings_store import get_int
+
+    _require_fence(lock, session, now)
+    now = now or utcnow()
+    packet = session.get(Packet, run.packet_id)
+    assert packet is not None
+    session.refresh(packet)
+    if packet.active_run_id != run.id or packet.fencing_token != run.fencing_token:
+        raise StaleRun(f"run {run.id}: a crash report for a run that no longer owns the packet")
+    move_run(session, run, R.CRASHED, actor, f"crash: {reason}", failure_kind="crash")
+    count = packet.crash_count + 1
+    cooldown = now + _td(seconds=crash_cooldown_seconds(session, count))
+    table = Packet.__table__
+    _packet_cas(
+        session,
+        packet,
+        S.QUEUED,
+        actor,
+        f"crash {count}: {reason} (no gradable output; cooldown until {cooldown.isoformat()})",
+        where=[table.c.active_run_id == run.id, table.c.fencing_token == run.fencing_token],
+        crash_count=count,
+        cooldown_until=cooldown,
+        active_run_id=None,
+        claimed_by=None,
+        lease_expires_at=None,
+        heartbeat_at=None,
+        recovery_pending=False,
+    )
+    crash = CrashEvent(
+        id=new_id(),
+        packet_id=packet.id,
+        run_id=run.id,
+        channel=Channel(run.channel).value if run.channel else None,
+        reason=reason,
+        created_at=now,
+    )
+    session.add(crash)
+    record_event(
+        session,
+        actor=actor,
+        action="run.crashed",
+        entity_type="crash_event",
+        entity_id=crash.id,
+        entity_ref=packet.ref,
+        entity_version=packet.version,
+        after={"crash_count": count, "run": run.id, "channel": crash.channel},
+        reason=reason,
+    )
+    session.flush()
+    if crash.channel is not None:
+        window = get_int(session, "route.crash_window_sec", 300)
+        recent = session.scalar(
+            select(func.count())
+            .select_from(CrashEvent)
+            .where(
+                CrashEvent.channel == crash.channel,
+                CrashEvent.created_at > now - _td(seconds=window),
+            )
+        )
+        if (recent or 0) >= get_int(session, "route.crash_threshold", 3):
+            health = session.get(RouteHealth, crash.channel)
+            until = now + _td(seconds=get_int(session, "route.unhealthy_sec", 600))
+            if health is None:
+                health = RouteHealth(channel=crash.channel, crashes=0)
+                session.add(health)
+            health.unhealthy_until = until
+            health.crashes = int(recent or 0)
+            record_event(
+                session,
+                actor=actor,
+                action="route.unhealthy",
+                entity_type="route_health",
+                entity_id=crash.channel,
+                after={"unhealthy_until": until.isoformat(), "crashes_in_window": recent},
+                reason=f"{recent} crashes within {window} s (R6 OQ18)",
+            )
+            session.flush()
+    if count >= get_int(session, "crash.limit", 5):
+        record_event(
+            session,
+            actor=actor,
+            action="packet.hold_reason",
+            entity_type="packet",
+            entity_id=packet.id,
+            entity_ref=packet.ref,
+            after={"hold_reason": "crash_limit", "crash_count": count},
+        )
+        packet.hold_reason = "crash_limit"
+        transition(packet, S.HELD, actor, f"crash limit reached ({count})", session=session)
+    return count
+
+
+def abort_run(session: Session, run_id: str, *, actor: Actor, reason: str) -> None:
+    """CFO_ABORT (R6 OQ19): an owner's hard halt of a running generation revokes its lease; the
+    run is stale and the packet returns to ``queued``."""
+    if not actor.is_user:
+        raise PermissionError("only a user may abort a run")
+    if not reason.strip():
+        raise RunError("an abort needs a reason")
+    run = session.get(GenerationRun, run_id)
+    if run is None:
+        raise RunError(f"no run {run_id}")
+    record_event(
+        session,
+        actor=actor,
+        action="run.abort_requested",
+        entity_type="generation_run",
+        entity_id=run.id,
+        entity_version=run.packet_version,
+        reason=reason,
+    )
+    stale_run(session, run, f"CFO_ABORT by {actor}: {reason}", actor=KERNEL)

@@ -79,10 +79,11 @@ def test_completion_requires_lock_on_update_and_insert(engine, tree) -> None:
     # walk the M3 table to evaluating_post, so only the lock invariant can reject what follows
     for status in ("evaluating_pre", "ready", "queued", "running", "evaluating_post"):
         raw(engine, "UPDATE packets SET status = :s WHERE id = :id", s=status, id=pid)
-    assert_db_rejects(engine, "UPDATE packets SET status = 'completed' WHERE id = :id", id=pid)
+    # M3a: a genPacket leaves evaluating_post sealed; the lock invariant applies to sealed too
+    assert_db_rejects(engine, "UPDATE packets SET status = 'sealed' WHERE id = :id", id=pid)
     assert_db_rejects(
         engine,
-        "UPDATE packets SET status = 'completed', locked = :t WHERE id = :id",
+        "UPDATE packets SET status = 'sealed', locked = :t WHERE id = :id",
         id=pid,
         t=True,
     )  # completed_at missing

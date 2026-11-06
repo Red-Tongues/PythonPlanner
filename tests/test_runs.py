@@ -90,11 +90,8 @@ def test_every_claim_carries_a_higher_token(session: Session) -> None:
     from orchestrator.runs import stale_run
 
     stale_run(session, run, stale_reason)
-    assert packet.status is S.EVALUATING_PRE and packet.active_run_id is None
-    for status in (S.READY, S.QUEUED):
-        from orchestrator.lifecycle import transition
-
-        transition(packet, status, KERNEL)
+    # M3a (R6 OQ19): the lease is revoked and the packet requeued, never demoted
+    assert packet.status is S.QUEUED and packet.active_run_id is None
     second = claim(session, packet.ref, "kernel-b")
     assert second.fencing_token == 2 and packet.fencing_token == 2
     assert "obsolete" in (binding_mismatch(session, run) or "") or run.state is R.STALE
@@ -151,23 +148,37 @@ def test_recorded_deadline_expiry_allows_a_retry(session: Session) -> None:
     assert (first.attempt, second.attempt) == (1, 2)
 
 
-def test_a_governance_write_stales_the_run_before_dispatch(session: Session) -> None:
+def test_a_soft_hold_never_stops_a_run_but_a_block_does(session: Session) -> None:
+    """M3a (R6 OQ19, AC22/AC34): a HOLD and its gate bump do not stale the run; a BLOCK does."""
     packet, run = claimed_run(session)
     add_override(session, packet.ref, OverrideKind.HOLD, actor=USER, reason="wait")
-    with pytest.raises(StaleRun, match="gate revision"):
-        authorise_dispatch(session, run, lock=held(session))
-    assert attempts(session) == 0 and run.state is R.PLANNED  # unchanged on refusal
+    assert binding_mismatch(session, run) is None
+    authorise_dispatch(session, run, lock=held(session))
+    assert reconcile_runs(session) == [] and run.state is R.DISPATCHED
+    add_override(session, packet.ref, OverrideKind.BLOCK, actor=USER, reason="stop")
+    assert binding_mismatch(session, run) == "owner BLOCK"
     assert reconcile_runs(session) == [run.id]
-    # E7/V2: a HOLD applies, so only the run goes stale; the packet keeps its state
+    # E7/V2: a HOLD/BLOCK applies, so only the run goes stale; the packet keeps its state
     assert run.state is R.STALE and packet.status is S.RUNNING
     assert packet.recovery_pending and packet.active_run_id == run.id
 
 
-def test_stale_reset_returns_an_unrestricted_owned_packet_to_evaluation(session: Session) -> None:
+def test_calculations_never_stale_a_run_and_expiry_requeues(session: Session) -> None:
+    """M3a (R6 Q7, OQ19; AC22, AC34): a waiver (G + 1), a content edit and a project edit
+    leave the run alone; an expired lease stales it and requeues the packet."""
+    from datetime import timedelta
+
+    from orchestrator.repository import update_packet, update_project
+
     packet, run = claimed_run(session)
     grant_waiver(session, packet.ref, "tools_needed", actor=USER, reason="fine")  # G + 1
-    assert reconcile_runs(session) == [run.id]
-    assert run.state is R.STALE and packet.status is S.EVALUATING_PRE
+    update_packet(session, packet, {"prompt_description": "Edited mid-run."}, actor=USER)
+    update_project(session, packet.project, {"brief": "Edited too."}, actor=USER)
+    assert binding_mismatch(session, run) is None and reconcile_runs(session) == []
+    later = run.lease_expires_at + timedelta(seconds=1)
+    assert binding_mismatch(session, run, now=later) == "lease expired"
+    assert reconcile_runs(session, now=later) == [run.id]
+    assert run.state is R.STALE and packet.status is S.QUEUED
 
 
 def test_a_stale_run_never_moves_a_packet_it_does_not_own(session: Session) -> None:
@@ -201,17 +212,25 @@ def test_pause_refuses_dispatch_without_touching_gates(session: Session) -> None
         assert session.scalar(select(func.count()).select_from(Event).where(Event.action == kind))
 
 
-def test_a_stale_run_keeps_a_paused_packet_where_it_is(session: Session) -> None:
+def test_a_global_pause_revokes_the_lease(session: Session) -> None:
+    """M3a (R6 OQ19): GLOBAL_PAUSE is a hard halt: running → queued, ownership released."""
     packet, run = claimed_run(session)
     pause(session, "global", "*", actor=USER, reason="stop everything")
-    grant_waiver(session, packet.ref, "tools_needed", actor=USER, reason="x")
-    reconcile_runs(session)
-    assert run.state is R.STALE and packet.status is S.RUNNING  # restriction kept (V2)
-    assert packet.recovery_pending and packet.active_run_id == run.id
+    assert reconcile_runs(session) == [run.id]
+    assert run.state is R.STALE and packet.status is S.QUEUED
+    assert not packet.recovery_pending and packet.active_run_id is None
     resume(session, "global", "*", actor=USER, reason="continue")
     assert reconcile_runs(session) == []
-    assert packet.status is S.EVALUATING_PRE
-    assert not packet.recovery_pending and packet.active_run_id is None
+
+
+def test_cfo_abort_revokes_the_lease(session: Session) -> None:
+    from orchestrator.runs import abort_run
+
+    packet, run = claimed_run(session)
+    with pytest.raises(PermissionError):
+        abort_run(session, run.id, actor=KERNEL, reason="x")
+    abort_run(session, run.id, actor=USER, reason="wrong direction")
+    assert run.state is R.STALE and packet.status is S.QUEUED and packet.active_run_id is None
 
 
 def test_dispatch_reserves_budget_or_changes_nothing(session: Session) -> None:
@@ -301,8 +320,9 @@ def test_acceptance_needs_every_binding(session: Session) -> None:
     packet, run, attempt = _dispatched(session)
     record_outcome(session, attempt, AttemptOutcome.SUCCEEDED, exit_code=0)
     move_run(session, run, R.VALIDATING, KERNEL, "exit 0")
-    grant_waiver(session, packet.ref, "tools_needed", actor=USER, reason="x")
-    with pytest.raises(StaleRun):
+    grant_waiver(session, packet.ref, "tools_needed", actor=USER, reason="x")  # not a binding
+    add_override(session, packet.ref, OverrideKind.BLOCK, actor=USER, reason="stop")
+    with pytest.raises(StaleRun, match="BLOCK"):
         accept_run(session, run, "m" * 64, lock=held(session))
     assert run.state is R.STALE
 
@@ -313,8 +333,12 @@ def test_accepted_run_goes_stale_before_publication_on_a_context_change(session:
     accept_run(session, run, "m" * 64, lock=held(session))
     lock = held(session)
     assert_publishable(session, run, lock=lock)  # all bindings hold
-    supersede_objective(session, packet.objective.ref, {"brief": "changed"}, actor=USER)
-    with pytest.raises(StaleRun):  # E8: H mismatch (and G bump) before the commit is recorded
+    from orchestrator.repository import update_objective
+
+    update_objective(session, packet.objective, {"brief": "changed"}, actor=USER)
+    assert_publishable(session, run, lock=lock)  # M3a (Q7): upstream edits never stale it
+    add_override(session, packet.ref, OverrideKind.BLOCK, actor=USER, reason="stop")
+    with pytest.raises(StaleRun):  # an owner BLOCK still does, before the commit is recorded
         assert_publishable(session, run, lock=lock)
     assert run.state is R.STALE
 
@@ -383,12 +407,18 @@ def test_approved_resume_renews_expired_packet_and_run_leases(session: Session) 
     assert run.lease_expires_at is not None and run.lease_expires_at > now
 
 
-def test_approval_after_another_governance_write_is_refused(session: Session) -> None:
+def test_approval_after_a_block_is_refused(session: Session) -> None:
+    """R6 OQ19: exit-3 guards bind the confirmation and the fencing token, not G; a waiver no
+    longer stales a parked run, an owner BLOCK still does."""
     packet, run, confirmation = _parked(session)
-    grant_waiver(session, packet.ref, "tools_needed", actor=USER, reason="x")  # not the approval
+    grant_waiver(session, packet.ref, "tools_needed", actor=USER, reason="x")  # not a binding
+    assert binding_mismatch(session, run, lease=False) is None
+    add_override(session, packet.ref, OverrideKind.BLOCK, actor=USER, reason="stop")
     assert approve_run(session, confirmation.id, actor=USER) is None
     assert attempts(session) == 1  # nothing new was authorised (the caller rolls back)
-    assert run.state is R.STALE and packet.status is S.EVALUATING_PRE
+    # the BLOCK restricts the packet: only the run goes stale (E7/V2)
+    assert run.state is R.STALE and packet.status is S.AWAITING_CONFIRMATION
+    assert packet.recovery_pending
     assert confirmation.status is ConfirmationStatus.RETIRED
 
 

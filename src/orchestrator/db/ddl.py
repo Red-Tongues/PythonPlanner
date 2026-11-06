@@ -741,7 +741,7 @@ RUN_FROZEN: tuple[str, ...] = (
 )
 #: generation_runs columns that may be set once and never changed afterwards
 RUN_WRITE_ONCE: tuple[str, ...] = ("manifest_hash", "commit_sha")
-RUN_TERMINAL_SQL = "'failed', 'stale', 'succeeded', 'abandoned'"
+RUN_TERMINAL_SQL = "'failed', 'stale', 'succeeded', 'abandoned', 'crashed'"
 RUN_BINDINGS_MSG = "generation run bindings are frozen (gate revision moves by +1 only)"
 GOVERNOR_MSG = "a governor state change must increase its revision and keep its scope"
 

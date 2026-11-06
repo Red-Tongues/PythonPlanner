@@ -48,10 +48,11 @@ def test_happy_path_writes_one_event_per_transition(session: Session, tree) -> N
     assert [e.after["status"] for e in events] == [s.value for s in HAPPY_PATH]
     assert events[0].before["status"] == "draft"
     assert all(e.actor == str(KERNEL) for e in events)
-    with pytest.raises(InvalidTransitionError, match="cannot complete yet"):
-        transition(packet, S.COMPLETED, KERNEL)  # no artifact or post-phase consensus yet
-    with pytest.raises(InvalidTransitionError, match="cannot complete yet"):
-        transition(packet, S.COMPLETED, USER, "accepted by hand")  # users too (M2.1 fix 5)
+    # M3a (R6): evaluating_post → completed is retired for genPackets; they seal after gen_eva
+    with pytest.raises(InvalidTransitionError, match="not in the packet table"):
+        transition(packet, S.COMPLETED, KERNEL)
+    with pytest.raises(InvalidTransitionError, match="not in the packet table"):
+        transition(packet, S.COMPLETED, USER, "accepted by hand")
     complete_with_evidence(session, packet, KERNEL)  # M3a: a genPacket finishes sealed
     assert packet.locked and packet.completed_at is not None
     assert packet.status is S.SEALED
@@ -96,8 +97,12 @@ def test_terminal_packets_are_immutable(session: Session, tree) -> None:
         transition(packet, S.ARCHIVED, USER)
 
 
-def test_failed_packets_can_retry(session: Session, tree) -> None:
+def test_a_running_packet_never_fails_it_is_requeued(session: Session, tree) -> None:
+    """M3a (R6 transitions): running → failed is removed; a crash requeues (running → queued)."""
     packet = tree.packets[0]
-    for status in [S.EVALUATING_PRE, S.READY, S.QUEUED, S.RUNNING, S.FAILED, S.EVALUATING_PRE]:
+    for status in [S.EVALUATING_PRE, S.READY, S.QUEUED, S.RUNNING]:
         transition(packet, status, KERNEL)
-    assert packet.status is S.EVALUATING_PRE and not packet.locked
+    with pytest.raises(InvalidTransitionError, match="not in the packet table"):
+        transition(packet, S.FAILED, KERNEL)
+    transition(packet, S.QUEUED, KERNEL)
+    assert packet.status is S.QUEUED and not packet.locked
