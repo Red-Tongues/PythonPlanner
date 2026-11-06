@@ -13,6 +13,30 @@ Newest entries first. Every agent session appends an entry: what changed, decisi
 
 ---
 
+## 2026-11-06 — M3a checkpoint 1 (after C3), for Argon's audit (Claude Code)
+
+Branch `m3a/genpacket-loop` (from `docs/t1c-v3-m3a-spec` @ 8d7058d, R6 included). Pushed after each commit. Not merged; no PR yet.
+
+**What landed**
+- **C1 a60a233 — schema and triggers.** New tables `content_blobs`, `raw_revision_outbox`, `field_revisions`, `sealed_bundles` (`UNIQUE(packet_id)`), `eva_context_links`, `eva_discard_log`, `queue_epoch_snapshot`, `feedback_events`, `crash_events`, `route_health`. New packet columns `content_revision`, `last_producer`, `crash_count`, `cooldown_until`, `hold_reason`, `ready_since`, `lineage_depth`, `parent_bundle_id/hash`; `generation_runs.claim_content_revision` (frozen). Projects/objectives get `content_revision`, `last_producer`. New locked terminal status `sealed` and the row `evaluating_post → sealed`.
+  - Guards stay BEFORE triggers; outbox capture is an AFTER UPDATE trigger on both dialects (OQ32). `content_revision` is bumped only when an audited content column changes (OQ33); status, gate and route changes never bump it.
+  - T1–T6 of the T1-C v2 trigger proof pass against the production DDL, plus "rejected transition / locked edit writes zero outbox rows and leaves `content_revision` unchanged".
+- **C2 b326816 — in-place edits with history.** `update_packet/update_project/update_objective` edit in place and drain the outbox synchronously into blobs + `field_revisions` (one `<entity>.revised` event per revision group). `supersede_*` retired from `src/` (legacy rows and their lineage triggers stay; tests build them via `tests/legacy.py`). `snapshot_at` reconstructs a packet at a content revision (OQ20). A failed drain rolls back the whole edit (test, both dialects).
+- **C3 10ef23b — context links and `question_context`.** Intra-packet `input_hash`; `eva_context_links` with section-offset quote attribution (OQ22), hard-dependency, definition and preset links (OQ23); `v_context_link_status`; `v_field_consensus` adds `question_context`, `question_context_count`, `question_weight_e4` (OQ4) and no longer nulls results for context or definition/preset bumps. Drain re-verifies quotes (OQ34); a failed re-verification rolls the edit back. `require_current_context` retired; ready/queued packets enriched in place, never demoted (OQ12).
+
+**Tests:** 651 collected (392 SQLite, 259 PostgreSQL 16). Last full run: 645 passed, 4 skipped (the existing dialect-specific skips), then the two new rollback tests passed on both. Ruff clean.
+
+**Deviations so far (from R6 / spec)**
+- OQ24 uniqueness `(objective_id, position, lineage_depth)` is an **index, not UNIQUE**: legacy superseded versions and split children share positions, and many fixtures insert such rows. Display order is `(objective, position, lineage_depth, ref)`.
+- OQ21: the `supersedes_id` columns, head views and lineage triggers are **kept** for legacy rows (no live data to migrate, but removing them would touch every lineage test); no `src/` path writes them.
+- `eva_context_links` link to definition and preset revisions use `source_type = 'definition'` (preset links carry `source_id = preset:<field>:<phase>`).
+- The content address of an evaPacket now includes the source-document hash, so a result is never reused across different upstream context.
+- Settings for every R6 constant were added now (`SETTINGS_M3A`); most are read from C4 on.
+
+**Next (in order):** docs-only commit folding R6 into the M3a spec, Requirement F and CLAUDE.md Golden Rule 1 (OQ26); then C4 (queues, readiness, admission, lockout); C5 (gen_eva, seal, child, crash, runs bindings, transition table); C6 (docs, PR).
+
+---
+
 ## 2026-11-06 00:05-00:40 - R5: independent audit of the CFO directive, PM decisions (PM)
 
 - Added the R5 audit: Argon directive findings, R&D queue-score critique and GitHub Copilot CI/branch report. Product decisions remain the CFO's; PM decisions are triage and recommendations.
