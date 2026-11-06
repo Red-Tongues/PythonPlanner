@@ -9,7 +9,14 @@ from sqlalchemy.orm import Session
 
 from orchestrator.db import init_db
 from orchestrator.db.models import Event
-from orchestrator.db.seed import AUTONOMY_SCOPES, PRESETS, SETTINGS, THRESHOLDS, ensure_defaults
+from orchestrator.db.seed import (
+    AUTONOMY_SCOPES,
+    PRESETS,
+    SETTINGS,
+    SETTINGS_M3A,
+    THRESHOLDS,
+    ensure_defaults,
+)
 from orchestrator.repository import set_setting
 from tests.conftest import USER
 
@@ -133,7 +140,7 @@ EXPECTED_SETTINGS = {
     ("branching.max_depth", 2),
     ("branching.max_descendants", 12),
     ("stats.score_threshold", 7),
-}
+} | {(key, value) for key, value, _ in SETTINGS_M3A}  # M3a settings (R6)
 #: 0005 eva presets: (field, phase, tier, required, hard, gate operator, gate value)
 EXPECTED_GATING_PRESETS = {
     ("safety_clear", "pre", 1, True, True, "=", "true"),

@@ -187,12 +187,12 @@ def test_content_addressed_reuse(session: Session, tree) -> None:
     ref = tree.packets[0].ref
     _evaluate(session, ref, FakeProvider())
     # a governance-only change keeps the target hash: every evaPacket is reused, no model calls
-    v2 = supersede_packet(session, ref, {"repo_target_path": "docs/x.md"}, actor=USER)
+    v2 = supersede_packet(session, ref, {"manual_boost": 2}, actor=USER)
     provider = FakeProvider()
     report = evaluate_packet(session, v2, provider)
     assert report.calls == 0 and len(report.reused) == PRE_FIELDS and report.status == "ready"
     # a different model configuration is a different content address: no reuse
-    v3 = supersede_packet(session, ref, {"repo_target_path": "docs/y.md"}, actor=USER)
+    v3 = supersede_packet(session, ref, {"manual_boost": 3}, actor=USER)
     specs = {r: ModelSpec(name=f"fake-{r}", digest="d" * 64) for r in ("a", "b", "c")}
     report = evaluate_packet(session, v3, FakeProvider(), specs=specs)
     assert report.reused == [] and report.calls == PRE_FIELDS * 6
@@ -248,7 +248,7 @@ def test_pass_items_are_append_only(engine: Engine, session: Session, tree) -> N
 def test_core_edit_after_evaluation_is_in_place_and_makes_results_pending(
     session: Session, tree
 ) -> None:
-    """M3a (R6 OQ21): a core edit of an evaluated packet keeps the row; its input hash
+    """M3a (R6 OQ21): a core edit of an evaluated packet keeps the row; its intra-packet hash
     changes, so its own results stop being current until re-evaluated."""
     packet = tree.packets[0]
     _evaluate(session, packet.ref, FakeProvider())
@@ -299,13 +299,15 @@ def test_quote_normalisation_is_conservative() -> None:
 # ---------------------------- currency of results, escalation, post-evaluation (M2.1 fixes 3, 4, 9)
 
 
-def test_definition_change_makes_results_pending_and_unreusable(session, tree) -> None:  # type: ignore[no-untyped-def]
+def test_definition_change_questions_results_and_is_unreusable(session, tree) -> None:  # type: ignore[no-untyped-def]
     packet = tree.packets[0]
     evaluate_packet(session, packet, FakeProvider(), fields=["coding_intensity"])
     assert field_status(session, packet, "coding_intensity") == "accepted"
     old = session.scalar(select(EvaPacket.content_address))
     bump_definition(session, "coding_intensity")
-    assert field_status(session, packet, "coding_intensity") == "pending"
+    # R6 OQ23: a definition bump questions the result (direct); it never invalidates it
+    assert field_status(session, packet, "coding_intensity") == "accepted"
+    assert question_context(session, packet, "coding_intensity") == (1, 750)
     report = evaluate_packet(session, packet, FakeProvider(), fields=["coding_intensity"])
     assert report.reused == [] and report.calls == 6
     assert (
@@ -315,6 +317,7 @@ def test_definition_change_makes_results_pending_and_unreusable(session, tree) -
         ).all()
     )
     assert field_status(session, packet, "coding_intensity") == "accepted"
+    assert question_context(session, packet, "coding_intensity") == (0, 0)
 
 
 def test_exemplar_change_changes_the_content_address(session, tree) -> None:  # type: ignore[no-untyped-def]
@@ -333,7 +336,7 @@ def test_exemplar_change_changes_the_content_address(session, tree) -> None:  # 
     assert report.reused == [] and report.calls == 6  # same text, new exemplars: no reuse
 
 
-def test_new_preset_revision_makes_results_pending(session, tree) -> None:  # type: ignore[no-untyped-def]
+def test_new_preset_revision_questions_results(session, tree) -> None:  # type: ignore[no-untyped-def]
     packet = tree.packets[0]
     evaluate_packet(session, packet, FakeProvider(), fields=["coding_intensity"])
     session.add(
@@ -354,7 +357,8 @@ def test_new_preset_revision_makes_results_pending(session, tree) -> None:  # ty
     )
     record_event(session, actor=USER, action="t", entity_type="eva_preset")
     session.flush()
-    assert field_status(session, packet, "coding_intensity") == "pending"
+    assert field_status(session, packet, "coding_intensity") == "accepted"  # R6 OQ23
+    assert question_context(session, packet, "coding_intensity") == (1, 750)
 
 
 def test_unresolved_escalation_sends_any_tier_to_needs_review(session, tree) -> None:  # type: ignore[no-untyped-def]
@@ -380,3 +384,14 @@ def test_post_evaluation_reads_the_newest_artifact(session: Session) -> None:
         session.scalars(select(EvaPacket.target_hash).where(EvaPacket.phase == EvaPhase.POST))
     )
     assert report.fields and targets == {artifact.sha256}
+
+
+def question_context(session, packet, name):  # type: ignore[no-untyped-def]
+    row = session.execute(
+        text(
+            "SELECT question_context, question_weight_e4 FROM v_field_status "
+            "WHERE packet_id = :id AND field_name = :f AND phase = 'pre'"
+        ),
+        {"id": packet.id, "f": name},
+    ).one()
+    return (int(row[0]), int(row[1]))

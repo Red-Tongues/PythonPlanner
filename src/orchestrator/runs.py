@@ -1085,22 +1085,18 @@ def cancel_run(session: Session, run_id: str, *, actor: Actor, reason: str) -> N
 def try_claim(
     factory: sessionmaker[Session], ref: str, worker: str, *, now: datetime | None = None
 ) -> str | None:
-    """The kernel's claim with M2.1 rulings 4–5 (C25): a context mismatch is **committed** (so
-    the packet's return to ``evaluating_pre`` persists); a lost claim — including SQLite's
-    database lock — rolls back and is retried next tick. Returns the run id, or ``None``."""
+    """The kernel's claim (M2.1 ruling 5, C25): a lost claim — including SQLite's database lock —
+    rolls back and is retried next tick. Returns the run id, or ``None``. (M3a retired the
+    context-changed revert of ruling 4: upstream edits raise ``question_context`` instead.)"""
     from sqlalchemy.exc import OperationalError
 
-    from orchestrator.queue import ClaimError, ContextChanged, claim
+    from orchestrator.queue import ClaimError, claim
 
     with factory() as session:
         try:
             run = claim(session, ref, worker, now=now)
             session.commit()
             return run.id
-        except ContextChanged:
-            session.commit()  # ruling 4: never roll back the audited revert
-            log.info("%s: context changed at claim; sent back to evaluating_pre", ref)
-            return None
         except ClaimError as exc:
             session.rollback()
             log.info("%s: claim lost (%s)", ref, exc)

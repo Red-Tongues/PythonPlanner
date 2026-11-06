@@ -113,6 +113,7 @@ VIEWS: tuple[str, ...] = (
     "v_packet_heads",
     "v_eva_progress",
     "v_eva_item_consensus",
+    "v_context_link_status",
     "v_field_consensus",
     "v_field_status",
     "v_packet_stats",
@@ -1287,6 +1288,13 @@ SELECT r.eva_packet_id, r.packet_id, r.packet_version, r.eval_cycle_id, r.field_
             WHEN r.complete = 1 AND r.winner IN ('b', 'both') THEN r.vb
             ELSE NULL END AS winning_value
 FROM r""",
+        """CREATE VIEW v_context_link_status AS
+SELECT l.id AS link_id, l.eva_packet_id, l.packet_id, l.field_name, l.source_type,
+       l.source_id, l.source_ref, l.source_revision, l.link_strength, l.link_reason,
+       CASE l.source_type WHEN 'project' THEN (SELECT x.content_revision FROM projects x WHERE x.id = l.source_id) WHEN 'objective' THEN (SELECT x.content_revision FROM objectives x WHERE x.id = l.source_id) WHEN 'packet' THEN (SELECT x.content_revision FROM packets x WHERE x.id = l.source_id) ELSE COALESCE((SELECT d.version FROM candidate_field_definitions d WHERE d.name = l.source_id), (SELECT MAX(ps.revision) FROM eva_presets ps WHERE 'preset:' || ps.field_name || ':' || ps.phase = l.source_id)) END AS current_revision,
+       CASE WHEN l.is_questioned OR CASE l.source_type WHEN 'project' THEN (SELECT x.content_revision FROM projects x WHERE x.id = l.source_id) WHEN 'objective' THEN (SELECT x.content_revision FROM objectives x WHERE x.id = l.source_id) WHEN 'packet' THEN (SELECT x.content_revision FROM packets x WHERE x.id = l.source_id) ELSE COALESCE((SELECT d.version FROM candidate_field_definitions d WHERE d.name = l.source_id), (SELECT MAX(ps.revision) FROM eva_presets ps WHERE 'preset:' || ps.field_name || ':' || ps.phase = l.source_id)) END > l.source_revision THEN 1 ELSE 0 END
+         AS questioned
+FROM eva_context_links l""",
         """CREATE VIEW v_field_consensus AS
 WITH art AS (
   SELECT a.packet_id, a.sha256,
@@ -1299,11 +1307,7 @@ bound AS (
          CASE WHEN ((e.phase = 'pre' AND e.target_hash = p.input_hash)
                     OR (e.phase = 'post' AND e.target_hash = la.sha256))
                    AND ps.enabled
-                   AND ps.revision = (SELECT MAX(p2.revision) FROM eva_presets p2
-                                      WHERE p2.field_name = e.field_name
-                                        AND p2.phase = e.phase)
                    AND d.enabled
-                   AND e.definition_version = d.version
               THEN 1 ELSE 0 END AS is_current
   FROM eva_packets e
   JOIN packets p ON p.id = e.packet_id
@@ -1322,6 +1326,13 @@ cand AS (
                                      bound.escalation DESC, bound.created_at DESC,
                                      bound.id DESC) AS rn
   FROM bound
+),
+q AS (
+  SELECT ls.eva_packet_id, SUM(ls.questioned) AS qn,
+         MAX(CASE WHEN ls.questioned = 1 AND ls.link_strength = 'direct' THEN 1 ELSE 0 END)
+           AS qd
+  FROM v_context_link_status ls
+  GROUP BY ls.eva_packet_id
 )
 SELECT p.id AS packet_id, p.ref AS packet_ref, p.version AS packet_version,
        c.field_name, c.phase, c.item_key, c.kind,
@@ -1335,10 +1346,17 @@ SELECT p.id AS packet_id, p.ref AS packet_ref, p.version AS packet_version,
        CASE WHEN cand.is_current = 1 AND c.status = 'accepted' THEN c.winning_value
             ELSE NULL END AS final_value,
        c.supports, c.contradictions, c.unverified, c.eva_packet_id, c.eval_cycle_id,
-       cand.is_current
+       cand.is_current,
+       CASE WHEN p.status IN ('waiting_for_children', 'archived') THEN 0 WHEN COALESCE(q.qn, 0) > 0 THEN 1 ELSE 0 END
+         AS question_context,
+       CASE WHEN p.status IN ('waiting_for_children', 'archived') THEN 0 ELSE COALESCE(q.qn, 0) END AS question_context_count,
+       CAST(CASE WHEN p.status IN ('waiting_for_children', 'archived') THEN 0 WHEN q.qd = 1 THEN COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'qctx.w_direct_e4'), 750)
+                 WHEN COALESCE(q.qn, 0) > 0 THEN COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'qctx.w_periph_e4'), 250) ELSE 0 END AS INTEGER)
+         AS question_weight_e4
 FROM cand
 JOIN packets p ON p.id = cand.packet_id
 JOIN v_eva_item_consensus c ON c.eva_packet_id = cand.id
+LEFT JOIN q ON q.eva_packet_id = cand.id
 WHERE cand.rn = 1""",
         """CREATE VIEW v_field_status AS
 SELECT c.packet_id, c.packet_ref, c.packet_version, c.field_name, c.phase, c.kind,
@@ -1350,7 +1368,10 @@ SELECT c.packet_id, c.packet_ref, c.packet_version, c.field_name, c.phase, c.kin
        SUM(CASE WHEN c.status = 'accepted' THEN 1 ELSE 0 END) AS accepted_items,
        SUM(CASE WHEN c.status = 'disputed' THEN 1 ELSE 0 END) AS disputed_items,
        MIN(c.confidence) AS min_confidence,
-       MAX(c.eva_packet_id) AS eva_packet_id
+       MAX(c.eva_packet_id) AS eva_packet_id,
+       MAX(c.question_context) AS question_context,
+       MAX(c.question_context_count) AS question_context_count,
+       MAX(c.question_weight_e4) AS question_weight_e4
 FROM v_field_consensus c
 GROUP BY c.packet_id, c.packet_ref, c.packet_version, c.field_name, c.phase, c.kind""",
         """CREATE VIEW v_packet_stats AS
@@ -3080,6 +3101,13 @@ SELECT r.eva_packet_id, r.packet_id, r.packet_version, r.eval_cycle_id, r.field_
             WHEN r.complete = 1 AND r.winner IN ('b', 'both') THEN r.vb
             ELSE NULL END AS winning_value
 FROM r""",
+        """CREATE VIEW v_context_link_status AS
+SELECT l.id AS link_id, l.eva_packet_id, l.packet_id, l.field_name, l.source_type,
+       l.source_id, l.source_ref, l.source_revision, l.link_strength, l.link_reason,
+       CASE l.source_type WHEN 'project' THEN (SELECT x.content_revision FROM projects x WHERE x.id = l.source_id) WHEN 'objective' THEN (SELECT x.content_revision FROM objectives x WHERE x.id = l.source_id) WHEN 'packet' THEN (SELECT x.content_revision FROM packets x WHERE x.id = l.source_id) ELSE COALESCE((SELECT d.version FROM candidate_field_definitions d WHERE d.name = l.source_id), (SELECT MAX(ps.revision) FROM eva_presets ps WHERE 'preset:' || ps.field_name || ':' || ps.phase = l.source_id)) END AS current_revision,
+       CASE WHEN l.is_questioned OR CASE l.source_type WHEN 'project' THEN (SELECT x.content_revision FROM projects x WHERE x.id = l.source_id) WHEN 'objective' THEN (SELECT x.content_revision FROM objectives x WHERE x.id = l.source_id) WHEN 'packet' THEN (SELECT x.content_revision FROM packets x WHERE x.id = l.source_id) ELSE COALESCE((SELECT d.version FROM candidate_field_definitions d WHERE d.name = l.source_id), (SELECT MAX(ps.revision) FROM eva_presets ps WHERE 'preset:' || ps.field_name || ':' || ps.phase = l.source_id)) END > l.source_revision THEN 1 ELSE 0 END
+         AS questioned
+FROM eva_context_links l""",
         """CREATE VIEW v_field_consensus AS
 WITH art AS (
   SELECT a.packet_id, a.sha256,
@@ -3092,11 +3120,7 @@ bound AS (
          CASE WHEN ((e.phase = 'pre' AND e.target_hash = p.input_hash)
                     OR (e.phase = 'post' AND e.target_hash = la.sha256))
                    AND ps.enabled
-                   AND ps.revision = (SELECT MAX(p2.revision) FROM eva_presets p2
-                                      WHERE p2.field_name = e.field_name
-                                        AND p2.phase = e.phase)
                    AND d.enabled
-                   AND e.definition_version = d.version
               THEN 1 ELSE 0 END AS is_current
   FROM eva_packets e
   JOIN packets p ON p.id = e.packet_id
@@ -3115,6 +3139,13 @@ cand AS (
                                      bound.escalation DESC, bound.created_at DESC,
                                      bound.id DESC) AS rn
   FROM bound
+),
+q AS (
+  SELECT ls.eva_packet_id, SUM(ls.questioned) AS qn,
+         MAX(CASE WHEN ls.questioned = 1 AND ls.link_strength = 'direct' THEN 1 ELSE 0 END)
+           AS qd
+  FROM v_context_link_status ls
+  GROUP BY ls.eva_packet_id
 )
 SELECT p.id AS packet_id, p.ref AS packet_ref, p.version AS packet_version,
        c.field_name, c.phase, c.item_key, c.kind,
@@ -3128,10 +3159,17 @@ SELECT p.id AS packet_id, p.ref AS packet_ref, p.version AS packet_version,
        CASE WHEN cand.is_current = 1 AND c.status = 'accepted' THEN c.winning_value
             ELSE NULL END AS final_value,
        c.supports, c.contradictions, c.unverified, c.eva_packet_id, c.eval_cycle_id,
-       cand.is_current
+       cand.is_current,
+       CASE WHEN p.status IN ('waiting_for_children', 'archived') THEN 0 WHEN COALESCE(q.qn, 0) > 0 THEN 1 ELSE 0 END
+         AS question_context,
+       CASE WHEN p.status IN ('waiting_for_children', 'archived') THEN 0 ELSE COALESCE(q.qn, 0) END AS question_context_count,
+       CAST(CASE WHEN p.status IN ('waiting_for_children', 'archived') THEN 0 WHEN q.qd = 1 THEN COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'qctx.w_direct_e4'), 750)
+                 WHEN COALESCE(q.qn, 0) > 0 THEN COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'qctx.w_periph_e4'), 250) ELSE 0 END AS INTEGER)
+         AS question_weight_e4
 FROM cand
 JOIN packets p ON p.id = cand.packet_id
 JOIN v_eva_item_consensus c ON c.eva_packet_id = cand.id
+LEFT JOIN q ON q.eva_packet_id = cand.id
 WHERE cand.rn = 1""",
         """CREATE VIEW v_field_status AS
 SELECT c.packet_id, c.packet_ref, c.packet_version, c.field_name, c.phase, c.kind,
@@ -3143,7 +3181,10 @@ SELECT c.packet_id, c.packet_ref, c.packet_version, c.field_name, c.phase, c.kin
        SUM(CASE WHEN c.status = 'accepted' THEN 1 ELSE 0 END) AS accepted_items,
        SUM(CASE WHEN c.status = 'disputed' THEN 1 ELSE 0 END) AS disputed_items,
        MIN(c.confidence) AS min_confidence,
-       MAX(c.eva_packet_id) AS eva_packet_id
+       MAX(c.eva_packet_id) AS eva_packet_id,
+       MAX(c.question_context) AS question_context,
+       MAX(c.question_context_count) AS question_context_count,
+       MAX(c.question_weight_e4) AS question_weight_e4
 FROM v_field_consensus c
 GROUP BY c.packet_id, c.packet_ref, c.packet_version, c.field_name, c.phase, c.kind""",
         """CREATE VIEW v_packet_stats AS

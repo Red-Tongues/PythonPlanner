@@ -598,22 +598,6 @@ def test_ingestion_confirmation_decision_bumps_the_project(session: Session) -> 
 # --------------------------------------------------------------------------- rulings 4–5
 
 
-def test_try_claim_commits_a_context_change(factory: sessionmaker[Session]) -> None:
-    with factory() as s:
-        packet = queued_packet(s)
-        ref, objective = packet.ref, packet.objective.ref
-        s.commit()
-    with factory() as s:  # the objective changes behind the queue (no gate bump on purpose)
-        table = Packet.__table__
-        s.connection().execute(table.update().where(table.c.ref == ref).values(input_hash="x"))
-        s.commit()
-    assert try_claim(factory, ref, "kernel-a") is None
-    with factory() as s:
-        assert get_packet(s, ref).status is S.EVALUATING_PRE  # persisted, not rolled back
-        assert s.scalar(select(func.count()).select_from(GenerationRun)) == 0
-    assert objective
-
-
 def test_try_claim_returns_the_run(factory: sessionmaker[Session]) -> None:
     with factory() as s:
         ref = queued_packet(s).ref

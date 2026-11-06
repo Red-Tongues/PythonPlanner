@@ -7,11 +7,10 @@ Admission and claim read the revision before their readiness check and compare-a
 their guarded UPDATE. A concurrent writer that commits in between changes the revision, so the
 admission or claim matches no row and loses: no packet runs on a gate state that no longer holds.
 
-**Context binding (fix 1).** ``packets.input_hash`` is the fingerprint of what the evaPackets
-read: packet core plus the *head* project and objective. ``require_current_context`` recomputes
-it; on a mismatch (e.g. the project was superseded) it refreshes the hash and sends the packet
-back to ``evaluating_pre``, with events. The guarded UPDATE also requires the project and
-objective heads it was checked against to still be heads.
+**Context (M3a, T1-C v3 §2).** ``packets.input_hash`` is intra-packet only (title, prompt,
+response contract, repo path). Upstream project/objective edits no longer send a packet back to
+``evaluating_pre``: they raise ``question_context`` through the evaPackets' context links
+(``evaluation.context``). M2.1 fix 1's ``require_current_context`` is retired.
 """
 
 from __future__ import annotations
@@ -29,11 +28,6 @@ from orchestrator.events import record_event
 
 #: confirmation entity types that concern one genPacket's readiness
 PACKET_CONFIRMATION_TYPES: frozenset[str] = frozenset({"packet", "packet_review", "failure_budget"})
-#: statuses a context change sends back to evaluating_pre (the kernel moves of D8 / C25).
-#: ``needs_review`` stays put: only an owner sends it back (D8), so a dispute never loops.
-REEVALUATE_FROM: frozenset[PacketStatus] = frozenset(
-    {PacketStatus.READY, PacketStatus.QUEUED, PacketStatus.FAILED}
-)
 
 
 def bump_gate(session: Session, packet: Packet, *, actor: Actor, cause: str) -> int | None:
@@ -89,43 +83,10 @@ def note_confirmation(session: Session, confirmation: Confirmation, *, actor: Ac
 
 
 def current_fingerprint(session: Session, packet: Packet) -> str:
-    from orchestrator.evaluation.evaluator import packet_document
+    """The packet's current intra-packet hash (what its pre-phase evaPackets target)."""
+    from orchestrator.evaluation.context import intra_packet_hash
 
-    return packet_document(session, packet)[1]
-
-
-def require_current_context(session: Session, packet: Packet, *, actor: Actor) -> bool:
-    """True when ``packet.input_hash`` still matches its current context. Otherwise refresh the
-    hash, send the packet back to ``evaluating_pre`` (evented) and return False."""
-    from orchestrator.evaluation.evaluator import refresh_input_hash
-    from orchestrator.lifecycle import transition
-
-    if packet.input_hash is not None and current_fingerprint(session, packet) == packet.input_hash:
-        return True
-    before = packet.input_hash
-    refresh_input_hash(session, packet, actor)
-    record_event(
-        session,
-        actor=actor,
-        action="packet.context_changed",
-        entity_type="packet",
-        entity_id=packet.id,
-        entity_ref=packet.ref,
-        entity_version=packet.version,
-        before={"input_hash": before},
-        after={"input_hash": packet.input_hash},
-        reason="the packet's project or objective changed since it was evaluated",
-    )
-    if PacketStatus(packet.status) in REEVALUATE_FROM:
-        transition(
-            packet,
-            PacketStatus.EVALUATING_PRE,
-            actor,
-            "context changed: re-evaluate",
-            session=session,
-        )
-    session.flush()
-    return False
+    return intra_packet_hash(packet)
 
 
 def guarded_status_update(

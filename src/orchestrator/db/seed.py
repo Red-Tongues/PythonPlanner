@@ -211,7 +211,43 @@ SETTINGS_M2 = (
     ("stats.score_threshold", 7, "Scores at or above this count as 'above threshold'"),
 )
 
-SETTINGS = SETTINGS_M1 + SETTINGS_M2
+#: M3a (R6): every constant of the genPacket loop is a versioned setting (OQ7)
+SETTINGS_M3A = (
+    ("qctx.w_direct_e4", 750, "OQ4: field weight when a direct context link is questioned"),
+    ("qctx.w_periph_e4", 250, "OQ4: field weight when only peripheral links are questioned"),
+    ("qctx.cap_e4", 2250, "OQ4: cap of a packet's question_score_e4"),
+    ("gen_queue.w_grade_e4", 6000, "OQ7: weight of (10000 - parent grade), x 10^4"),
+    ("gen_queue.w_centrality_e4", 7000, "OQ7: weight of relational centrality, x 10^4"),
+    ("gen_queue.root_parent_grade_e4", 5000, "OQ6: effective parent grade of a root packet"),
+    ("gen_queue.ageing_per_minute_e4", 10, "OQ6: ageing per full minute in ready"),
+    ("gen_queue.ageing_cap_e4", 1500, "OQ6: ageing cap"),
+    ("admission.floor_e4", 3500, "OQ7: relational admission floor (ready -> queued)"),
+    ("admission.low_floor_e4", 2500, "OQ7: floor while queued depth is below admission.low_depth"),
+    ("admission.low_depth", 3, "OQ7: queued depth under which the low floor applies"),
+    ("admission.bypass_wait_sec", 7200, "OQ7: wait in ready after which the floor is bypassed"),
+    ("centrality.direct_e4", 3000, "OQ8: per unsealed direct dependent"),
+    ("centrality.two_hop_e4", 1500, "OQ8: per unsealed two-hop dependent"),
+    ("centrality.critical_e4", 2500, "OQ8: on a critical objective path"),
+    ("dep_satisfaction_grade_e4", 7000, "OQ13: a sealed lineage member at this grade satisfies"),
+    ("lineage_stop_grade_e4", 8500, "OQ14: a child of a parent at this grade is created held"),
+    ("feedback.boost_e4", 1500, "OQ9: BOOST"),
+    ("feedback.nudge_e4", 500, "OQ9: NUDGE"),
+    ("feedback.demote_e4", -1500, "OQ9: DEMOTE"),
+    ("feedback.pin_e4", 3000, "OQ9: PIN"),
+    ("feedback.clamp_e4", 3000, "OQ9: packet feedback sum clamped to +/- this"),
+    ("crash.limit", 5, "OQ18: crash_count at which the packet is held (crash_limit)"),
+    ("crash.cooldown_base_sec", 30, "OQ18: cooldown = min(max, base * 2^(crash_count - 1))"),
+    ("crash.cooldown_max_sec", 3600, "OQ18: cooldown cap"),
+    ("route.crash_window_sec", 300, "OQ18: window for counting a route's crashes"),
+    ("route.crash_threshold", 3, "OQ18: crashes in the window that make a route unhealthy"),
+    ("route.unhealthy_sec", 600, "OQ18: how long a route stays unhealthy"),
+    ("dispatch.oldest_every", 5, "OQ25: every Nth dispatch takes the oldest queued packet"),
+    ("dispatch.incumbency_margin_e4", 250, "OQ25: a challenger must beat the incumbent by this"),
+    ("gen_eva.synth_below_e4", 5000, "OQ17: below this grade the child prompt is LLM-rewritten"),
+    ("readiness.max_ambiguity_e4", 4000, "OQ11: ambiguity_quotient x 1000 must not exceed this"),
+)
+
+SETTINGS = SETTINGS_M1 + SETTINGS_M2 + SETTINGS_M3A
 
 # (name, field_name, operator, value, action, precedence, description) — PROJECT_PLAN §8
 THRESHOLDS = (

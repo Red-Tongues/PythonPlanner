@@ -100,13 +100,6 @@ def _transition(session: Session, packet: Packet, status: PacketStatus, actor: A
     return transition(packet, status, actor, why, session=session)
 
 
-class ContextChanged(ClaimError):
-    """The packet's context changed since evaluation; it was sent back to ``evaluating_pre``.
-
-    The revert (refreshed input hash, transition and events) is pending in the session:
-    commit it, so the packet is re-evaluated (M2.1 fix 1)."""
-
-
 def _admission_event(
     session: Session, packet: Packet, actor: Actor, before: str, after: str, reason: str
 ) -> None:
@@ -193,7 +186,7 @@ def admit_next(
     ticks can never both admit a packet, and a governance change in between loses the race.
     """
     from orchestrator.evaluation.readiness import readiness
-    from orchestrator.gates import guarded_status_update, require_current_context
+    from orchestrator.gates import guarded_status_update
 
     enforce_failure_budgets(session, now=now, actor=actor)
     rows = [r for r in queue_rows(session, now) if r.eligible and r.status == "ready"]
@@ -213,8 +206,6 @@ def admit_next(
         assert packet is not None
         session.refresh(packet)
         observed = packet.gate_revision
-        if not require_current_context(session, packet, actor=actor):
-            continue  # sent back to evaluating_pre (fix 1)
         report = readiness(session, packet)
         if not report.ready:
             continue
@@ -319,9 +310,10 @@ def claim(
     gates. ``before_cas`` is a test seam called just before the UPDATE.
     """
     from orchestrator.evaluation.readiness import readiness
-    from orchestrator.gates import guarded_status_update, require_current_context
+    from orchestrator.gates import guarded_status_update
     from orchestrator.governance import active_overrides
     from orchestrator.repository import get_packet
+    from orchestrator.revisions import has_undrained
 
     now = now or utcnow()
     packet = get_packet(session, packet_ref)
@@ -330,8 +322,8 @@ def claim(
     fence = packet.fencing_token
     if PacketStatus(packet.status) is not PacketStatus.QUEUED:
         raise ClaimError(f"{packet.ref} is {PacketStatus(packet.status).value}, not queued")
-    if not require_current_context(session, packet, actor=actor):
-        raise ContextChanged(f"{packet.ref}: its context changed; sent back to evaluating_pre")
+    if has_undrained(session, packet.id):  # M3a AC8: history first, then dispatch
+        raise ClaimError(f"{packet.ref} has undrained revisions; drain the outbox first")
     blocking = [
         o
         for o in active_overrides(session, packet)

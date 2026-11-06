@@ -190,14 +190,19 @@ def drain_outbox(
 
 
 def after_drain(session: Session, entity_type: str, entity_id: str, *, actor: Actor) -> None:
-    """Enrichment of an edited entity: a packet's ``input_hash`` is refreshed (its own
-    evaluations stop being current)."""
+    """Enrichment of an edited entity: a packet's intra-packet ``input_hash`` is refreshed (its
+    own evaluations stop being current); a project's or objective's quote-backed context links
+    are re-verified (R6 OQ34)."""
+    from orchestrator.evaluation.context import reverify_links
+
     if entity_type == "packet":
         from orchestrator.evaluation.evaluator import refresh_input_hash
 
         packet = session.get(Packet, entity_id)
         if packet is not None and not packet.locked and packet.input_hash is not None:
             refresh_input_hash(session, packet, actor)
+        return
+    reverify_links(session, entity_type, entity_id, actor=actor)
 
 
 def value_at(
