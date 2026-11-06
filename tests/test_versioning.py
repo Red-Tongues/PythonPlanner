@@ -28,9 +28,6 @@ from orchestrator.repository import (
     objectives_of,
     packets_of,
     set_setting,
-    supersede_objective,
-    supersede_packet,
-    supersede_project,
     update_packet,
 )
 from tests.conftest import KERNEL, USER
@@ -41,6 +38,7 @@ from tests.dbhelpers import (
     row_of,
 )
 from tests.evafixtures import complete_with_evidence
+from tests.legacy import supersede_objective, supersede_packet, supersede_project
 
 
 def _row(session: Session, packet_id: str) -> dict:

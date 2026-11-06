@@ -24,12 +24,13 @@ from orchestrator.governance import add_dependency, add_override, grant_waiver, 
 from orchestrator.ingest import persist_tree
 from orchestrator.llm import FakeProvider
 from orchestrator.queue import ContextChanged, admit_next, claim
-from orchestrator.repository import get_packet, supersede_project
+from orchestrator.repository import get_packet
 from tests.conftest import USER
 from tests.govfixtures import (
     GOV_TREE,
     ready_packet,
 )
+from tests.legacy import supersede_project
 
 # ---------------------------------------------------------------- context binding and gate revision
 

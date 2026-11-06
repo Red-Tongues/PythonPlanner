@@ -26,7 +26,6 @@ from orchestrator.db.models import (
     Packet,
     new_id,
 )
-from orchestrator.errors import ImmutableRecordError
 from orchestrator.evaluation import evaluate_packet, evaluate_pending, pending_packets
 from orchestrator.evaluation.evaluator import EvaluationError
 from orchestrator.evaluation.normalise import extract_json, normalise_quote, verify_quote
@@ -35,7 +34,6 @@ from orchestrator.lifecycle import transition
 from orchestrator.llm import FakeProvider, ModelSpec
 from orchestrator.repository import (
     get_packet,
-    supersede_packet,
     update_packet,
 )
 from tests.conftest import KERNEL, USER
@@ -49,6 +47,7 @@ from tests.govfixtures import (
     field_status,
     ready_packet,
 )
+from tests.legacy import supersede_packet
 
 PRE_FIELDS = 15  # task-level fields with pre-phase presets
 
@@ -246,13 +245,17 @@ def test_pass_items_are_append_only(engine: Engine, session: Session, tree) -> N
         assert is_immutability_violation(info.value)
 
 
-def test_core_edit_after_evaluation_needs_a_new_version(session: Session, tree) -> None:
-
+def test_core_edit_after_evaluation_is_in_place_and_makes_results_pending(
+    session: Session, tree
+) -> None:
+    """M3a (R6 OQ21): a core edit of an evaluated packet keeps the row; its input hash
+    changes, so its own results stop being current until re-evaluated."""
     packet = tree.packets[0]
     _evaluate(session, packet.ref, FakeProvider())
-    with pytest.raises(ImmutableRecordError, match="new version"):
-        update_packet(session, get_packet(session, packet.ref), {"title": "x"}, actor=USER)
-    update_packet(session, get_packet(session, packet.ref), {"manual_boost": 3}, actor=USER)
+    update_packet(session, packet, {"title": "x"}, actor=USER)
+    assert get_packet(session, packet.ref).id == packet.id
+    assert field_status(session, packet, "coding_intensity") == "pending"
+    update_packet(session, packet, {"manual_boost": 3}, actor=USER)
 
 
 def test_new_content_eval_packets_are_rejected(engine: Engine, tree) -> None:
@@ -315,7 +318,7 @@ def test_definition_change_makes_results_pending_and_unreusable(session, tree) -
 
 
 def test_exemplar_change_changes_the_content_address(session, tree) -> None:  # type: ignore[no-untyped-def]
-    from orchestrator.repository import supersede_packet
+    from tests.legacy import supersede_packet
 
     packet = tree.packets[0]
     evaluate_packet(session, packet, FakeProvider(), fields=["coding_intensity"])

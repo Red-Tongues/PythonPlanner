@@ -45,7 +45,6 @@ from orchestrator.governance import (
 from orchestrator.ingest import persist_tree
 from orchestrator.lifecycle import transition
 from orchestrator.queue import ClaimError, admit_next, claim, queue_rows
-from orchestrator.repository import supersede_packet
 from tests.conftest import DIALECT_PARAMS, KERNEL, POSTGRES_URL, SMALL_TREE, USER, _reset_postgres
 from tests.evafixtures import (
     TEXT_FIELD,
@@ -59,6 +58,7 @@ from tests.evafixtures import (
     oracle_inputs,
     seed_eva,
 )
+from tests.legacy import supersede_packet
 
 SCORE, BOOL, TAGS, TEXT = "coding_intensity", "safety_clear", "styles", TEXT_FIELD
 T1, T2 = "creative", "plan"

@@ -5,11 +5,13 @@ superseded or accepted rows with ``ImmutableRecordError`` before the database is
 (2) records an ``events`` row for each state change *before* flushing it (the flush guard rejects
 unevented writes, R1 fix 7). Actors are typed (``orchestrator.actors.Actor``, R1 fix 11).
 
-Versioning (A2): a ref names a lineage. ``get_packet(s, "PP-000001")`` returns the current head;
-``"PP-000001@1"`` addresses a specific version. ``supersede_*`` inserts a new version with the
-same ref, ``version + 1`` and ``supersedes_id`` → predecessor. It never edits the old row and
-never re-points children or ``parent_id`` / ``root_id``; children belong to the *lineage* of
-their parent, and the head is derived (``v_*_heads`` views / ``_heads()`` here).
+Editing (M3a, R6 OQ21/OQ26): projects, objectives and developing genPackets are edited **in
+place**. Every change of an audited column bumps ``content_revision`` and is captured by the
+outbox trigger; ``update_*`` drains it synchronously into ``field_revisions`` (OQ35). A locked
+row (completed, sealed, closed) is never edited: further work on a sealed genPacket is a child
+genPacket (``evaluation.gen_eva``). ``supersede_*`` whole-row cloning is retired; legacy rows
+with ``supersedes_id`` stay readable, and ``get_packet(s, "PP-000001")`` still returns the head
+of such a lineage (``"PP-000001@1"`` addresses a specific version).
 """
 
 from __future__ import annotations
@@ -41,9 +43,8 @@ from orchestrator.db.models import (
     Project,
     QualityReport,
     Setting,
-    new_id,
 )
-from orchestrator.errors import AlreadySupersededError, ImmutableRecordError, NotFoundError
+from orchestrator.errors import ImmutableRecordError, NotFoundError
 from orchestrator.events import record_event
 
 M = TypeVar("M", Project, Objective, Packet)
@@ -61,8 +62,6 @@ EDITABLE_PACKET_FIELDS: frozenset[str] = frozenset(
         "branch_reason",
     }
 )
-#: Fields evaPackets read: changing them invalidates the evaluation set (B9).
-CORE_PACKET_FIELDS: frozenset[str] = frozenset({"title", "prompt_description"})
 #: ORM column → ProjectCore field.
 PROJECT_FIELDS: dict[str, str] = {
     "name": "name",
@@ -215,6 +214,16 @@ def _validate_packet_changes(packet: Packet, changes: dict[str, Any]) -> dict[st
 # --------------------------------------------------------------------------- writes
 
 
+def _bump_content(row: Project | Objective | Packet, changed: list[str], actor: Actor) -> None:
+    """A governed write of audited columns bumps the revision itself, with its producer, so the
+    outbox attributes it to ``actor`` rather than to a raw SQL edit (T1-C v2 §8, R6 OQ33)."""
+    from orchestrator.db.ddl import AUDITED_COLUMNS
+
+    if set(changed) & set(AUDITED_COLUMNS[row.__tablename__]):
+        row.content_revision = (row.content_revision or 0) + 1
+        row.last_producer = str(actor)
+
+
 def update_packet(
     session: Session,
     packet: Packet,
@@ -223,24 +232,23 @@ def update_packet(
     actor: Actor,
     reason: str | None = None,
 ) -> Packet:
-    """Edit an unlocked head packet in place. Locked/superseded → ``ImmutableRecordError``.
+    """Edit an unlocked packet in place (M3a, R6 OQ21/OQ29). Locked → ``ImmutableRecordError``.
 
-    Core fields (what evaPackets read) may change in place only while the packet is a draft;
-    after evaluation has started an edit is a new version (B9: ``supersede_packet``).
-    """
+    Any developing status may be edited, including a packet at genQueue positions 0-2: a
+    human edit bumps ``content_revision``; a running generation is never cancelled by it and the
+    edit flows to the child genPacket (OQ20). The change is captured by the outbox trigger and
+    drained into ``field_revisions`` in this transaction."""
+    from orchestrator.revisions import drain_outbox
+
     assert_mutable(packet, session)
     cleaned = _validate_packet_changes(packet, changes)
-    core_changed = sorted(
-        f for f in CORE_PACKET_FIELDS & set(cleaned) if cleaned[f] != getattr(packet, f)
-    )
-    if core_changed and PacketStatus(packet.status) is not PacketStatus.DRAFT:
-        raise ImmutableRecordError(
-            f"{packet.ref} is {PacketStatus(packet.status).value}: editing {core_changed} "
-            "creates a new version — use supersede_packet (B9)"
-        )
-    before = packet_snapshot(packet)
-    for name, value in cleaned.items():
-        setattr(packet, name, value)
+    changed = sorted(f for f in cleaned if cleaned[f] != getattr(packet, f))
+    if not changed:
+        return packet
+    before = {**packet_snapshot(packet), "content_revision": packet.content_revision}
+    for name in changed:
+        setattr(packet, name, cleaned[name])
+    _bump_content(packet, changed, actor)
     record_event(
         session,
         actor=actor,
@@ -250,11 +258,105 @@ def update_packet(
         entity_ref=packet.ref,
         entity_version=packet.version,
         before=before,
-        after=packet_snapshot(packet),
+        after={
+            **packet_snapshot(packet),
+            "content_revision": packet.content_revision,
+            "changed": changed,
+        },
         reason=reason,
     )
     session.flush()
+    drain_outbox(session, entity_id=packet.id, actor=actor)
     return packet
+
+
+def update_project(
+    session: Session,
+    project: Project,
+    changes: dict[str, Any],
+    *,
+    actor: Actor,
+    reason: str | None = None,
+) -> Project:
+    """Edit a project's core fields in place (R6 OQ21). Dependent evaluations are never
+    invalidated: their context links raise ``question_context`` instead (Q2)."""
+    from orchestrator.revisions import drain_outbox
+
+    assert_mutable(project, session)
+    changes = dict(changes)
+    _reject_unknown(changes, set(PROJECT_FIELDS), "project")
+    merged = {c: changes.get(c, getattr(project, c)) for c in PROJECT_FIELDS}
+    ProjectCore.model_validate({PROJECT_FIELDS[c]: v for c, v in merged.items()})
+    changed = sorted(c for c in changes if changes[c] != getattr(project, c))
+    if not changed:
+        return project
+    before = {**project_snapshot(project), "content_revision": project.content_revision}
+    for name in changed:
+        setattr(project, name, changes[name])
+    _bump_content(project, changed, actor)
+    record_event(
+        session,
+        actor=actor,
+        action="project.updated",
+        entity_type="project",
+        entity_id=project.id,
+        entity_ref=project.ref,
+        entity_version=project.version,
+        before=before,
+        after={
+            **project_snapshot(project),
+            "content_revision": project.content_revision,
+            "changed": changed,
+        },
+        reason=reason,
+    )
+    session.flush()
+    drain_outbox(session, entity_id=project.id, actor=actor)
+    return project
+
+
+def update_objective(
+    session: Session,
+    objective: Objective,
+    changes: dict[str, Any],
+    *,
+    actor: Actor,
+    reason: str | None = None,
+) -> Objective:
+    """Edit an objective's core fields in place (R6 OQ21)."""
+    from orchestrator.revisions import drain_outbox
+
+    assert_mutable(objective, session)
+    changes = dict(changes)
+    _reject_unknown(changes, OBJECTIVE_FIELDS, "objective")
+    merged = {c: changes.get(c, getattr(objective, c)) for c in OBJECTIVE_FIELDS}
+    ObjectiveCore.model_validate({"name": merged["name"], "brief": merged["brief"]})
+    changed = sorted(c for c in changes if changes[c] != getattr(objective, c))
+    if not changed:
+        return objective
+    before = {**objective_snapshot(objective), "content_revision": objective.content_revision}
+    for name in changed:
+        setattr(objective, name, changes[name])
+    _bump_content(objective, changed, actor)
+    record_event(
+        session,
+        actor=actor,
+        action="objective.updated",
+        entity_type="objective",
+        entity_id=objective.id,
+        entity_ref=objective.ref,
+        entity_version=objective.version,
+        before=before,
+        after={
+            **objective_snapshot(objective),
+            "content_revision": objective.content_revision,
+            "changed": changed,
+        },
+        reason=reason,
+    )
+    session.flush()
+    drain_outbox(session, entity_id=objective.id, actor=actor)
+    return objective
 
 
 def dependents_of(session: Session, packet: Packet) -> list[str]:
@@ -321,168 +423,6 @@ def lock_record(
         reason=reason,
     )
     session.flush()
-
-
-def _check_supersedable(session: Session, old: Project | Objective | Packet) -> None:
-    newer = successor_of(session, old)
-    if newer is not None:
-        raise AlreadySupersededError(
-            f"{describe(old)} is already superseded by v{newer.version}; "
-            "supersede the latest version"
-        )
-
-
-def supersede_packet(
-    session: Session,
-    old_ref: str,
-    changes: dict[str, Any] | None = None,
-    *,
-    actor: Actor,
-    reason: str | None = None,
-) -> Packet:
-    """Create a new version of a packet with ``changes`` applied. The old row is never edited.
-
-    The new version keeps the ref, project, objective, ``parent_id``, ``root_id`` and depth, gets
-    ``version + 1``, ``supersedes_id`` → old, and a fresh ``draft`` lifecycle.
-    """
-    old = get_packet(session, old_ref)
-    _check_supersedable(session, old)
-    cleaned = _validate_packet_changes(old, dict(changes or {}))
-
-    # Carried governance fields, then the validated changes (which include a recomputed
-    # response_contract when the response structure changes — R1 fix 8: one source per field).
-    fields: dict[str, Any] = {f: getattr(old, f) for f in EDITABLE_PACKET_FIELDS}
-    fields["response_contract"] = old.response_contract
-    fields.update(cleaned)
-    new = Packet(
-        id=new_id(),
-        ref=old.ref,
-        version=old.version + 1,
-        supersedes_id=old.id,
-        project_id=old.project_id,
-        objective_id=old.objective_id,
-        position=old.position,
-        packet_kind=old.packet_kind,
-        parent_id=old.parent_id,
-        root_id=old.root_id,
-        depth=old.depth,
-        status=PacketStatus.DRAFT,
-        locked=False,
-        source="supersede",
-        **fields,
-    )
-    session.add(new)
-    record_event(
-        session,
-        actor=actor,
-        action="packet.superseded",
-        entity_type="packet",
-        entity_id=new.id,
-        entity_ref=new.ref,
-        entity_version=new.version,
-        before=packet_snapshot(old),
-        after={**packet_snapshot(new), "changes": sorted(changes or {})},
-        reason=reason,
-    )
-    session.flush()
-    return new
-
-
-def supersede_project(
-    session: Session,
-    old_ref: str,
-    changes: dict[str, Any] | None = None,
-    *,
-    actor: Actor,
-    reason: str | None = None,
-) -> Project:
-    """New version of a project's core fields. Objectives stay attached to the lineage."""
-    old = get_project(session, old_ref)
-    _check_supersedable(session, old)
-    changes = dict(changes or {})
-    _reject_unknown(changes, set(PROJECT_FIELDS), "project")
-    merged = {c: changes.get(c, getattr(old, c)) for c in PROJECT_FIELDS}
-    ProjectCore.model_validate({PROJECT_FIELDS[c]: v for c, v in merged.items()})
-
-    new = Project(
-        id=new_id(),
-        ref=old.ref,
-        version=old.version + 1,
-        supersedes_id=old.id,
-        source="supersede",
-        source_path=old.source_path,
-        source_sha256=old.source_sha256,
-        tree_contract=old.tree_contract,
-        **merged,
-    )
-    session.add(new)
-    record_event(
-        session,
-        actor=actor,
-        action="project.superseded",
-        entity_type="project",
-        entity_id=new.id,
-        entity_ref=new.ref,
-        entity_version=new.version,
-        before=project_snapshot(old),
-        after={**project_snapshot(new), "changes": sorted(changes)},
-        reason=reason,
-    )
-    session.flush()
-    from orchestrator.gates import bump_scope
-
-    # C25: interrupt / core supersession is a governance write for its whole scope
-    bump_scope(session, "project", new.ref, actor=actor, cause="project superseded")
-    return new
-
-
-def supersede_objective(
-    session: Session,
-    old_ref: str,
-    changes: dict[str, Any] | None = None,
-    *,
-    actor: Actor,
-    reason: str | None = None,
-) -> Objective:
-    """New version of an objective's core fields. Packets stay attached to the lineage."""
-    old = get_objective(session, old_ref)
-    _check_supersedable(session, old)
-    changes = dict(changes or {})
-    _reject_unknown(changes, OBJECTIVE_FIELDS, "objective")
-    merged = {c: changes.get(c, getattr(old, c)) for c in OBJECTIVE_FIELDS}
-    ObjectiveCore.model_validate({"name": merged["name"], "brief": merged["brief"]})
-
-    new = Objective(
-        id=new_id(),
-        ref=old.ref,
-        version=old.version + 1,
-        supersedes_id=old.id,
-        project_id=old.project_id,
-        position=old.position,
-        tags=dict(old.tags),
-        scores=dict(old.scores),
-        source="supersede",
-        **merged,
-    )
-    session.add(new)
-    record_event(
-        session,
-        actor=actor,
-        action="objective.superseded",
-        entity_type="objective",
-        entity_id=new.id,
-        entity_ref=new.ref,
-        entity_version=new.version,
-        before=objective_snapshot(old),
-        after={**objective_snapshot(new), "changes": sorted(changes)},
-        reason=reason,
-    )
-    session.flush()
-    from orchestrator.gates import bump_scope
-
-    # C25: interrupt / core supersession is a governance write for its whole scope
-    bump_scope(session, "objective", new.ref, actor=actor, cause="objective superseded")
-    return new
 
 
 def set_setting(

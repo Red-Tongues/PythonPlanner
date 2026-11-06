@@ -35,7 +35,7 @@ from orchestrator.ingest import persist_tree
 from orchestrator.lifecycle import transition
 from orchestrator.llm import FakeProvider
 from orchestrator.queue import ClaimError, admit_next, claim, queue_rows
-from orchestrator.repository import get_packet, set_setting, supersede_packet
+from orchestrator.repository import get_packet, set_setting
 from tests.conftest import KERNEL, USER
 from tests.evafixtures import accept_all
 from tests.govfixtures import (
@@ -43,6 +43,7 @@ from tests.govfixtures import (
     fail_runs,
     ready_packet,
 )
+from tests.legacy import supersede_packet
 
 TREE = {
     "project": {"name": "Q"},

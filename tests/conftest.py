@@ -19,11 +19,7 @@ from orchestrator.actors import Actor
 from orchestrator.contracts import ProjectTree
 from orchestrator.db import init_db, make_engine, make_session_factory
 from orchestrator.ingest import persist_tree
-from orchestrator.repository import (
-    supersede_objective,
-    supersede_packet,
-    supersede_project,
-)
+from tests.legacy import supersede_objective, supersede_packet, supersede_project
 
 POSTGRES_URL = os.environ.get("ORCH_TEST_POSTGRES_URL")
 USER = Actor.user("test")

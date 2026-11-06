@@ -40,7 +40,7 @@ from orchestrator.events import record_event
 from orchestrator.gates import bump_scope
 from orchestrator.governance import add_override, grant_waiver
 from orchestrator.queue import claim
-from orchestrator.repository import get_packet, set_autonomy_mode, supersede_objective
+from orchestrator.repository import get_packet, set_autonomy_mode
 from orchestrator.runs import (
     LostRace,
     RunError,
@@ -59,6 +59,7 @@ from orchestrator.runs import (
     try_claim,
 )
 from tests.conftest import KERNEL, USER
+from tests.legacy import supersede_objective, supersede_packet
 from tests.runfixtures import attempts, claimed_run, held, queued_packet
 
 R, S = GenerationRunState, PacketStatus
@@ -623,7 +624,6 @@ def test_try_claim_returns_the_run(factory: sessionmaker[Session]) -> None:
 
 
 def test_scope_bumps_skip_superseded_history(session: Session) -> None:
-    from orchestrator.repository import supersede_packet
 
     packet = queued_packet(session)
     old_id = packet.id

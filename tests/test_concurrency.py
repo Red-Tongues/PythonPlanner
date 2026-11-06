@@ -51,7 +51,7 @@ from orchestrator.gates import note_confirmation
 from orchestrator.governance import add_override, grant_waiver, revoke
 from orchestrator.lifecycle import transition
 from orchestrator.queue import ClaimError, admit_next, claim
-from orchestrator.repository import get_packet, supersede_objective
+from orchestrator.repository import get_packet
 from orchestrator.runs import (
     LostRace,
     StaleRun,
@@ -69,6 +69,7 @@ from tests.govfixtures import (
     queued_ref,
     ready_packet,
 )
+from tests.legacy import supersede_objective
 from tests.runfixtures import attempts, claimed_run, held, queued_packet
 
 R, S = GenerationRunState, PacketStatus
