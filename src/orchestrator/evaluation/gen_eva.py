@@ -71,14 +71,24 @@ GEN_EVA = Actor.system("gen_eva")
 R = GenerationRunState
 S = PacketStatus
 
-#: OQ16 composite weights, ×10^4
-COMPOSITE_WEIGHTS: dict[str, int] = {
-    "requirement_alignment": 3000,
-    "testability": 2500,
-    "acceptance_criteria_coverage": 2000,
-    "risk_assessment": 1500,
-    "sonar_hotspot_alignment": 1000,
-}
+#: OQ16 composite fields; each weight (×10^4) is the setting ``gen_eva.w_<field>_e4``
+COMPOSITE_FIELDS: tuple[str, ...] = (
+    "requirement_alignment",
+    "testability",
+    "acceptance_criteria_coverage",
+    "risk_assessment",
+    "sonar_hotspot_alignment",
+)
+
+
+def composite_weights(session: Session | None = None) -> dict[str, int]:
+    """The OQ16 weights from settings (or their tunable defaults when ``session`` is None)."""
+    from orchestrator.tunables import default
+
+    def read(key: str) -> int:
+        return get_int(session, key) if session is not None else int(default(key))
+
+    return {f: read(f"gen_eva.w_{f}_e4") for f in COMPOSITE_FIELDS}
 
 
 class GenEvaError(OrchestratorError):
@@ -105,18 +115,25 @@ def post_scores(session: Session, packet: Packet) -> dict[str, int]:
         ),
         {"id": packet.id},
     ).all()
-    return {name: int(value) * 1000 for name, value in rows if value is not None}
+    scale = 1000  # structural: a 0-10 score → e4
+    return {name: int(value) * scale for name, value in rows if value is not None}
 
 
-def composite_grade_e4(scores: dict[str, int]) -> int:
+def composite_grade_e4(
+    scores: dict[str, int], weights: dict[str, int] | None = None, sonar_shift: int | None = None
+) -> int:
     """R6 OQ16, integer floor. A missing field counts 0, except sonar: when it has no accepted
-    value its weight moves 500 each to testability and risk_assessment."""
-    weights = dict(COMPOSITE_WEIGHTS)
+    value, ``gen_eva.sonar_na_shift_e4`` of its weight goes to testability and to
+    risk_assessment each. Weights and shift default to the tunable defaults."""
+    from orchestrator.tunables import default
+
+    weights = dict(weights or composite_weights())
+    shift = int(default("gen_eva.sonar_na_shift_e4")) if sonar_shift is None else sonar_shift
     if "sonar_hotspot_alignment" not in scores:
         weights["sonar_hotspot_alignment"] = 0
-        weights["testability"] += 500
-        weights["risk_assessment"] += 500
-    return sum(w * scores.get(f, 0) for f, w in weights.items()) // 10000
+        weights["testability"] += shift
+        weights["risk_assessment"] += shift
+    return sum(w * scores.get(f, 0) for f, w in weights.items()) // 10000  # structural: e4
 
 
 # --------------------------------------------------------------------------- prompt (OQ17)
@@ -138,8 +155,9 @@ def fast_synth_placeholder(
     return None
 
 
-def _critiques(session: Session, packet: Packet, limit: int = 3) -> list[str]:
-    """The ``limit`` lowest-scored accepted post-phase fields, with a model's reason."""
+def _critiques(session: Session, packet: Packet) -> list[str]:
+    """The ``gen_eva.critique_count`` lowest-scored accepted post-phase fields, with a reason."""
+    limit = get_int(session, "gen_eva.critique_count")
     rows = session.execute(
         text(
             "SELECT field_name, final_value, eva_packet_id FROM v_field_consensus "
@@ -152,7 +170,10 @@ def _critiques(session: Session, packet: Packet, limit: int = 3) -> list[str]:
     for name, value, eva_id in rows[:limit]:
         reason = session.scalar(
             select(EvaluationPass.reason)
-            .where(EvaluationPass.eva_packet_id == eva_id, EvaluationPass.pass_no >= 3)
+            .where(
+                EvaluationPass.eva_packet_id == eva_id,
+                EvaluationPass.pass_no >= 3,  # structural: passes 3-6
+            )  # structural: evaluation passes 3-6
             .order_by(EvaluationPass.pass_no)
             .limit(1)
         )
@@ -206,9 +227,11 @@ def reimagined_prompt(
     contradictions = _contradictions(session, parent)
     if contradictions:
         lines.append("Verified contradictions in the previous output:")
-        lines += [f'- "{q}"' for q in contradictions[:5]]
+        lines += [
+            f'- "{q}"' for q in contradictions[: get_int(session, "gen_eva.max_contradictions")]
+        ]
     template = "\n".join(lines)
-    if grade_e4 < get_int(session, "gen_eva.synth_below_e4", 5000):
+    if grade_e4 < get_int(session, "gen_eva.synth_below_e4"):
         try:
             rewritten = (synth or fast_synth_placeholder)(template, grade_e4=grade_e4)
         except Exception as exc:  # any synth failure falls back to the template (OQ17)
@@ -576,7 +599,7 @@ def spawn_child(
     session.flush()
     _copy_results(session, parent, child, actor)
     inherit_overrides(session, parent, child, actor=actor)
-    if bundle.composite_grade_e4 >= get_int(session, "lineage_stop_grade_e4", 8500):
+    if bundle.composite_grade_e4 >= get_int(session, "lineage_stop_grade_e4"):
         record_event(
             session,
             actor=KERNEL,
@@ -670,7 +693,11 @@ def complete_generation(
         where=[Packet.__table__.c.active_run_id == run.id],
     )
     evaluate_packet(session, packet, provider, phase=EvaPhase.POST, actor=GEN_EVA)
-    grade = composite_grade_e4(post_scores(session, packet))
+    grade = composite_grade_e4(
+        post_scores(session, packet),
+        composite_weights(session),
+        get_int(session, "gen_eva.sonar_na_shift_e4"),
+    )
     bundle = seal_packet(session, packet, run, artifact, grade)
     move_run(session, run, R.SUCCEEDED, KERNEL, f"sealed (grade {grade})")
     if before_spawn is not None:

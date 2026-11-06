@@ -116,7 +116,7 @@ def fired_rules(session: Session, action: ThresholdAction | None = None) -> list
 
 
 def subtasks_with_llm(
-    session: Session, packet: Packet, provider: LLMProvider, *, max_attempts: int = 3
+    session: Session, packet: Packet, provider: LLMProvider, *, max_attempts: int | None = None
 ) -> SubtaskList:
     """A validated ``subtask_list`` from the Local Generation model (retries with corrections)."""
     from orchestrator.contracts.evaluation import concise_error, json_schema
@@ -124,6 +124,7 @@ def subtasks_with_llm(
     from orchestrator.evaluation.normalise import OutputFormatError, extract_json
     from orchestrator.evaluation.prompts import correction_suffix, subtask_prompt
 
+    max_attempts = max_attempts or get_int(session, "branching.subtask_attempts")
     document, _ = packet_document(session, packet)
     prompt = subtask_prompt(document, json_schema(SubtaskList))
     current, error = prompt, ""
@@ -131,8 +132,8 @@ def subtasks_with_llm(
         response = provider.complete(
             current,
             model=get_settings().model_c,
-            max_tokens=1500,
-            temperature=0.0,
+            max_tokens=get_int(session, "branching.subtask_max_tokens"),
+            temperature=0.0,  # structural: deterministic proposals (Golden Rule 2)
             json_mode=True,
             schema=json_schema(SubtaskList),
         )
@@ -186,7 +187,7 @@ def split_packet(
             ref=next_packet_ref(session),
             project_id=packet.project_id,
             objective_id=packet.objective_id,
-            position=packet.position * 100 + position,
+            position=packet.position * get_int(session, "branching.position_stride") + position,
             packet_kind=PacketKind.TASK,
             title=task.title,
             prompt_description=task.prompt_description,
@@ -264,8 +265,8 @@ def apply_branch_triggers(
 
     ``approved`` holds packet ids a user has approved (from a branching confirmation).
     """
-    max_depth = get_int(session, "branching.max_depth", 2)
-    max_descendants = get_int(session, "branching.max_descendants", 12)
+    max_depth = get_int(session, "branching.max_depth")
+    max_descendants = get_int(session, "branching.max_descendants")
     mode = _mode(session, Stage.BRANCHING)
     outcomes: list[BranchOutcome] = []
     for fired in fired_rules(session, ThresholdAction.SPLIT):

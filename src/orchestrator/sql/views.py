@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from orchestrator.sql import genqueue
+from orchestrator.tunables import sql_default
 
 
 @dataclass(frozen=True)
@@ -36,15 +37,15 @@ class Dialect:
 _DIALECT: dict[str, Dialect] = {
     "sqlite": Dialect(
         item_keys="json_each(e.item_keys) AS k",
-        hours="((julianday({a}) - julianday({b})) * 24.0)",
+        hours="((julianday({a}) - julianday({b})) * 24.0)",  # structural: days → hours
         ts="julianday({x})",
-        newline="char(10)",
+        newline="char(10)",  # structural: newline
     ),
     "postgresql": Dialect(
         item_keys="json_array_elements_text(e.item_keys) AS k(value)",
-        hours="(EXTRACT(EPOCH FROM ({a} - {b})) / 3600.0)",
+        hours="(EXTRACT(EPOCH FROM ({a} - {b})) / 3600.0)",  # structural: s → hours
         ts="{x}",
-        newline="chr(10)",
+        newline="chr(10)",  # structural: newline
     ),
 }
 
@@ -63,10 +64,11 @@ VIEW_NAMES: tuple[str, ...] = (
 )
 
 
-def _setting(key: str, default: str) -> str:
+def _setting(key: str) -> str:
+    """A setting as an SQL expression; the fallback is its default in ``tunables`` (M3a.1)."""
     return (
         f"COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st "
-        f"WHERE st.key = '{key}'), {default})"
+        f"WHERE st.key = '{key}'), {sql_default(key)})"
     )
 
 
@@ -76,7 +78,8 @@ def _setting(key: str, default: str) -> str:
 def _eva_progress() -> str:
     """Per evaPacket: which passes are done and whether every *applicable* pass is (ruling 2)."""
     done = "".join(
-        f"  MAX(CASE WHEN ep.pass_no = {n} THEN 1 ELSE 0 END) AS done{n},\n" for n in range(1, 7)
+        f"  MAX(CASE WHEN ep.pass_no = {n} THEN 1 ELSE 0 END) AS done{n},\n"
+        for n in range(1, 7)  # structural: passes 1-6
     )
     return f"""CREATE VIEW v_eva_progress AS
 WITH base AS (
@@ -85,7 +88,7 @@ WITH base AS (
 {done}  CASE WHEN EXISTS (SELECT 1 FROM evaluation_pass_items i WHERE i.eva_packet_id = e.id
                      AND i.pass_no = 1) THEN 1 ELSE 0 END AS a_present,
   CASE WHEN EXISTS (SELECT 1 FROM evaluation_pass_items i WHERE i.eva_packet_id = e.id
-                     AND i.pass_no = 2) THEN 1 ELSE 0 END AS b_present
+                     AND i.pass_no = 2) THEN 1 ELSE 0 END AS b_present  -- structural: pass 2
   FROM eva_packets e
   JOIN candidate_field_definitions d ON d.name = e.field_name
   LEFT JOIN evaluation_passes ep ON ep.eva_packet_id = e.id
@@ -101,7 +104,7 @@ FROM base"""
 
 def _e4(expr: str) -> str:
     """A setting as an integer scaled by 10⁴ (fixed point, M2.1 fix 7): 0.6 → 6000."""
-    return f"CAST(ROUND({expr} * 10000) AS INTEGER)"
+    return f"CAST(ROUND({expr} * 10000) AS INTEGER)"  # structural: e4 scale
 
 
 def _eva_item_consensus(d: Dialect) -> str:
@@ -116,23 +119,26 @@ def _eva_item_consensus(d: Dialect) -> str:
     joins = "".join(
         f"  LEFT JOIN evaluation_pass_items i{n} ON i{n}.eva_packet_id = e.id "
         f"AND i{n}.pass_no = {n} AND i{n}.item_key = k.value\n"
-        for n in range(1, 7)
+        for n in range(1, 7)  # structural: passes 1-6
     )
-    cw = _e4(_setting("aggregation.cross_weight", "0.6"))
-    sw = _e4(_setting("aggregation.self_weight", "0.4"))
+    cw = _e4(_setting("aggregation.cross_weight"))
+    sw = _e4(_setting("aggregation.self_weight"))
+    # structural: a text field's 0-10 cross score → e4; e4 weights × 0-10 scores, half up
     conf_a = (
-        "CASE WHEN x.va IS NULL OR x.s4 IS NULL THEN NULL WHEN x.is_text = 1 THEN x.s4 * 1000 "
-        f"WHEN x.s5 IS NULL THEN NULL ELSE ({cw} * x.s4 + {sw} * x.s5 + 5) / 10 END"
+        "CASE WHEN x.va IS NULL OR x.s4 IS NULL THEN NULL WHEN x.is_text = 1 "
+        "THEN x.s4 * 1000 "  # structural: 0-10 → e4
+        f"WHEN x.s5 IS NULL THEN NULL ELSE ({cw} * x.s4 + {sw} * x.s5 + 5) / 10 END"  # structural
     )
     conf_b = (
-        "CASE WHEN x.vb IS NULL OR x.s3 IS NULL THEN NULL WHEN x.is_text = 1 THEN x.s3 * 1000 "
-        f"WHEN x.s6 IS NULL THEN NULL ELSE ({cw} * x.s3 + {sw} * x.s6 + 5) / 10 END"
+        "CASE WHEN x.vb IS NULL OR x.s3 IS NULL THEN NULL WHEN x.is_text = 1 "
+        "THEN x.s3 * 1000 "  # structural: 0-10 → e4
+        f"WHEN x.s6 IS NULL THEN NULL ELSE ({cw} * x.s3 + {sw} * x.s6 + 5) / 10 END"  # structural
     )
-    agree_min = _e4(_setting("consensus.agreement_min", "0.60"))
-    winner_min = _e4(_setting("consensus.winner_min", "0.70"))
-    one_min = _e4(_setting("consensus.one_sided_min", "0.70"))
-    margin = _e4(_setting("aggregation.dispute_margin", "0.15"))
-    min_sup = _setting("consensus.min_supports", "1")
+    agree_min = _e4(_setting("consensus.agreement_min"))
+    winner_min = _e4(_setting("consensus.winner_min"))
+    one_min = _e4(_setting("consensus.one_sided_min"))
+    margin = _e4(_setting("aggregation.dispute_margin"))
+    min_sup = _setting("consensus.min_supports")
     high = (
         "CASE WHEN s.ca IS NULL THEN s.cb WHEN s.cb IS NULL THEN s.ca "
         "WHEN s.ca >= s.cb THEN s.ca ELSE s.cb END"
@@ -183,7 +189,7 @@ v AS (
          WHEN 'both' THEN w.con3 + w.con4 + w.con5 + w.con6 ELSE 0 END AS contradictions,
     CASE w.winner WHEN 'a' THEN w.unv4 + w.unv5 WHEN 'b' THEN w.unv3 + w.unv6
          WHEN 'both' THEN w.unv3 + w.unv4 + w.unv5 + w.unv6 ELSE 0 END AS unverified,
-    CASE WHEN w.shape = 'agree' THEN (w.ca + w.cb + 1) / 2
+    CASE WHEN w.shape = 'agree' THEN (w.ca + w.cb + 1) / 2  -- structural: mean, half up
          WHEN w.shape = 'a_only' THEN w.ca
          WHEN w.shape = 'b_only' THEN w.cb
          WHEN w.shape = 'disagree' THEN CASE WHEN w.ca >= w.cb THEN w.ca ELSE w.cb END
@@ -218,8 +224,8 @@ SELECT r.eva_packet_id, r.packet_id, r.packet_version, r.eval_cycle_id, r.field_
        r.kind, r.item_key, r.complete, r.created_at,
        r.va AS value_a, r.vb AS value_b,
        r.ca AS conf_a_e4, r.cb AS conf_b_e4, r.confidence_e4,
-       r.ca / 10000.0 AS conf_a, r.cb / 10000.0 AS conf_b,
-       r.confidence_e4 / 10000.0 AS confidence,
+       r.ca / 10000.0 AS conf_a, r.cb / 10000.0 AS conf_b,  -- structural: display (e4 → 0-1)
+       r.confidence_e4 / 10000.0 AS confidence,  -- structural: display
        CASE WHEN r.shape = 'agree' THEN 1 ELSE 0 END AS agreement,
        r.status,
        CASE WHEN r.complete = 0 THEN 0 ELSE r.supports END AS supports,
@@ -270,8 +276,8 @@ def _field_consensus() -> str:
     escalation, then newest. If it is not current the row reports ``pending`` with no
     confidence or value, so a result for another packet definition never satisfies readiness.
     """
-    w_direct = _setting("qctx.w_direct_e4", "750")
-    w_periph = _setting("qctx.w_periph_e4", "250")
+    w_direct = _setting("qctx.w_direct_e4")
+    w_periph = _setting("qctx.w_periph_e4")
     quiet = "p.status IN ('waiting_for_children', 'archived')"
     return f"""CREATE VIEW v_field_consensus AS
 WITH art AS (
@@ -364,7 +370,7 @@ GROUP BY c.packet_id, c.packet_ref, c.packet_version, c.field_name, c.phase, c.k
 def _packet_stats(d: Dialect) -> str:
     text_expr = f"TRIM(REPLACE(p.prompt_description, {d.newline}, ' '))"
     hours = d.hours.format(a="COALESCE(p.completed_at, CURRENT_TIMESTAMP)", b="p.created_at")
-    threshold = _setting("stats.score_threshold", "7")
+    threshold = _setting("stats.score_threshold")
     return f"""CREATE VIEW v_packet_stats AS
 SELECT p.id AS packet_id, p.ref AS packet_ref, p.version AS packet_version,
        CASE WHEN {text_expr} = '' THEN 0
@@ -468,11 +474,12 @@ GROUP BY c.packet_id, c.packet_ref, c.packet_version, t.id, t.name, t.version, t
 def _ready_candidates() -> str:
     """Explanatory only (D1 point 4): the authoritative readiness rule is the pure Python
     predicate ``orchestrator.evaluation.readiness``, re-checked at admission and claim."""
-    return """CREATE VIEW v_ready_candidates AS
+    return f"""CREATE VIEW v_ready_candidates AS
 WITH req AS (
   SELECT ps.field_name, ps.phase, ps.tier, ps.hard
   FROM eva_presets ps
-  WHERE ps.enabled AND ps.required AND ps.tier IN (1, 2)
+  WHERE ps.enabled AND ps.required
+    AND ps.tier <= CAST({_setting("readiness.max_gating_tier")} AS INTEGER)
     AND ps.revision = (SELECT MAX(p2.revision) FROM eva_presets p2
                        WHERE p2.field_name = ps.field_name AND p2.phase = ps.phase)
 ),

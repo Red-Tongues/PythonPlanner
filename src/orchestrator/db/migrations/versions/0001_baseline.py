@@ -1192,7 +1192,7 @@ WITH base AS (
   CASE WHEN EXISTS (SELECT 1 FROM evaluation_pass_items i WHERE i.eva_packet_id = e.id
                      AND i.pass_no = 1) THEN 1 ELSE 0 END AS a_present,
   CASE WHEN EXISTS (SELECT 1 FROM evaluation_pass_items i WHERE i.eva_packet_id = e.id
-                     AND i.pass_no = 2) THEN 1 ELSE 0 END AS b_present
+                     AND i.pass_no = 2) THEN 1 ELSE 0 END AS b_present  -- structural: pass 2
   FROM eva_packets e
   JOIN candidate_field_definitions d ON d.name = e.field_name
   LEFT JOIN evaluation_passes ep ON ep.eva_packet_id = e.id
@@ -1256,7 +1256,7 @@ v AS (
          WHEN 'both' THEN w.con3 + w.con4 + w.con5 + w.con6 ELSE 0 END AS contradictions,
     CASE w.winner WHEN 'a' THEN w.unv4 + w.unv5 WHEN 'b' THEN w.unv3 + w.unv6
          WHEN 'both' THEN w.unv3 + w.unv4 + w.unv5 + w.unv6 ELSE 0 END AS unverified,
-    CASE WHEN w.shape = 'agree' THEN (w.ca + w.cb + 1) / 2
+    CASE WHEN w.shape = 'agree' THEN (w.ca + w.cb + 1) / 2  -- structural: mean, half up
          WHEN w.shape = 'a_only' THEN w.ca
          WHEN w.shape = 'b_only' THEN w.cb
          WHEN w.shape = 'disagree' THEN CASE WHEN w.ca >= w.cb THEN w.ca ELSE w.cb END
@@ -1271,10 +1271,10 @@ s AS (
     CASE WHEN v.complete = 0 THEN 'pending'
          WHEN v.shape = 'both_null' THEN 'null'
          WHEN v.supports >= COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'consensus.min_supports'), 1) AND v.contradictions <= v.supports AND (
-              (v.shape = 'agree' AND v.decision_e4 >= CAST(ROUND(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'consensus.agreement_min'), 0.60) * 10000) AS INTEGER))
-           OR (v.shape IN ('a_only', 'b_only') AND v.decision_e4 >= CAST(ROUND(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'consensus.one_sided_min'), 0.70) * 10000) AS INTEGER))
+              (v.shape = 'agree' AND v.decision_e4 >= CAST(ROUND(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'consensus.agreement_min'), 0.6) * 10000) AS INTEGER))
+           OR (v.shape IN ('a_only', 'b_only') AND v.decision_e4 >= CAST(ROUND(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'consensus.one_sided_min'), 0.7) * 10000) AS INTEGER))
            OR (v.shape = 'disagree' AND v.winner IS NOT NULL
-               AND v.decision_e4 >= CAST(ROUND(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'consensus.winner_min'), 0.70) * 10000) AS INTEGER) AND v.margin_e4 >= CAST(ROUND(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'aggregation.dispute_margin'), 0.15) * 10000) AS INTEGER)))
+               AND v.decision_e4 >= CAST(ROUND(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'consensus.winner_min'), 0.7) * 10000) AS INTEGER) AND v.margin_e4 >= CAST(ROUND(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'aggregation.dispute_margin'), 0.15) * 10000) AS INTEGER)))
          THEN 'accepted'
          ELSE 'disputed' END AS status
   FROM v
@@ -1291,8 +1291,8 @@ SELECT r.eva_packet_id, r.packet_id, r.packet_version, r.eval_cycle_id, r.field_
        r.kind, r.item_key, r.complete, r.created_at,
        r.va AS value_a, r.vb AS value_b,
        r.ca AS conf_a_e4, r.cb AS conf_b_e4, r.confidence_e4,
-       r.ca / 10000.0 AS conf_a, r.cb / 10000.0 AS conf_b,
-       r.confidence_e4 / 10000.0 AS confidence,
+       r.ca / 10000.0 AS conf_a, r.cb / 10000.0 AS conf_b,  -- structural: display (e4 → 0-1)
+       r.confidence_e4 / 10000.0 AS confidence,  -- structural: display
        CASE WHEN r.shape = 'agree' THEN 1 ELSE 0 END AS agreement,
        r.status,
        CASE WHEN r.complete = 0 THEN 0 ELSE r.supports END AS supports,
@@ -1471,7 +1471,8 @@ GROUP BY c.packet_id, c.packet_ref, c.packet_version, t.id, t.name, t.version, t
 WITH req AS (
   SELECT ps.field_name, ps.phase, ps.tier, ps.hard
   FROM eva_presets ps
-  WHERE ps.enabled AND ps.required AND ps.tier IN (1, 2)
+  WHERE ps.enabled AND ps.required
+    AND ps.tier <= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'readiness.max_gating_tier'), 2) AS INTEGER)
     AND ps.revision = (SELECT MAX(p2.revision) FROM eva_presets p2
                        WHERE p2.field_name = ps.field_name AND p2.phase = ps.phase)
 ),
@@ -1522,7 +1523,7 @@ FROM pk CROSS JOIN (SELECT 'risk_assessment' AS field_name UNION ALL SELECT 'son
 UNION
 SELECT pk.id, ps.field_name, 'preset_required'
 FROM pk CROSS JOIN eva_presets ps
-WHERE ps.phase = 'pre' AND ps.enabled AND ps.required AND ps.tier IN (1, 2)
+WHERE ps.phase = 'pre' AND ps.enabled AND ps.required AND ps.tier <= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'readiness.max_gating_tier'), 2) AS INTEGER)
   AND ps.revision = (SELECT MAX(p2.revision) FROM eva_presets p2
                      WHERE p2.field_name = ps.field_name AND p2.phase = ps.phase)""",
         """CREATE VIEW v_packet_field_health AS
@@ -1551,7 +1552,7 @@ WITH c AS (
          (CASE WHEN COALESCE((SELECT o.priority_level FROM objectives o WHERE o.id = p.objective_id), 0) >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.critical_priority'), 8) AS INTEGER) THEN 1 ELSE 0 END) AS is_critical
   FROM packets p WHERE NOT p.locked
 )
-SELECT c.*, (CASE WHEN (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.direct_e4'), 3000) AS INTEGER) * c.direct_dependents + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.two_hop_e4'), 1500) AS INTEGER) * c.two_hop_dependents + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.critical_e4'), 2500) AS INTEGER) * c.is_critical) < (10000) THEN (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.direct_e4'), 3000) AS INTEGER) * c.direct_dependents + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.two_hop_e4'), 1500) AS INTEGER) * c.two_hop_dependents + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.critical_e4'), 2500) AS INTEGER) * c.is_critical) ELSE (10000) END) AS centrality_e4 FROM c""",
+SELECT c.*, (CASE WHEN (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.direct_e4'), 3000) AS INTEGER) * c.direct_dependents + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.two_hop_e4'), 1500) AS INTEGER) * c.two_hop_dependents + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.critical_e4'), 2500) AS INTEGER) * c.is_critical) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.cap_e4'), 10000) AS INTEGER)) THEN (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.direct_e4'), 3000) AS INTEGER) * c.direct_dependents + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.two_hop_e4'), 1500) AS INTEGER) * c.two_hop_dependents + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.critical_e4'), 2500) AS INTEGER) * c.is_critical) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.cap_e4'), 10000) AS INTEGER)) END) AS centrality_e4 FROM c""",
         """CREATE VIEW v_packet_user_feedback AS
 WITH latest AS (
   SELECT f.packet_id, f.kind, (CAST(strftime('%s', CURRENT_TIMESTAMP) AS INTEGER) - CAST(strftime('%s', f.created_at) AS INTEGER)) AS age_sec, CASE f.kind WHEN 'boost' THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.boost_e4'), 1500) AS INTEGER) WHEN 'nudge' THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.nudge_e4'), 500) AS INTEGER) WHEN 'demote' THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.demote_e4'), -1500) AS INTEGER) ELSE CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.pin_e4'), 3000) AS INTEGER) END AS w
@@ -1562,8 +1563,9 @@ WITH latest AS (
 ),
 decayed AS (
   SELECT latest.packet_id,
-         CASE WHEN latest.age_sec < 86400 THEN latest.w
-              WHEN latest.age_sec < 259200 THEN (CASE WHEN (latest.w) >= 0 THEN (latest.w) / 2 ELSE -((1 - (latest.w)) / 2) END)
+         CASE WHEN latest.age_sec < CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.full_window_sec'), 86400) AS INTEGER) THEN latest.w
+              WHEN latest.age_sec < CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.half_window_sec'), 259200) AS INTEGER)
+              THEN (CASE WHEN (latest.w * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.decay_mid_e4'), 5000) AS INTEGER)) >= 0 THEN (latest.w * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.decay_mid_e4'), 5000) AS INTEGER)) / (10000) ELSE -(((10000) - 1 - (latest.w * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.decay_mid_e4'), 5000) AS INTEGER))) / (10000)) END)
               ELSE 0 END AS v
   FROM latest
 ),
@@ -1608,8 +1610,9 @@ WITH x AS (
 ),
 decayed AS (
   SELECT latest.packet_id,
-         CASE WHEN latest.age_sec < 86400 THEN latest.w
-              WHEN latest.age_sec < 259200 THEN (CASE WHEN (latest.w) >= 0 THEN (latest.w) / 2 ELSE -((1 - (latest.w)) / 2) END)
+         CASE WHEN latest.age_sec < CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.full_window_sec'), 86400) AS INTEGER) THEN latest.w
+              WHEN latest.age_sec < CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.half_window_sec'), 259200) AS INTEGER)
+              THEN (CASE WHEN (latest.w * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.decay_mid_e4'), 5000) AS INTEGER)) >= 0 THEN (latest.w * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.decay_mid_e4'), 5000) AS INTEGER)) / (10000) ELSE -(((10000) - 1 - (latest.w * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.decay_mid_e4'), 5000) AS INTEGER))) / (10000)) END)
               ELSE 0 END AS v
   FROM latest
 ),
@@ -1623,7 +1626,8 @@ FROM s) uf ON uf.packet_id = p.id
 )
 SELECT x.*, (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS ageing_e4, ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) AS base_score_e4,
        ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) - x.question_score_e4 + x.feedback_e4 + (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS score_e4,
-       ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) + 2 * x.question_score_e4 + x.feedback_e4 + (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS eva_priority_e4
+       ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.eva_question_multiplier'), 2) AS INTEGER) * x.question_score_e4
+         + x.feedback_e4 + (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS eva_priority_e4
 FROM x""",
         """CREATE VIEW v_gen_queue AS
 WITH s AS (WITH x AS (
@@ -1661,8 +1665,9 @@ WITH s AS (WITH x AS (
 ),
 decayed AS (
   SELECT latest.packet_id,
-         CASE WHEN latest.age_sec < 86400 THEN latest.w
-              WHEN latest.age_sec < 259200 THEN (CASE WHEN (latest.w) >= 0 THEN (latest.w) / 2 ELSE -((1 - (latest.w)) / 2) END)
+         CASE WHEN latest.age_sec < CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.full_window_sec'), 86400) AS INTEGER) THEN latest.w
+              WHEN latest.age_sec < CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.half_window_sec'), 259200) AS INTEGER)
+              THEN (CASE WHEN (latest.w * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.decay_mid_e4'), 5000) AS INTEGER)) >= 0 THEN (latest.w * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.decay_mid_e4'), 5000) AS INTEGER)) / (10000) ELSE -(((10000) - 1 - (latest.w * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.decay_mid_e4'), 5000) AS INTEGER))) / (10000)) END)
               ELSE 0 END AS v
   FROM latest
 ),
@@ -1676,7 +1681,8 @@ FROM s) uf ON uf.packet_id = p.id
 )
 SELECT x.*, (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS ageing_e4, ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) AS base_score_e4,
        ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) - x.question_score_e4 + x.feedback_e4 + (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS score_e4,
-       ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) + 2 * x.question_score_e4 + x.feedback_e4 + (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS eva_priority_e4
+       ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.eva_question_multiplier'), 2) AS INTEGER) * x.question_score_e4
+         + x.feedback_e4 + (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS eva_priority_e4
 FROM x),
 g AS (
   SELECT s.* FROM s
@@ -1734,8 +1740,9 @@ WITH s AS (WITH x AS (
 ),
 decayed AS (
   SELECT latest.packet_id,
-         CASE WHEN latest.age_sec < 86400 THEN latest.w
-              WHEN latest.age_sec < 259200 THEN (CASE WHEN (latest.w) >= 0 THEN (latest.w) / 2 ELSE -((1 - (latest.w)) / 2) END)
+         CASE WHEN latest.age_sec < CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.full_window_sec'), 86400) AS INTEGER) THEN latest.w
+              WHEN latest.age_sec < CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.half_window_sec'), 259200) AS INTEGER)
+              THEN (CASE WHEN (latest.w * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.decay_mid_e4'), 5000) AS INTEGER)) >= 0 THEN (latest.w * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.decay_mid_e4'), 5000) AS INTEGER)) / (10000) ELSE -(((10000) - 1 - (latest.w * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.decay_mid_e4'), 5000) AS INTEGER))) / (10000)) END)
               ELSE 0 END AS v
   FROM latest
 ),
@@ -1749,7 +1756,8 @@ FROM s) uf ON uf.packet_id = p.id
 )
 SELECT x.*, (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS ageing_e4, ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) AS base_score_e4,
        ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) - x.question_score_e4 + x.feedback_e4 + (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS score_e4,
-       ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) + 2 * x.question_score_e4 + x.feedback_e4 + (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS eva_priority_e4
+       ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.eva_question_multiplier'), 2) AS INTEGER) * x.question_score_e4
+         + x.feedback_e4 + (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS eva_priority_e4
 FROM x),
 g AS (WITH s AS (WITH x AS (
   SELECT p.id AS packet_id, p.ref AS packet_ref, p.status, p.channel, p.root_id,
@@ -1786,8 +1794,9 @@ g AS (WITH s AS (WITH x AS (
 ),
 decayed AS (
   SELECT latest.packet_id,
-         CASE WHEN latest.age_sec < 86400 THEN latest.w
-              WHEN latest.age_sec < 259200 THEN (CASE WHEN (latest.w) >= 0 THEN (latest.w) / 2 ELSE -((1 - (latest.w)) / 2) END)
+         CASE WHEN latest.age_sec < CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.full_window_sec'), 86400) AS INTEGER) THEN latest.w
+              WHEN latest.age_sec < CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.half_window_sec'), 259200) AS INTEGER)
+              THEN (CASE WHEN (latest.w * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.decay_mid_e4'), 5000) AS INTEGER)) >= 0 THEN (latest.w * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.decay_mid_e4'), 5000) AS INTEGER)) / (10000) ELSE -(((10000) - 1 - (latest.w * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.decay_mid_e4'), 5000) AS INTEGER))) / (10000)) END)
               ELSE 0 END AS v
   FROM latest
 ),
@@ -1801,7 +1810,8 @@ FROM s) uf ON uf.packet_id = p.id
 )
 SELECT x.*, (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS ageing_e4, ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) AS base_score_e4,
        ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) - x.question_score_e4 + x.feedback_e4 + (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS score_e4,
-       ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) + 2 * x.question_score_e4 + x.feedback_e4 + (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS eva_priority_e4
+       ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.eva_question_multiplier'), 2) AS INTEGER) * x.question_score_e4
+         + x.feedback_e4 + (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS eva_priority_e4
 FROM x),
 g AS (
   SELECT s.* FROM s
@@ -3276,7 +3286,7 @@ WITH base AS (
   CASE WHEN EXISTS (SELECT 1 FROM evaluation_pass_items i WHERE i.eva_packet_id = e.id
                      AND i.pass_no = 1) THEN 1 ELSE 0 END AS a_present,
   CASE WHEN EXISTS (SELECT 1 FROM evaluation_pass_items i WHERE i.eva_packet_id = e.id
-                     AND i.pass_no = 2) THEN 1 ELSE 0 END AS b_present
+                     AND i.pass_no = 2) THEN 1 ELSE 0 END AS b_present  -- structural: pass 2
   FROM eva_packets e
   JOIN candidate_field_definitions d ON d.name = e.field_name
   LEFT JOIN evaluation_passes ep ON ep.eva_packet_id = e.id
@@ -3340,7 +3350,7 @@ v AS (
          WHEN 'both' THEN w.con3 + w.con4 + w.con5 + w.con6 ELSE 0 END AS contradictions,
     CASE w.winner WHEN 'a' THEN w.unv4 + w.unv5 WHEN 'b' THEN w.unv3 + w.unv6
          WHEN 'both' THEN w.unv3 + w.unv4 + w.unv5 + w.unv6 ELSE 0 END AS unverified,
-    CASE WHEN w.shape = 'agree' THEN (w.ca + w.cb + 1) / 2
+    CASE WHEN w.shape = 'agree' THEN (w.ca + w.cb + 1) / 2  -- structural: mean, half up
          WHEN w.shape = 'a_only' THEN w.ca
          WHEN w.shape = 'b_only' THEN w.cb
          WHEN w.shape = 'disagree' THEN CASE WHEN w.ca >= w.cb THEN w.ca ELSE w.cb END
@@ -3355,10 +3365,10 @@ s AS (
     CASE WHEN v.complete = 0 THEN 'pending'
          WHEN v.shape = 'both_null' THEN 'null'
          WHEN v.supports >= COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'consensus.min_supports'), 1) AND v.contradictions <= v.supports AND (
-              (v.shape = 'agree' AND v.decision_e4 >= CAST(ROUND(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'consensus.agreement_min'), 0.60) * 10000) AS INTEGER))
-           OR (v.shape IN ('a_only', 'b_only') AND v.decision_e4 >= CAST(ROUND(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'consensus.one_sided_min'), 0.70) * 10000) AS INTEGER))
+              (v.shape = 'agree' AND v.decision_e4 >= CAST(ROUND(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'consensus.agreement_min'), 0.6) * 10000) AS INTEGER))
+           OR (v.shape IN ('a_only', 'b_only') AND v.decision_e4 >= CAST(ROUND(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'consensus.one_sided_min'), 0.7) * 10000) AS INTEGER))
            OR (v.shape = 'disagree' AND v.winner IS NOT NULL
-               AND v.decision_e4 >= CAST(ROUND(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'consensus.winner_min'), 0.70) * 10000) AS INTEGER) AND v.margin_e4 >= CAST(ROUND(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'aggregation.dispute_margin'), 0.15) * 10000) AS INTEGER)))
+               AND v.decision_e4 >= CAST(ROUND(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'consensus.winner_min'), 0.7) * 10000) AS INTEGER) AND v.margin_e4 >= CAST(ROUND(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'aggregation.dispute_margin'), 0.15) * 10000) AS INTEGER)))
          THEN 'accepted'
          ELSE 'disputed' END AS status
   FROM v
@@ -3375,8 +3385,8 @@ SELECT r.eva_packet_id, r.packet_id, r.packet_version, r.eval_cycle_id, r.field_
        r.kind, r.item_key, r.complete, r.created_at,
        r.va AS value_a, r.vb AS value_b,
        r.ca AS conf_a_e4, r.cb AS conf_b_e4, r.confidence_e4,
-       r.ca / 10000.0 AS conf_a, r.cb / 10000.0 AS conf_b,
-       r.confidence_e4 / 10000.0 AS confidence,
+       r.ca / 10000.0 AS conf_a, r.cb / 10000.0 AS conf_b,  -- structural: display (e4 → 0-1)
+       r.confidence_e4 / 10000.0 AS confidence,  -- structural: display
        CASE WHEN r.shape = 'agree' THEN 1 ELSE 0 END AS agreement,
        r.status,
        CASE WHEN r.complete = 0 THEN 0 ELSE r.supports END AS supports,
@@ -3555,7 +3565,8 @@ GROUP BY c.packet_id, c.packet_ref, c.packet_version, t.id, t.name, t.version, t
 WITH req AS (
   SELECT ps.field_name, ps.phase, ps.tier, ps.hard
   FROM eva_presets ps
-  WHERE ps.enabled AND ps.required AND ps.tier IN (1, 2)
+  WHERE ps.enabled AND ps.required
+    AND ps.tier <= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'readiness.max_gating_tier'), 2) AS INTEGER)
     AND ps.revision = (SELECT MAX(p2.revision) FROM eva_presets p2
                        WHERE p2.field_name = ps.field_name AND p2.phase = ps.phase)
 ),
@@ -3606,7 +3617,7 @@ FROM pk CROSS JOIN (SELECT 'risk_assessment' AS field_name UNION ALL SELECT 'son
 UNION
 SELECT pk.id, ps.field_name, 'preset_required'
 FROM pk CROSS JOIN eva_presets ps
-WHERE ps.phase = 'pre' AND ps.enabled AND ps.required AND ps.tier IN (1, 2)
+WHERE ps.phase = 'pre' AND ps.enabled AND ps.required AND ps.tier <= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'readiness.max_gating_tier'), 2) AS INTEGER)
   AND ps.revision = (SELECT MAX(p2.revision) FROM eva_presets p2
                      WHERE p2.field_name = ps.field_name AND p2.phase = ps.phase)""",
         """CREATE VIEW v_packet_field_health AS
@@ -3635,7 +3646,7 @@ WITH c AS (
          (CASE WHEN COALESCE((SELECT o.priority_level FROM objectives o WHERE o.id = p.objective_id), 0) >= CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.critical_priority'), 8) AS INTEGER) THEN 1 ELSE 0 END) AS is_critical
   FROM packets p WHERE NOT p.locked
 )
-SELECT c.*, (CASE WHEN (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.direct_e4'), 3000) AS INTEGER) * c.direct_dependents + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.two_hop_e4'), 1500) AS INTEGER) * c.two_hop_dependents + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.critical_e4'), 2500) AS INTEGER) * c.is_critical) < (10000) THEN (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.direct_e4'), 3000) AS INTEGER) * c.direct_dependents + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.two_hop_e4'), 1500) AS INTEGER) * c.two_hop_dependents + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.critical_e4'), 2500) AS INTEGER) * c.is_critical) ELSE (10000) END) AS centrality_e4 FROM c""",
+SELECT c.*, (CASE WHEN (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.direct_e4'), 3000) AS INTEGER) * c.direct_dependents + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.two_hop_e4'), 1500) AS INTEGER) * c.two_hop_dependents + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.critical_e4'), 2500) AS INTEGER) * c.is_critical) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.cap_e4'), 10000) AS INTEGER)) THEN (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.direct_e4'), 3000) AS INTEGER) * c.direct_dependents + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.two_hop_e4'), 1500) AS INTEGER) * c.two_hop_dependents + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.critical_e4'), 2500) AS INTEGER) * c.is_critical) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'centrality.cap_e4'), 10000) AS INTEGER)) END) AS centrality_e4 FROM c""",
         """CREATE VIEW v_packet_user_feedback AS
 WITH latest AS (
   SELECT f.packet_id, f.kind, (CAST(FLOOR(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS BIGINT) - CAST(FLOOR(EXTRACT(EPOCH FROM f.created_at)) AS BIGINT)) AS age_sec, CASE f.kind WHEN 'boost' THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.boost_e4'), 1500) AS INTEGER) WHEN 'nudge' THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.nudge_e4'), 500) AS INTEGER) WHEN 'demote' THEN CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.demote_e4'), -1500) AS INTEGER) ELSE CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.pin_e4'), 3000) AS INTEGER) END AS w
@@ -3646,8 +3657,9 @@ WITH latest AS (
 ),
 decayed AS (
   SELECT latest.packet_id,
-         CASE WHEN latest.age_sec < 86400 THEN latest.w
-              WHEN latest.age_sec < 259200 THEN (CASE WHEN (latest.w) >= 0 THEN (latest.w) / 2 ELSE -((1 - (latest.w)) / 2) END)
+         CASE WHEN latest.age_sec < CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.full_window_sec'), 86400) AS INTEGER) THEN latest.w
+              WHEN latest.age_sec < CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.half_window_sec'), 259200) AS INTEGER)
+              THEN (CASE WHEN (latest.w * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.decay_mid_e4'), 5000) AS INTEGER)) >= 0 THEN (latest.w * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.decay_mid_e4'), 5000) AS INTEGER)) / (10000) ELSE -(((10000) - 1 - (latest.w * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.decay_mid_e4'), 5000) AS INTEGER))) / (10000)) END)
               ELSE 0 END AS v
   FROM latest
 ),
@@ -3692,8 +3704,9 @@ WITH x AS (
 ),
 decayed AS (
   SELECT latest.packet_id,
-         CASE WHEN latest.age_sec < 86400 THEN latest.w
-              WHEN latest.age_sec < 259200 THEN (CASE WHEN (latest.w) >= 0 THEN (latest.w) / 2 ELSE -((1 - (latest.w)) / 2) END)
+         CASE WHEN latest.age_sec < CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.full_window_sec'), 86400) AS INTEGER) THEN latest.w
+              WHEN latest.age_sec < CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.half_window_sec'), 259200) AS INTEGER)
+              THEN (CASE WHEN (latest.w * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.decay_mid_e4'), 5000) AS INTEGER)) >= 0 THEN (latest.w * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.decay_mid_e4'), 5000) AS INTEGER)) / (10000) ELSE -(((10000) - 1 - (latest.w * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.decay_mid_e4'), 5000) AS INTEGER))) / (10000)) END)
               ELSE 0 END AS v
   FROM latest
 ),
@@ -3707,7 +3720,8 @@ FROM s) uf ON uf.packet_id = p.id
 )
 SELECT x.*, (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS ageing_e4, ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) AS base_score_e4,
        ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) - x.question_score_e4 + x.feedback_e4 + (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS score_e4,
-       ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) + 2 * x.question_score_e4 + x.feedback_e4 + (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS eva_priority_e4
+       ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.eva_question_multiplier'), 2) AS INTEGER) * x.question_score_e4
+         + x.feedback_e4 + (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS eva_priority_e4
 FROM x""",
         """CREATE VIEW v_gen_queue AS
 WITH s AS (WITH x AS (
@@ -3745,8 +3759,9 @@ WITH s AS (WITH x AS (
 ),
 decayed AS (
   SELECT latest.packet_id,
-         CASE WHEN latest.age_sec < 86400 THEN latest.w
-              WHEN latest.age_sec < 259200 THEN (CASE WHEN (latest.w) >= 0 THEN (latest.w) / 2 ELSE -((1 - (latest.w)) / 2) END)
+         CASE WHEN latest.age_sec < CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.full_window_sec'), 86400) AS INTEGER) THEN latest.w
+              WHEN latest.age_sec < CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.half_window_sec'), 259200) AS INTEGER)
+              THEN (CASE WHEN (latest.w * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.decay_mid_e4'), 5000) AS INTEGER)) >= 0 THEN (latest.w * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.decay_mid_e4'), 5000) AS INTEGER)) / (10000) ELSE -(((10000) - 1 - (latest.w * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.decay_mid_e4'), 5000) AS INTEGER))) / (10000)) END)
               ELSE 0 END AS v
   FROM latest
 ),
@@ -3760,7 +3775,8 @@ FROM s) uf ON uf.packet_id = p.id
 )
 SELECT x.*, (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS ageing_e4, ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) AS base_score_e4,
        ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) - x.question_score_e4 + x.feedback_e4 + (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS score_e4,
-       ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) + 2 * x.question_score_e4 + x.feedback_e4 + (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS eva_priority_e4
+       ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.eva_question_multiplier'), 2) AS INTEGER) * x.question_score_e4
+         + x.feedback_e4 + (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS eva_priority_e4
 FROM x),
 g AS (
   SELECT s.* FROM s
@@ -3818,8 +3834,9 @@ WITH s AS (WITH x AS (
 ),
 decayed AS (
   SELECT latest.packet_id,
-         CASE WHEN latest.age_sec < 86400 THEN latest.w
-              WHEN latest.age_sec < 259200 THEN (CASE WHEN (latest.w) >= 0 THEN (latest.w) / 2 ELSE -((1 - (latest.w)) / 2) END)
+         CASE WHEN latest.age_sec < CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.full_window_sec'), 86400) AS INTEGER) THEN latest.w
+              WHEN latest.age_sec < CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.half_window_sec'), 259200) AS INTEGER)
+              THEN (CASE WHEN (latest.w * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.decay_mid_e4'), 5000) AS INTEGER)) >= 0 THEN (latest.w * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.decay_mid_e4'), 5000) AS INTEGER)) / (10000) ELSE -(((10000) - 1 - (latest.w * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.decay_mid_e4'), 5000) AS INTEGER))) / (10000)) END)
               ELSE 0 END AS v
   FROM latest
 ),
@@ -3833,7 +3850,8 @@ FROM s) uf ON uf.packet_id = p.id
 )
 SELECT x.*, (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS ageing_e4, ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) AS base_score_e4,
        ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) - x.question_score_e4 + x.feedback_e4 + (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS score_e4,
-       ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) + 2 * x.question_score_e4 + x.feedback_e4 + (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS eva_priority_e4
+       ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.eva_question_multiplier'), 2) AS INTEGER) * x.question_score_e4
+         + x.feedback_e4 + (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS eva_priority_e4
 FROM x),
 g AS (WITH s AS (WITH x AS (
   SELECT p.id AS packet_id, p.ref AS packet_ref, p.status, p.channel, p.root_id,
@@ -3870,8 +3888,9 @@ g AS (WITH s AS (WITH x AS (
 ),
 decayed AS (
   SELECT latest.packet_id,
-         CASE WHEN latest.age_sec < 86400 THEN latest.w
-              WHEN latest.age_sec < 259200 THEN (CASE WHEN (latest.w) >= 0 THEN (latest.w) / 2 ELSE -((1 - (latest.w)) / 2) END)
+         CASE WHEN latest.age_sec < CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.full_window_sec'), 86400) AS INTEGER) THEN latest.w
+              WHEN latest.age_sec < CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.half_window_sec'), 259200) AS INTEGER)
+              THEN (CASE WHEN (latest.w * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.decay_mid_e4'), 5000) AS INTEGER)) >= 0 THEN (latest.w * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.decay_mid_e4'), 5000) AS INTEGER)) / (10000) ELSE -(((10000) - 1 - (latest.w * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'feedback.decay_mid_e4'), 5000) AS INTEGER))) / (10000)) END)
               ELSE 0 END AS v
   FROM latest
 ),
@@ -3885,7 +3904,8 @@ FROM s) uf ON uf.packet_id = p.id
 )
 SELECT x.*, (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS ageing_e4, ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) AS base_score_e4,
        ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) - x.question_score_e4 + x.feedback_e4 + (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS score_e4,
-       ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) + 2 * x.question_score_e4 + x.feedback_e4 + (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS eva_priority_e4
+       ((CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_grade_e4'), 6000) AS INTEGER) * (10000 - x.parent_grade_e4) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.w_centrality_e4'), 7000) AS INTEGER) * x.centrality_e4 + 5000) / 10000) + CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.eva_question_multiplier'), 2) AS INTEGER) * x.question_score_e4
+         + x.feedback_e4 + (CASE WHEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) < (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) THEN ((x.wait_sec / 60) * CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_per_minute_e4'), 10) AS INTEGER)) ELSE (CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st WHERE st.key = 'gen_queue.ageing_cap_e4'), 1500) AS INTEGER)) END) AS eva_priority_e4
 FROM x),
 g AS (
   SELECT s.* FROM s

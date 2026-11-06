@@ -34,10 +34,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from decimal import ROUND_HALF_UP, Decimal
+from typing import Any
 
 from orchestrator.contracts import ConsensusStatus, FieldKind
 
-SCALE = 10_000
+SCALE = 10_000  # structural: fixed point 10^4
 Q = Decimal("0.0001")
 
 
@@ -55,15 +56,23 @@ def q(value: Decimal | float | int) -> Decimal:
     return Decimal(str(value)).quantize(Q, rounding=ROUND_HALF_UP)
 
 
+def _d(key: str) -> Any:
+    """A field default from ``orchestrator.tunables`` (M3a.1: the oracle and the SQL views
+    share one table of defaults)."""
+    from orchestrator.tunables import default
+
+    return field(default_factory=lambda: default(key))
+
+
 @dataclass(frozen=True)
 class ConsensusSettings:
-    cross_weight: Decimal = Decimal("0.6")
-    self_weight: Decimal = Decimal("0.4")
-    agreement_min: Decimal = Decimal("0.60")
-    winner_min: Decimal = Decimal("0.70")
-    one_sided_min: Decimal = Decimal("0.70")
-    dispute_margin: Decimal = Decimal("0.15")
-    min_supports: int = 1
+    cross_weight: Decimal = _d("aggregation.cross_weight")
+    self_weight: Decimal = _d("aggregation.self_weight")
+    agreement_min: Decimal = _d("consensus.agreement_min")
+    winner_min: Decimal = _d("consensus.winner_min")
+    one_sided_min: Decimal = _d("consensus.one_sided_min")
+    dispute_margin: Decimal = _d("aggregation.dispute_margin")
+    min_supports: int = _d("consensus.min_supports")
 
 
 @dataclass(frozen=True)
@@ -127,22 +136,23 @@ def candidate_confidence(
     if cross is None:
         return None
     if kind is FieldKind.TEXT:
-        return cross * 1000
+        return cross * 1000  # structural: 0-10 score → e4
     if self_ is None:
         return None
-    return (e4(s.cross_weight) * cross + e4(s.self_weight) * self_ + 5) // 10
+    # structural: e4 × 0-10 score, rounded half up to e4
+    return (e4(s.cross_weight) * cross + e4(s.self_weight) * self_ + 5) // 10  # structural
 
 
 def decide(item: ItemInput, s: ConsensusSettings | None = None) -> ItemDecision:
     s = s or ConsensusSettings()
     va, vb = item.value_a, item.value_b
     ca = (
-        candidate_confidence(item.kind, item.scores.get(4), item.scores.get(5), s)
+        candidate_confidence(item.kind, item.scores.get(4), item.scores.get(5), s)  # structural
         if va is not None
         else None
     )
     cb = (
-        candidate_confidence(item.kind, item.scores.get(3), item.scores.get(6), s)
+        candidate_confidence(item.kind, item.scores.get(3), item.scores.get(6), s)  # structural
         if vb is not None
         else None
     )
@@ -155,7 +165,7 @@ def decide(item: ItemInput, s: ConsensusSettings | None = None) -> ItemDecision:
     winner: str | None
     if agreement:
         assert ca is not None and cb is not None
-        winner, decision = "both", (ca + cb + 1) // 2
+        winner, decision = "both", (ca + cb + 1) // 2  # structural: mean, half up
         threshold_ok = meets(decision, s.agreement_min)
     elif vb is None:
         assert ca is not None
@@ -177,9 +187,10 @@ def decide(item: ItemInput, s: ConsensusSettings | None = None) -> ItemDecision:
                 decision, low, s.dispute_margin
             )
 
-    scope = {"a": (4, 5), "b": (3, 6), "both": (3, 4, 5, 6), None: ()}[winner]
+    # structural: pass numbers of each candidate
+    scope = {"a": (4, 5), "b": (3, 6), "both": (3, 4, 5, 6), None: ()}[winner]  # structural
     if item.kind is FieldKind.TEXT:  # B3: text fields have no self-check passes
-        scope = tuple(n for n in scope if n in (3, 4))
+        scope = tuple(n for n in scope if n in (3, 4))  # structural: pass numbers
     evidence = [item.evidence.get(n, PassEvidence()) for n in scope]
     supports = sum(e.supports for e in evidence)
     contradictions = sum(e.contradictions for e in evidence)

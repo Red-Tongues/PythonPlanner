@@ -49,6 +49,8 @@ from orchestrator.db.models import (
 )
 from orchestrator.errors import OrchestratorError
 from orchestrator.events import record_event
+from orchestrator.settings_store import get_int
+from orchestrator.tunables import default as tunable_default
 
 
 class StaleWriteError(OrchestratorError):
@@ -76,7 +78,13 @@ class ReadinessInputs:
     pending_approvals: int = 0
     #: R6 OQ11: the accepted ambiguity quotient × 1000 (``None`` when not accepted)
     ambiguity_e4: int | None = None
-    max_ambiguity_e4: int = 4000
+    max_ambiguity_e4: int = field(
+        default_factory=lambda: int(tunable_default("readiness.max_ambiguity_e4"))
+    )
+    #: presets above this tier never gate (``readiness.max_gating_tier``; D2 ruling 8)
+    max_gating_tier: int = field(
+        default_factory=lambda: int(tunable_default("readiness.max_gating_tier"))
+    )
 
 
 @dataclass
@@ -121,7 +129,7 @@ def gate_passes(gate: FieldGate) -> bool:
 def assess_fields(inputs: ReadinessInputs) -> ReadinessReport:
     report = ReadinessReport(ready=True)
     for g in inputs.fields:
-        if g.tier == 3 or not g.required:
+        if g.tier > inputs.max_gating_tier or not g.required:
             continue
         if g.status is None:
             report.blockers.append(f"{g.field}: not evaluated")
@@ -210,7 +218,7 @@ def mandatory_fields_for_packet(session: Session, packet: Packet) -> dict[str, s
     if packet.repo_target_path is not None:
         add(RELATIONAL_FIELDS["charted_repo_target"], "charted_repo_target")
     for name, preset in current_presets_by_field(session, EvaPhase.PRE).items():
-        if preset.required and preset.tier in (1, 2):
+        if preset.required and preset.tier <= get_int(session, "readiness.max_gating_tier"):
             add((name,), "preset_required")
     return result
 
@@ -241,6 +249,7 @@ def field_gates(session: Session, packet: Packet, phase: EvaPhase) -> list[Field
         d.name: FieldKind(d.kind) for d in session.scalars(select(CandidateFieldDefinitionRow))
     }
     mandatory = mandatory_fields_for_packet(session, packet) if phase is EvaPhase.PRE else {}
+    gating = get_int(session, "readiness.max_gating_tier")
     gates = []
     presets = current_presets_by_field(session, phase)
     for name, preset in presets.items():
@@ -249,7 +258,7 @@ def field_gates(session: Session, packet: Packet, phase: EvaPhase) -> list[Field
         gates.append(
             FieldGate(
                 field=name,
-                tier=min(preset.tier, 2) if forced else preset.tier,
+                tier=min(preset.tier, gating) if forced else preset.tier,
                 required=preset.required or forced,
                 hard=preset.hard,
                 kind=kinds.get(name, FieldKind.SCORE),
@@ -260,7 +269,7 @@ def field_gates(session: Session, packet: Packet, phase: EvaPhase) -> list[Field
             )
         )
     for name in sorted(set(mandatory) - set(presets)):  # mandatory with no preset: never met
-        gates.append(FieldGate(name, 2, True, False, kinds.get(name, FieldKind.SCORE), None))
+        gates.append(FieldGate(name, gating, True, False, kinds.get(name, FieldKind.SCORE), None))
     return gates
 
 
@@ -285,7 +294,7 @@ def unmet_dependencies(session: Session, packet: Packet) -> tuple[str, ...]:
     from orchestrator.db.models import SealedBundle
     from orchestrator.settings_store import get_int
 
-    grade = get_int(session, "dep_satisfaction_grade_e4", 7000)
+    grade = get_int(session, "dep_satisfaction_grade_e4")
     lineage = select(Packet.id).where(Packet.ref == packet.ref)
     unmet: list[str] = []
     revoked = select(Revocation.target_id).where(Revocation.target_type == "dependency")
@@ -334,7 +343,8 @@ def evaluation_verdict(session: Session, packet: Packet, phase: EvaPhase) -> Rea
             field_gates(session, packet, phase),
             valid_waivers(session, packet, phase),
             ambiguity_e4=accepted_ambiguity_e4(session, packet) if pre else None,
-            max_ambiguity_e4=get_int(session, "readiness.max_ambiguity_e4", 4000),
+            max_ambiguity_e4=get_int(session, "readiness.max_ambiguity_e4"),
+            max_gating_tier=get_int(session, "readiness.max_gating_tier"),
         )
     )
 
@@ -350,7 +360,7 @@ def accepted_ambiguity_e4(session: Session, packet: Packet) -> int | None:
     if value is None:
         return None
     try:
-        return int(Decimal(str(value)) * 1000)
+        return int(Decimal(str(value)) * 1000)  # structural: 0-10 score → e4
     except InvalidOperation:
         return None
 
@@ -368,7 +378,8 @@ def readiness(session: Session, packet: Packet) -> ReadinessReport:
             unmet_dependencies=unmet_dependencies(session, packet),
             pending_approvals=pending_approvals(session, packet),
             ambiguity_e4=accepted_ambiguity_e4(session, packet),
-            max_ambiguity_e4=get_int(session, "readiness.max_ambiguity_e4", 4000),
+            max_ambiguity_e4=get_int(session, "readiness.max_ambiguity_e4"),
+            max_gating_tier=get_int(session, "readiness.max_gating_tier"),
         )
     )
 
@@ -403,7 +414,7 @@ def completion_blockers(session: Session, packet: Packet, current: PacketStatus)
         from orchestrator.db.models import SealedBundle
         from orchestrator.settings_store import get_int
 
-        grade = get_int(session, "dep_satisfaction_grade_e4", 7000)
+        grade = get_int(session, "dep_satisfaction_grade_e4")
 
         def done(child: Packet) -> bool:
             status = PacketStatus(child.status)

@@ -428,10 +428,14 @@ def lock_record(
 def set_setting(
     session: Session, key: str, value: Any, *, actor: Actor, reason: str | None = None
 ) -> Setting:
-    """Change a tunable. Bumps its ``version`` and writes an event."""
+    """Change a tunable within its validated range (``orchestrator.tunables``; ``ValueError``
+    otherwise). Bumps its ``version`` and writes an event."""
+    from orchestrator.tunables import validate
+
     row = session.get(Setting, key)
     if row is None:
         raise NotFoundError(f"no setting {key!r}")
+    validate(key, value)
     before = {"value": row.value, "version": row.version}
     row.value = value
     row.version += 1

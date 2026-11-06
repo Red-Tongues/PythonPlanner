@@ -205,7 +205,8 @@ def write_epoch_snapshot(
     """Freeze genQueue positions, scores and the lockout into a new epoch (evented)."""
     scored = {r["packet_id"]: r for r in scored_rows(session, now)}
     positions = {r.packet_id: r for r in gen_queue_rows(session, now)}
-    zone = {pid for pid, r in positions.items() if r.gen_position <= 2}
+    deepest = get_int(session, "lockout.max_position")  # R6 OQ3: positions 0..2 by default
+    zone = {pid for pid, r in positions.items() if r.gen_position <= deepest}
     locked = lockout_set(zone, scored, _edges(session))
     epoch = allocate(session, "queue_epoch")
     for pid, row in sorted(scored.items()):
@@ -336,10 +337,10 @@ def admission_tick(
 
     report = TickReport()
     drain_outbox(session, actor=actor)
-    low_depth = get_int(session, "admission.low_depth", 3)
-    floor = get_int(session, "admission.floor_e4", 3500)
-    low = get_int(session, "admission.low_floor_e4", 2500)
-    bypass = get_int(session, "admission.bypass_wait_sec", 7200)
+    low_depth = get_int(session, "admission.low_depth")
+    floor = get_int(session, "admission.floor_e4")
+    low = get_int(session, "admission.low_floor_e4")
+    bypass = get_int(session, "admission.bypass_wait_sec")
     rows = gen_queue_rows(session, now)
     depth = sum(1 for r in rows if r.status == "queued")
 
@@ -453,7 +454,7 @@ def next_dispatch(session: Session) -> str | None:
     if not rows:
         return None
     dispatched = session.scalar(select(func.count()).select_from(GenerationRun)) or 0
-    every = get_int(session, "dispatch.oldest_every", 5)
+    every = get_int(session, "dispatch.oldest_every")
     if every > 0 and (dispatched + 1) % every == 0:
         oldest = min(rows, key=lambda r: (r[1].ready_since or r[1].created_at, r[1].id))
         return oldest[1].ref
@@ -468,7 +469,7 @@ def next_dispatch(session: Session) -> str | None:
         .order_by(QueueEpochSnapshot.epoch_id.desc(), QueueEpochSnapshot.queue_pos)
         .limit(1)
     )
-    margin = get_int(session, "dispatch.incumbency_margin_e4", 250)
+    margin = get_int(session, "dispatch.incumbency_margin_e4")
     if previous is not None and previous.packet_id != leader.id:
         for snap, packet in rows:
             if packet.id == previous.packet_id and (snap.score_e4 or 0) + margin > (
@@ -566,7 +567,7 @@ def claim(
     report = readiness(session, packet)  # re-checked at the claim (D1 point 4)
     if not report.ready:
         raise ClaimError(f"{packet.ref} is no longer ready: " + "; ".join(report.blockers))
-    lease = now + timedelta(minutes=get_int(session, "queue.lease_minutes", 30))
+    lease = now + timedelta(minutes=get_int(session, "queue.lease_minutes"))
     snapshot = evaluation_snapshot(session, packet)
     run_id = new_id()
     if before_cas is not None:
@@ -605,7 +606,7 @@ def claim(
         gate_revision=observed,
         lease_expires_at=lease,
         heartbeat_at=now,
-        max_attempts=get_int(session, f"attempts.{channel.value}", 1) if channel else None,
+        max_attempts=get_int(session, f"attempts.{channel.value}") if channel else None,
         claim_content_revision=packet.content_revision,  # R6 OQ20
     )
     session.add(run)

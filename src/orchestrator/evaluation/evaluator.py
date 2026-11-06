@@ -290,13 +290,13 @@ class Evaluator:
         self.session = session
         self.provider = provider
         self.actor = actor
-        num_ctx = get_int(session, "evaluation.num_ctx", 4096)
+        num_ctx = get_int(session, "evaluation.num_ctx")
         self.specs = specs or model_specs(get_settings(), num_ctx=num_ctx)
-        self.max_tokens = get_int(session, "evaluation.max_tokens", 512)
-        self.repair_attempts = get_int(session, "evaluation.repair_attempts", 1)
-        self.max_attempts_final = get_int(session, "attempts.quickfire_evaluation", 4)
-        self.max_escalations = get_int(session, "evaluation.max_escalations", 1)
-        self.max_exemplars = get_int(session, "evaluation.max_exemplars", 3)
+        self.max_tokens = get_int(session, "evaluation.max_tokens")
+        self.repair_attempts = get_int(session, "evaluation.repair_attempts")
+        self.max_attempts_final = get_int(session, "attempts.quickfire_evaluation")
+        self.max_escalations = get_int(session, "evaluation.max_escalations")
+        self.max_exemplars = get_int(session, "evaluation.max_exemplars")
         self.calls = 0
         self._verified = False
 

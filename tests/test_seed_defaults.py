@@ -13,7 +13,6 @@ from orchestrator.db.seed import (
     AUTONOMY_SCOPES,
     M3A_PRESETS,
     SETTINGS,
-    SETTINGS_M3A,
     THRESHOLDS,
     all_presets,
     ensure_defaults,
@@ -131,7 +130,7 @@ EXPECTED_SETTINGS = {
     ("branching.max_depth", 2),
     ("branching.max_descendants", 12),
     ("stats.score_threshold", 7),
-} | {(key, value) for key, value, _ in SETTINGS_M3A}  # M3a settings (R6)
+}  # pre-M3a settings with their unchanged values; M3a/M3a.1 come from orchestrator.tunables
 #: 0005 eva presets: (field, phase, tier, required, hard, gate operator, gate value)
 EXPECTED_GATING_PRESETS = {
     ("safety_clear", "pre", 1, True, True, "=", "true"),
@@ -187,7 +186,8 @@ def test_seeds_on_a_fresh_database_are_exact(engine) -> None:  # type: ignore[no
             .all()
         )
     assert scopes == EXPECTED_SCOPES
-    assert settings == EXPECTED_SETTINGS
+    assert settings >= EXPECTED_SETTINGS  # pre-M3a values unchanged
+    assert settings == {(k, v) for k, v, _ in SETTINGS}  # M3a.1: the tunables table
     assert {tuple(t) for t in thresholds} == EXPECTED_THRESHOLDS
     assert [(r.id, bool(r.paused)) for r in control] == [(1, False)]
     # one seeding path (``ensure_defaults``): one batch event per seeded table

@@ -7,8 +7,11 @@ PostgreSQL 16 (PM rule: no float intermediates):
 * time is whole seconds since the epoch (``_EPOCH``: SQLite ``strftime('%s')``, PostgreSQL
   ``FLOOR(EXTRACT(EPOCH ...))``), so a wait is an integer number of seconds;
 * every division is of non-negative integers (truncation = floor), except the feedback halving,
-  which uses an explicit floor for negative values (``_half``);
+  which uses an explicit floor for negative values (``_floor_div``);
 * rounding is ``(x + 5000) / 10000`` on non-negative ``x``.
+
+M3a.1: every threshold, weight and window comes from ``orchestrator.tunables`` through
+``_int``; the only literals left are units and the 10^4 scale, marked ``# structural:``.
 
 Views (in dependency order), each also available with a bound ``now`` for tests:
 
@@ -19,6 +22,8 @@ OQ31: the lockout is read from the newest ``queue_epoch_snapshot``, never from l
 """
 
 from __future__ import annotations
+
+from orchestrator.tunables import sql_default
 
 #: universally mandatory pre-phase fields (R6 OQ10: clarity + specificity → requirement_alignment,
 #: scope_fit → acceptance_criteria_coverage, testability kept)
@@ -42,16 +47,18 @@ _EPOCH = {
 }
 
 
-def _int(key: str, default: int) -> str:
+def _int(key: str) -> str:
+    """An integer setting as SQL; the fallback is its default in ``tunables`` (M3a.1)."""
     return (
         f"CAST(COALESCE((SELECT CAST(CAST(st.value AS TEXT) AS NUMERIC) FROM settings st "
-        f"WHERE st.key = '{key}'), {default}) AS INTEGER)"
+        f"WHERE st.key = '{key}'), {sql_default(key)}) AS INTEGER)"
     )
 
 
-def _half(x: str) -> str:
-    """floor(x / 2) for any integer x, identical on both dialects."""
-    return f"(CASE WHEN ({x}) >= 0 THEN ({x}) / 2 ELSE -((1 - ({x})) / 2) END)"
+def _floor_div(num: str, den: str) -> str:
+    """floor(num / den) for any integer num and positive den, identical on both dialects."""
+    negative = f"-((({den}) - 1 - ({num})) / ({den}))"
+    return f"(CASE WHEN ({num}) >= 0 THEN ({num}) / ({den}) ELSE {negative} END)"
 
 
 def _min(a: str, b: str) -> str:
@@ -77,7 +84,7 @@ def satisfied_sql(edge: str) -> str:
     (``lineage_key = depends_on_id``) is sealed with ``composite_grade_e4 >=
     dep_satisfaction_grade_e4``. Nothing else satisfies it — a completed or archived split
     parent does not."""
-    grade = _int("dep_satisfaction_grade_e4", 7000)
+    grade = _int("dep_satisfaction_grade_e4")
     return (
         f"EXISTS (SELECT 1 FROM packets m JOIN sealed_bundles sb ON sb.packet_id = m.id "
         f"WHERE m.lineage_key = {edge}.depends_on_id AND m.status = 'sealed' "
@@ -86,6 +93,7 @@ def satisfied_sql(edge: str) -> str:
 
 
 def mandatory_fields() -> str:
+    gating = _int("readiness.max_gating_tier")
     has_deps = (
         "EXISTS (SELECT 1 FROM packet_dependencies e WHERE e.packet_id = pk.id AND "
         + ACTIVE_EDGE.format(e="e")
@@ -114,13 +122,13 @@ FROM pk CROSS JOIN ({_names(r["charted_repo_target"])}) u WHERE {charted}
 UNION
 SELECT pk.id, ps.field_name, 'preset_required'
 FROM pk CROSS JOIN eva_presets ps
-WHERE ps.phase = 'pre' AND ps.enabled AND ps.required AND ps.tier IN (1, 2)
+WHERE ps.phase = 'pre' AND ps.enabled AND ps.required AND ps.tier <= {gating}
   AND ps.revision = (SELECT MAX(p2.revision) FROM eva_presets p2
                      WHERE p2.field_name = ps.field_name AND p2.phase = ps.phase)"""
 
 
 def field_health() -> str:
-    cap = _int("qctx.cap_e4", 2250)
+    cap = _int("qctx.cap_e4")
     latest = (
         "ps.phase = 'pre' AND ps.enabled AND ps.revision = (SELECT MAX(p2.revision) "
         "FROM eva_presets p2 WHERE p2.field_name = ps.field_name AND p2.phase = ps.phase)"
@@ -152,7 +160,7 @@ def _dependents(target: str, alias: str) -> str:
     """Unlocked packets ``alias`` of *other* lineages with an active edge to ``target``'s
     lineage, whose own lineage has no sealed member graded at or above the satisfaction grade
     (R6 OQ8 with Argon K1)."""
-    grade = _int("dep_satisfaction_grade_e4", 7000)
+    grade = _int("dep_satisfaction_grade_e4")
     return (
         f"FROM packets {alias} JOIN packet_dependencies e{alias} ON e{alias}.packet_id = "
         f"{alias}.id WHERE e{alias}.depends_on_id = {LINEAGE.format(p=target)} "
@@ -179,13 +187,13 @@ def centrality() -> str:
     )
     critical = (
         "(CASE WHEN COALESCE((SELECT o.priority_level FROM objectives o "
-        f"WHERE o.id = p.objective_id), 0) >= {_int('centrality.critical_priority', 8)} "
+        f"WHERE o.id = p.objective_id), 0) >= {_int('centrality.critical_priority')} "
         "THEN 1 ELSE 0 END)"
     )
     total = (
-        f"{_int('centrality.direct_e4', 3000)} * c.direct_dependents + "
-        f"{_int('centrality.two_hop_e4', 1500)} * c.two_hop_dependents + "
-        f"{_int('centrality.critical_e4', 2500)} * c.is_critical"
+        f"{_int('centrality.direct_e4')} * c.direct_dependents + "
+        f"{_int('centrality.two_hop_e4')} * c.two_hop_dependents + "
+        f"{_int('centrality.critical_e4')} * c.is_critical"
     )
     return f"""CREATE VIEW v_packet_relational_centrality AS
 WITH c AS (
@@ -193,19 +201,19 @@ WITH c AS (
          {critical} AS is_critical
   FROM packets p WHERE NOT p.locked
 )
-SELECT c.*, {_min(total, "10000")} AS centrality_e4 FROM c"""
+SELECT c.*, {_min(total, _int("centrality.cap_e4"))} AS centrality_e4 FROM c"""
 
 
 def feedback_select(dialect: str, now: str) -> str:
     epoch = _EPOCH[dialect]
     age = f"({epoch.format(x=now)} - {epoch.format(x='f.created_at')})"
     weight = (
-        f"CASE f.kind WHEN 'boost' THEN {_int('feedback.boost_e4', 1500)} "
-        f"WHEN 'nudge' THEN {_int('feedback.nudge_e4', 500)} "
-        f"WHEN 'demote' THEN {_int('feedback.demote_e4', -1500)} "
-        f"ELSE {_int('feedback.pin_e4', 3000)} END"
+        f"CASE f.kind WHEN 'boost' THEN {_int('feedback.boost_e4')} "
+        f"WHEN 'nudge' THEN {_int('feedback.nudge_e4')} "
+        f"WHEN 'demote' THEN {_int('feedback.demote_e4')} "
+        f"ELSE {_int('feedback.pin_e4')} END"
     )
-    clamp = _int("feedback.clamp_e4", 3000)
+    clamp = _int("feedback.clamp_e4")
     return f"""WITH latest AS (
   SELECT f.packet_id, f.kind, {age} AS age_sec, {weight} AS w
   FROM feedback_events f
@@ -215,8 +223,9 @@ def feedback_select(dialect: str, now: str) -> str:
 ),
 decayed AS (
   SELECT latest.packet_id,
-         CASE WHEN latest.age_sec < 86400 THEN latest.w
-              WHEN latest.age_sec < 259200 THEN {_half("latest.w")}
+         CASE WHEN latest.age_sec < {_int("feedback.full_window_sec")} THEN latest.w
+              WHEN latest.age_sec < {_int("feedback.half_window_sec")}
+              THEN {_floor_div("latest.w * " + _int("feedback.decay_mid_e4"), "10000")}
               ELSE 0 END AS v
   FROM latest
 ),
@@ -254,12 +263,13 @@ def queue_score_select(dialect: str, now: str) -> str:
         f"{epoch.format(x=now)})"
     )
     ageing = _min(
-        f"(x.wait_sec / 60) * {_int('gen_queue.ageing_per_minute_e4', 10)}",
-        _int("gen_queue.ageing_cap_e4", 1500),
+        f"(x.wait_sec / 60) * {_int('gen_queue.ageing_per_minute_e4')}",  # structural: s→min
+        _int("gen_queue.ageing_cap_e4"),
     )
     base = (
-        f"(({_int('gen_queue.w_grade_e4', 6000)} * (10000 - x.parent_grade_e4) "
-        f"+ {_int('gen_queue.w_centrality_e4', 7000)} * x.centrality_e4 + 5000) / 10000)"
+        f"(({_int('gen_queue.w_grade_e4')} * (10000 - x.parent_grade_e4) "  # structural: e4
+        # structural: e4 scale, rounded half up
+        f"+ {_int('gen_queue.w_centrality_e4')} * x.centrality_e4 + 5000) / 10000)"  # structural
     )
     feedback = feedback_select(dialect, now)
     return f"""WITH x AS (
@@ -269,10 +279,10 @@ def queue_score_select(dialect: str, now: str) -> str:
          {epoch.format(x="COALESCE(p.ready_since, p.created_at)")} AS ready_epoch,
          CASE WHEN {wait} < 0 THEN 0 ELSE {wait} END AS wait_sec,
          CASE WHEN p.parent_bundle_id IS NULL
-              THEN {_int("gen_queue.root_parent_grade_e4", 5000)}
+              THEN {_int("gen_queue.root_parent_grade_e4")}
               ELSE COALESCE((SELECT sb.composite_grade_e4 FROM sealed_bundles sb
                              WHERE sb.id = p.parent_bundle_id),
-                            {_int("gen_queue.root_parent_grade_e4", 5000)}) END
+                            {_int("gen_queue.root_parent_grade_e4")}) END
            AS parent_grade_e4,
          COALESCE(c.centrality_e4, 0) AS centrality_e4,
          COALESCE(fh.question_score_e4, 0) AS question_score_e4,
@@ -294,16 +304,17 @@ def queue_score_select(dialect: str, now: str) -> str:
 )
 SELECT x.*, {ageing} AS ageing_e4, {base} AS base_score_e4,
        {base} - x.question_score_e4 + x.feedback_e4 + {ageing} AS score_e4,
-       {base} + 2 * x.question_score_e4 + x.feedback_e4 + {ageing} AS eva_priority_e4
+       {base} + {_int("gen_queue.eva_question_multiplier")} * x.question_score_e4
+         + x.feedback_e4 + {ageing} AS eva_priority_e4
 FROM x"""
 
 
 def gen_queue_select(dialect: str, now: str) -> str:
     """R6 OQ1/OQ2/OQ7: running (position 0) plus queued, then ready, dispatchable packets."""
-    floor = _int("admission.floor_e4", 3500)
-    low = _int("admission.low_floor_e4", 2500)
-    depth = _int("admission.low_depth", 3)
-    bypass = _int("admission.bypass_wait_sec", 7200)
+    floor = _int("admission.floor_e4")
+    low = _int("admission.low_floor_e4")
+    depth = _int("admission.low_depth")
+    bypass = _int("admission.bypass_wait_sec")
     return f"""WITH s AS ({queue_score_select(dialect, now)}),
 g AS (
   SELECT s.* FROM s

@@ -31,6 +31,7 @@ from orchestrator.db.models import (
     new_id,
 )
 from orchestrator.events import record_event
+from orchestrator.tunables import TUNABLES
 
 SYSTEM_ACTOR = Actor.system("init-db")
 KEY_FIELDS = "@key_fields"  # threshold pseudo-field: "any candidate field with is_key_field"
@@ -172,72 +173,10 @@ AUTONOMY_SCOPES = (
 )
 
 # (key, value, description)
-SETTINGS_M1 = (
-    ("aggregation.cross_weight", 0.6, "Weight of the cross-check score in model confidence"),
-    ("aggregation.self_weight", 0.4, "Weight of the self-check score in model confidence"),
-    (
-        "aggregation.dispute_margin",
-        0.15,
-        "Confidence margin below which a disagreement is disputed",
-    ),
-    ("attempts.quickfire_evaluation", 4, "Max attempts per Quickfire Evaluation run (QE)"),
-    ("attempts.local_generation", 3, "Max attempts per Local Generation run (LG)"),
-    ("attempts.workbench_production", 2, "Max attempts per Workbench Production run (WP)"),
+#: every tunable, with its default, from the single table (M3a.1: nothing hard-coded)
+SETTINGS: tuple[tuple[str, Any, str], ...] = tuple(
+    (t.key, t.seed_value, t.description) for t in TUNABLES
 )
-
-SETTINGS_M2 = (
-    ("consensus.agreement_min", 0.6, "Agreement is accepted at or above this confidence (B2)"),
-    ("consensus.winner_min", 0.7, "A disagreement winner needs at least this confidence (B2)"),
-    ("consensus.one_sided_min", 0.7, "A one-sided (other NULL) value needs this confidence (B2)"),
-    ("consensus.min_supports", 1, "Verified SUPPORT quotes needed for acceptance (B2)"),
-    ("evaluation.repair_attempts", 1, "Targeted repairs per call before escalation (B12)"),
-    ("evaluation.max_escalations", 1, "Split-plan re-runs per field before needs_review (B12)"),
-    ("evaluation.num_ctx", 4096, "Context window sent explicitly to the evaluator (B11)"),
-    ("evaluation.max_tokens", 512, "Max completion tokens per evaluation call"),
-    ("evaluation.max_exemplars", 3, "Exemplars per field included in a prompt"),
-    ("queue.lease_minutes", 30, "Claim lease length"),
-    ("branching.max_depth", 2, "Maximum branch depth (B5)"),
-    ("branching.max_descendants", 12, "Maximum descendants per trunk (B5)"),
-    ("stats.score_threshold", 7, "Scores at or above this count as 'above threshold'"),
-)
-
-#: M3a (R6): every constant of the genPacket loop is a versioned setting (OQ7)
-SETTINGS_M3A = (
-    ("qctx.w_direct_e4", 750, "OQ4: field weight when a direct context link is questioned"),
-    ("qctx.w_periph_e4", 250, "OQ4: field weight when only peripheral links are questioned"),
-    ("qctx.cap_e4", 2250, "OQ4: cap of a packet's question_score_e4"),
-    ("gen_queue.w_grade_e4", 6000, "OQ7: weight of (10000 - parent grade), x 10^4"),
-    ("gen_queue.w_centrality_e4", 7000, "OQ7: weight of relational centrality, x 10^4"),
-    ("gen_queue.root_parent_grade_e4", 5000, "OQ6: effective parent grade of a root packet"),
-    ("gen_queue.ageing_per_minute_e4", 10, "OQ6: ageing per full minute in ready"),
-    ("gen_queue.ageing_cap_e4", 1500, "OQ6: ageing cap"),
-    ("admission.floor_e4", 3500, "OQ7: relational admission floor (ready -> queued)"),
-    ("admission.low_floor_e4", 2500, "OQ7: floor while queued depth is below admission.low_depth"),
-    ("admission.low_depth", 3, "OQ7: queued depth under which the low floor applies"),
-    ("admission.bypass_wait_sec", 7200, "OQ7: wait in ready after which the floor is bypassed"),
-    ("centrality.direct_e4", 3000, "OQ8: per unsealed direct dependent"),
-    ("centrality.two_hop_e4", 1500, "OQ8: per unsealed two-hop dependent"),
-    ("centrality.critical_e4", 2500, "OQ8: on a critical objective path"),
-    ("dep_satisfaction_grade_e4", 7000, "OQ13: a sealed lineage member at this grade satisfies"),
-    ("lineage_stop_grade_e4", 8500, "OQ14: a child of a parent at this grade is created held"),
-    ("feedback.boost_e4", 1500, "OQ9: BOOST"),
-    ("feedback.nudge_e4", 500, "OQ9: NUDGE"),
-    ("feedback.demote_e4", -1500, "OQ9: DEMOTE"),
-    ("feedback.pin_e4", 3000, "OQ9: PIN"),
-    ("feedback.clamp_e4", 3000, "OQ9: packet feedback sum clamped to +/- this"),
-    ("crash.limit", 5, "OQ18: crash_count at which the packet is held (crash_limit)"),
-    ("crash.cooldown_base_sec", 30, "OQ18: cooldown = min(max, base * 2^(crash_count - 1))"),
-    ("crash.cooldown_max_sec", 3600, "OQ18: cooldown cap"),
-    ("route.crash_window_sec", 300, "OQ18: window for counting a route's crashes"),
-    ("route.crash_threshold", 3, "OQ18: crashes in the window that make a route unhealthy"),
-    ("route.unhealthy_sec", 600, "OQ18: how long a route stays unhealthy"),
-    ("dispatch.oldest_every", 5, "OQ25: every Nth dispatch takes the oldest queued packet"),
-    ("dispatch.incumbency_margin_e4", 250, "OQ25: a challenger must beat the incumbent by this"),
-    ("gen_eva.synth_below_e4", 5000, "OQ17: below this grade the child prompt is LLM-rewritten"),
-    ("readiness.max_ambiguity_e4", 4000, "OQ11: ambiguity_quotient x 1000 must not exceed this"),
-)
-
-SETTINGS = SETTINGS_M1 + SETTINGS_M2 + SETTINGS_M3A
 
 # (name, field_name, operator, value, action, precedence, description) — PROJECT_PLAN §8
 THRESHOLDS = (
