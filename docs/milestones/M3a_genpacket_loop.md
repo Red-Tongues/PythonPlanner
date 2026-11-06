@@ -1,6 +1,6 @@
-# M3a — the genPacket loop (DRAFT for CFO sign-off)
+# M3a — the genPacket loop
 
-**Status:** draft, **not approved**. Written 2026-11-05 from the CFO's directive (`docs/notes/2026-11-05_CFO_T1C_v2_Directive_and_Review.md`; the .docx is authoritative), Section E Step 3. No code is written until the CFO signs this off and answers, or explicitly defers, the open questions below.
+**Status:** approved for implementation. Written 2026-11-05 from the CFO's directive (`docs/notes/2026-11-05_CFO_T1C_v2_Directive_and_Review.md`; the .docx is authoritative), Section E Step 3. On 2026-11-06 the CFO delegated OQ1–OQ35 to the auditor Argon; **`docs/reviews/R6_Argon_M3a_rulings.md` is binding** and overrides every open question below (each is marked *Resolved per R6*). R6's flags F1/F2 are **not** adopted. PM clarifications: held packets are excluded from `v_gen_queue` (OQ2), so the floor bypass never applies to them; a field, table or setting a ruling names that does not exist is added to the master schema / field catalogue.
 **Design notes it implements:**
 - T1-C v3 (Final) — `docs/notes/2026-11-05_T1C_v3_final.md`;
 - Q1 v2 — `docs/notes/2026-11-04_Q1_queue_maths_brainstorm.md`.
@@ -146,7 +146,9 @@ The directive's line numbers are from an earlier tree. The ones below are from `
 | new `evaluation/gen_eva.py` | — | (e) | e |
 | `migrations/versions/0001_baseline.py` | generated | regenerated with `python scripts/generate_baseline.py`; never hand-edited | all |
 
-## State-machine changes this implies (ARCHITECTURE §7 / D8) — need CFO confirmation
+## State-machine changes this implies (ARCHITECTURE §7 / D8)
+
+**Resolved per R6 (Transitions):** add `evaluating_post → sealed`, `draft → ready`, `queued → ready`, `running → queued`; remove `evaluating_post → completed` (genPackets), `ready → evaluating_pre`, `queued → evaluating_pre`, `running → failed`; the failure-budget rows go with `enforce_failure_budgets` (S2). The table below is the history of how each conflict arose.
 
 The directive changes behaviour that ARCHITECTURE §7's transition rows encode. The DB transition trigger enforces those rows, so each change must be explicit. Rows quoted from ARCHITECTURE §7.1/§7.2:
 
@@ -205,18 +207,18 @@ Every criterion is tested with `FakeProvider` (no network, GPU or real LLM). It 
 - **AC16.** Re-evaluating a field against the current context clears its `question_context`. The `question_context` computation makes no provider call (asserted by the FakeProvider call count).
 
 **(c) Queues**
-- **AC17.** `v_gen_queue` contains exactly the active unsealed genPackets of the fixture. It never contains a locked row or a `completed`, `archived`, `closed_unverified` or `waiting_for_children` packet. *(OQ2)*
-- **AC18.** Every `v_eva_queue` row is a `v_gen_queue` row (subset test), with a status in `draft/evaluating_pre/ready/queued` and at least one need condition.
+- **AC17.** `v_gen_queue` contains exactly the fixture's packets with status `running`, `queued` or `ready` that are not held (status or HOLD/BLOCK override), have their dependencies satisfied and a healthy route (R6 OQ2). It never contains a locked row.
+- **AC18.** Every `v_eva_queue` row has a status in `draft/evaluating_pre/ready/queued` and at least one need condition; every `ready`/`queued` row of it is a `v_gen_queue` row (subset test). `draft`/`evaluating_pre` packets are enriched before they enter genQueue (R6 OQ2 narrows genQueue to running/queued/ready).
 - **AC19.** A `ready` packet and a `queued` packet with missing optional fields or `question_context > 0`, outside the lockout, are in `v_eva_queue`, and the evaluator evaluates them.
-- **AC20.** No packet at `gen_position` 0, 1 or 2, and no packet directly related to one, is in `v_eva_queue`. Calling the evaluator directly on such a packet is refused with an event. *(OQ1, OQ3)*
-- **AC21.** `gen_position` and `relational_score_e4` are identical on SQLite and PostgreSQL for a 20+-packet fixture with ties. Ties are broken by `created_at`, then `ref`. *(OQ2, OQ7)*
+- **AC20.** No packet locked out in the newest `queue_epoch_snapshot` (positions 0–2 plus same `root_id`, hard dependencies either way, same non-null repo path; R6 OQ3, OQ31) is in `v_eva_queue`. Calling the evaluator directly on such a packet is refused with an event; an evaluation whose commit loses the snapshot/content-revision CAS is written to `eva_discard_log` (OQ30).
+- **AC21.** `gen_position` and `score_e4` are identical on SQLite and PostgreSQL for a 20+-packet fixture with ties, using integer floor arithmetic only. Ties are broken by `ready_since`, then `packet_id` (R6 OQ2, OQ7).
 - **AC22.** A generation running under FakeProvider survives a project brief edit, a waiver, a scope `gate_revision` bump and an evaPacket on an unrelated packet. It reaches `gen_eva` and is neither staled nor cancelled.
 
 **(d) Gates**
 - **AC23.** `mandatory_fields_for_packet` returns the universal set, plus each relational set when its trigger holds (dependencies, dependents, chartedness, task family). There is one unit test per trigger. *(OQ10)*
 - **AC24.** A packet missing any mandatory field never becomes `ready`. Filling it lets readiness admit it, subject to the rest of the predicate. *(OQ11)*
-- **AC25.** `admit_next` promotes `ready → queued` when `relational_score_e4 ≥ floor` (tested below, at and above the floor). Below the floor the packet stays `ready`, and `v_gen_queue` shows its score and the floor. *(OQ6)*
-- **AC26.** No code path parks a packet for its failure count. The failure-budget transition rows are gone from `transitions.py` and from the DB trigger, and the transition tests are regenerated.
+- **AC25.** The admission tick promotes `ready → queued` when `score_e4 ≥ floor` (3,500; 2,500 while queued depth < 3; bypassed after 7,200 s in `ready`) and demotes `queued → ready` when a non-running queued packet falls below it (R6 OQ7, OQ12). Boundaries tested: depth 2/3, wait 7,199/7,200 s, below/at/above the floor. `v_gen_queue` shows each packet's score and floor.
+- **AC26.** No code path parks a packet for its failure count. The failure-budget transition rows and the R6 removals (`ready/queued → evaluating_pre`, `running → failed`, `evaluating_post → completed` for genPackets) are gone from `transitions.py` and from the DB trigger, and the R6 additions are present; the transition tests are regenerated.
 - **AC27.** A recorded user feedback event changes `user_feedback_bonus_e4` as defined. *(OQ9)*
 
 **(e) gen_eva and crashes**
@@ -226,76 +228,84 @@ Every criterion is tested with `FakeProvider` (no network, GPU or real LLM). It 
   - `parent_id` = parent, `root_id` = parent's root (or the parent itself), `depth` + 1;
   - the parent's bundle id/hash;
   - a re-imagined `prompt_description` that differs from the parent's.
-  This holds for a high-grade (≥ 9,500) parent and a low-grade parent alike. *(OQ17, OQ24)*
+  This holds for a high-grade (≥ 9,500) parent and a low-grade parent alike; a child of a parent graded ≥ `lineage_stop_grade_e4` (8,500) is created `held` with `hold_reason = grade_met` (R6 OQ14; flag F1 — skip the child — is not adopted).
 - **AC31.** Idempotence: a failure injected between seal and child spawn, followed by recovery, gives exactly one bundle and one child.
 - **AC32.** The CFO's example as a test:
   - a poorly-graded, pivotal parent's child ranks above a well-graded, non-relational parent's child;
   - the former crosses the floor and becomes `queued`;
   - the latter stays `ready`.
   *(OQ6, OQ8)*
-- **AC33.** Crash: a FakeProvider timeout or empty output increments `crash_count` and the route-health counter. It writes no grade, no `sealed_bundles` row and no child, and runs no `gen_eva`. *(OQ18)*
-- **AC34.** `binding_mismatch` returns `None` after a `gate_revision` or `input_hash` change. It still reports a superseded fencing token, an expired lease and an owner close/BLOCK. *(OQ19)*
+- **AC33.** Crash: a FakeProvider timeout or empty output marks the run crashed, increments `crash_count`, moves the packet `running → queued` with cooldown `min(3600, 30·2^(n−1))` s, holds it at `crash_limit` (5), and makes the route unhealthy for 600 s after 3 crashes within 300 s. It writes no grade, no `sealed_bundles` row and no child, and runs no `gen_eva` (R6 OQ18).
+- **AC34.** `binding_mismatch` returns `None` after a `gate_revision`, `content_revision` or `input_hash` change and after a soft HOLD. It still reports a superseded fencing token, an expired lease, an owner close/BLOCK, and a hard CFO_ABORT / GLOBAL_PAUSE revokes the lease (`running → queued`) (R6 OQ19).
 - **AC35.** One documented SQL query over `parent_id`/`root_id` returns, for a three-generation lineage, each ancestor's grade, bundle hash and crash count.
 
-## Open questions for the CFO
+## Open questions (all resolved per R6)
 
-The directive's code sketches are non-production references. Each gap or contradiction found in them is listed here; none has been silently decided. *Default* is the PM/engineer suggestion if the CFO prefers to delegate.
+The directive's code sketches are non-production references. Each gap or contradiction found in them was listed here; **all are resolved by R6** (`docs/reviews/R6_Argon_M3a_rulings.md`), which is the record. The text below is kept as the question history; where a *Default* differs from R6, R6 wins. OQ29–OQ35 were raised in R5 (`docs/reviews/R5_M3a_directive_audit.md`) and are also resolved per R6:
+
+- **OQ29** claim-time binding: human edits at positions 0–2 are allowed, bump `content_revision` and flow to the child. *(Resolved per R6 OQ29.)*
+- **OQ30** in-flight evaluation vs lockout: the commit checks the snapshot and content revision in one CAS; losers go to `eva_discard_log`. *(Resolved per R6 OQ30.)*
+- **OQ31** lockout source: `queue_epoch_snapshot`, never live `ROW_NUMBER`. *(Resolved per R6 OQ31.)*
+- **OQ32** trigger order: guards BEFORE, outbox AFTER. *(Resolved per R6 OQ32.)*
+- **OQ33** `gate_revision` vs `content_revision`. *(Resolved per R6 OQ33.)*
+- **OQ34** quote re-verification on drain. *(Resolved per R6 OQ34.)*
+- **OQ35** synchronous in-transaction drain. *(Resolved per R6 OQ35.)*
 
 **Queue positions and lockout**
-- **OQ1 — Which statuses are "running" at position 0?** Sketch 1 gives position 0 only to `status = 'running'`. A generation is also in flight during `evaluating_post` (`gen_eva` itself) and while an exit-3 run is parked in `awaiting_confirmation`.
+- **OQ1 — Which statuses are "running" at position 0?** *(Resolved per R6 OQ1.)* Sketch 1 gives position 0 only to `status = 'running'`. A generation is also in flight during `evaluating_post` (`gen_eva` itself) and while an exit-3 run is parked in `awaiting_confirmation`.
   - Several packets can run at once, and all would share position 0.
   - *Default:* position 0 = every packet with an active run (`active_run_id IS NOT NULL`) or in `evaluating_post`.
-- **OQ2 — What do positions count?**
+- **OQ2 — What do positions count?** *(Resolved per R6 OQ2.)*
   - Sketch 1's `ROW_NUMBER()` is computed over all rows, including the running ones. Running rows therefore consume row numbers, so the next packets can start at 2 or higher, and "positions 1 and 2" are not always the next two to dispatch.
   - `v_gen_queue` also includes `held`, `blocked`, `needs_review`, `awaiting_confirmation` and `failed` packets (rank group 2). When few packets are queued, non-dispatchable packets can occupy positions 1–2 and be locked out of enrichment for no reason.
   - *Default:* number only `queued` then `ready` packets, after the running ones.
-- **OQ3 — What is "directly related" for the lockout?** Sketch 1 locks out dependency edges in both directions plus the packet's `parent_id`.
+- **OQ3 — What is "directly related" for the lockout?** *(Resolved per R6 OQ3.)* Sketch 1 locks out dependency edges in both directions plus the packet's `parent_id`.
   - The parent of a re-imagined child is sealed, and so already outside genQueue. The parent link then only matters for split parents in `waiting_for_children`, which are also outside.
   - Should "directly related" also cover split siblings, the same lineage (`root_id`), packets writing the same `repo_target_path`, or the packet's objective?
   - Does the lockout also cover the CFO's own SQL edits, or only evaPackets?
 
 **Scoring units and bounds**
-- **OQ4 — Units of `question_context` weighting.**
+- **OQ4 — Units of `question_context` weighting.** *(Resolved per R6 OQ4.)*
   - C.i.2 says `question_context_count` weights `direct` links above `peripheral`, but gives no weights.
   - Sketch 1 adds `question_context_count × 1000` to the score. Is the count per field, per packet (summed over fields), or per changed link?
   - What are the direct/peripheral weights, and is the count capped?
-- **OQ5 — Direction of `question_context` in the score.** Sketch 1 **raises** the rank of a packet whose context is questioned (+1,000 each). That pushes it towards positions 0–2, where the lockout stops the evaPackets that would refresh it. It could then be generated on questioned context. Should `question_context` raise evaQueue priority but lower genQueue rank, or block admission until it is refreshed?
-- **OQ6 — The 3,500 admission floor and root packets.**
+- **OQ5 — Direction of `question_context` in the score.** *(Resolved per R6 OQ5.)* Sketch 1 **raises** the rank of a packet whose context is questioned (+1,000 each). That pushes it towards positions 0–2, where the lockout stops the evaPackets that would refresh it. It could then be generated on questioned context. Should `question_context` raise evaQueue priority but lower genQueue rank, or block admission until it is refreshed?
+- **OQ6 — The 3,500 admission floor and root packets.** *(Resolved per R6 OQ6.)*
   - For a root packet (no parent bundle) Sketch 1 uses `parent_grade_e4 = 0`, so the score is `3000 + 7000·c/10000`.
   - Any root with centrality below 715/10,000 scores under 3,500 and **never becomes `Queued`**. So an isolated first-generation task would never run.
   - Is 3,500 the intended floor? Should roots use a neutral grade instead? Is the floor versioned config?
-- **OQ7 — Score bounds and which formula.**
+- **OQ7 — Score bounds and which formula.** *(Resolved per R6 OQ7.)*
   - `relational_score_e4` is not bounded to 10,000: `question_context` and feedback add on top. Clamp it?
   - Does Q1 step 3's `S = (V·(D − R)) // (D + C)` survive at all, for example as the order within `queued`?
   - Does T1-C v2's failure product `A` survive as a lineage-level input?
   - Sketch 1 also joins `sealed_bundles` on `packet_id = p.parent_id`. That needs exactly one bundle per packet, which v3's `UNIQUE(packet_id)` gives.
-- **OQ8 — Definition of `relational_centrality_e4`.** `v_packet_relational_centrality` is not defined. Candidate inputs (Q1 step 2):
+- **OQ8 — Definition of `relational_centrality_e4`.** *(Resolved per R6 OQ8.)* `v_packet_relational_centrality` is not defined. Candidate inputs (Q1 step 2):
   - number of dependents unblocked;
   - critical-path position;
   - objective health;
   - chartedness;
   - task family.
   Which ones, with what weights, and normalised how?
-- **OQ9 — Definition of `user_feedback_bonus_e4`.** `v_packet_user_feedback` is not defined. Questions:
+- **OQ9 — Definition of `user_feedback_bonus_e4`.** *(Resolved per R6 OQ9.)* `v_packet_user_feedback` is not defined. Questions:
   - Which events count: confirmations, waivers, SQL edits, overrides, grade adjustments?
   - Which sign does each carry? For example, is a waiver positive, and is an override down-weight negative?
   - What are the magnitudes, and does feedback decay?
   - Does it apply per packet or across the lineage?
 
 **Ready gate**
-- **OQ10 — Mandatory field names.**
+- **OQ10 — Mandatory field names.** *(Resolved per R6 OQ10.)*
   - Sketch 3 names `clarity`, `specificity`, `scope_fit`, `dependency_clarity`, `interface_stability`, `downstream_contract_clarity`, `blast_radius`, `regression_risk` and `sonar_Hotspot_alignment`. None of these is in `fields/candidate_fields.yaml` except `testability`.
   - Map them to existing fields (for example `dependency_validity`, `acceptance_criteria_coverage`, `requirement_alignment`), or add new definitions?
   - Q3(iv) names "task family" as a trigger, but Sketch 3 has no rule for it.
   - `is_charted_target` does not exist yet.
   - `locally_drafted_examples` is not a field yet.
-- **OQ11 — Relation to today's readiness predicate.**
+- **OQ11 — Relation to today's readiness predicate.** *(Resolved per R6 OQ11.)*
   - Today `evaluating_pre → ready` requires: required tiers accepted or soft-waived, no hard failure, dependencies satisfied, approvals, ambiguity ≤ 4,000, and H current.
   - Do universal/relational mandatory sets **replace** `eva_presets.required` or **add** to it? Do the other conditions stay?
-- **OQ12 — Can enrichment demote?** If continuous enrichment of a `ready`/`queued` packet produces a disputed or hard-failed mandatory field, does the packet go back to `evaluating_pre` (existing rows), or stay?
+- **OQ12 — Can enrichment demote?** *(Resolved per R6 OQ12.)* If continuous enrichment of a `ready`/`queued` packet produces a disputed or hard-failed mandatory field, does the packet go back to `evaluating_pre` (existing rows), or stay?
 
 **gen_eva, sealing and children**
-- **OQ13 — What status does a sealed parent get, and what satisfies a dependency?**
+- **OQ13 — What status does a sealed parent get, and what satisfies a dependency?** *(Resolved per R6 OQ13.)*
   - Sketch 4 transitions every graded parent to `completed`. Today `completed` means "passed the E5 completion gate" and satisfies dependency edges.
   - A poorly graded parent marked `completed` would unblock its dependents on bad output.
   - Options:
@@ -303,58 +313,58 @@ The directive's code sketches are non-production references. Each gap or contrad
     2. `completed` only above a grade threshold;
     3. dependencies follow the lineage to the newest/best sealed member.
   - Which member of a lineage satisfies an edge that points at the root?
-- **OQ14 — When does a lineage stop?**
+- **OQ14 — When does a lineage stop?** *(Resolved per R6 OQ14.)*
   - "Regardless of the grade … returns as a child" means every lineage grows forever.
   - Well-graded children sit at the bottom of genQueue but stay in evaQueue (missing fields), consuming local evaluation capacity indefinitely.
   - Is there a stop rule? Options: grade ≥ threshold → the task is done and no child is spawned; or the child is created but parked.
-- **OQ15 — Production repo write vs `gen_eva`.**
+- **OQ15 — Production repo write vs `gen_eva`.** *(Resolved per R6 OQ15.)*
   - Today `running → evaluating_post` requires the write and commit to the production repo **before** post-evaluation, and the post fields bind to the commit SHA (SonarQube).
   - Does `gen_eva` grade first, with output held in `content_blobs`/provisional refs, so that only passing output is committed? Or is every output committed and then graded?
-- **OQ16 — `gen_eva` grade and resources.**
+- **OQ16 — `gen_eva` grade and resources.** *(Resolved per R6 OQ16.)*
   - Which post-phase fields make up `composite_grade_e4`, and with which weights?
   - "No queue maths" for `gen_eva`: does it pre-empt evaQueue work on the shared local models?
-- **OQ17 — Who writes the re-imagined prompt?** Sketch 4's `build_reimagined_prompt` is undefined.
+- **OQ17 — Who writes the re-imagined prompt?** *(Resolved per R6 OQ17.)* Sketch 4's `build_reimagined_prompt` is undefined.
   - If it is a deterministic template, the CFO should approve it.
   - If it is an LLM, say which model or channel. Its output must pass Pydantic validation and stay stateless (Golden Rules 2–3).
-- **OQ24 — What the child inherits.**
+- **OQ24 — What the child inherits.** *(Resolved per R6 OQ24.)*
   - Sketch 4 sets `position = parent.position + 1`, which can collide with siblings in the objective's order, and the `(re-imagined)` suffix accumulates in `title`.
   - Do dependency edges to and from the parent move to the child?
   - Which evaluated fields carry over: none, the structural ones, or all, marked with `question_context`?
-- **OQ27 — A new child that already satisfies the mandatory fields.** Sketch 4 moves it `draft → ready`, but D8 has no `draft → ready` row; only `draft → evaluating_pre` exists. Add the row, or route the child `draft → evaluating_pre → ready`?
+- **OQ27 — A new child that already satisfies the mandatory fields.** *(Resolved per R6 OQ27.)* Sketch 4 moves it `draft → ready`, but D8 has no `draft → ready` row; only `draft → evaluating_pre` exists. Add the row, or route the child `draft → evaluating_pre → ready`?
 
 **Crashes and running generations**
-- **OQ18 — After a crash.**
+- **OQ18 — After a crash.** *(Resolved per R6 OQ18.)*
   - Which status does the unsealed packet take: back to `queued`, `ready`, or `failed`?
   - Is it re-dispatched automatically? The CFO–Argon note (A6) says generation runs are "never re-run automatically".
   - With `enforce_failure_budgets` gone, what bounds repeated crashes: only budget and pace caps (C21/C36), or route health?
   - How is "route health" defined, and what does a nudge change?
-- **OQ19 — What still stops a run?**
+- **OQ19 — What still stops a run?** *(Resolved per R6 OQ19.)*
   - Sketch 5 halts only on `closed_unverified` and `blocked`. Does an owner HOLD or a global pause still stop an in-flight run?
   - If runs no longer bind to `gate_revision`, the exit-3 approval/rejection guards (R1, D10 Q5) need another binding. Proposed: the confirmation's version and F.
-- **OQ20 — The CFO's SQL edit of a running genPacket.** The run is not cancelled (Q7). Does the edit belong to the parent's sealed snapshot (head at seal time), or is it carried into the child, with the parent's snapshot taken from the run's frozen claim snapshot?
+- **OQ20 — The CFO's SQL edit of a running genPacket.** *(Resolved per R6 OQ20.)* The run is not cancelled (Q7). Does the edit belong to the parent's sealed snapshot (head at seal time), or is it carried into the child, with the parent's snapshot taken from the run's frozen claim snapshot?
 
 **Schema scope and wording**
-- **OQ21 — Scope of retiring `supersedes_id`.**
+- **OQ21 — Scope of retiring `supersedes_id`.** *(Resolved per R6 OQ21.)*
   - Retire it for genPackets only?
   - Projects and objectives version via `supersedes_id` today, and their head changes are what `question_context` detects. Do they keep that, or move to the same in-place + history model?
   - What happens to C-loop interruption, which today "produces new core-field versions"?
-- **OQ22 — Attributing a verified quote to its source.**
+- **OQ22 — Attributing a verified quote to its source.** *(Resolved per R6 OQ22.)*
   - `verify_quote` checks a substring of one concatenated document (project brief + objective brief + task). Quotes carry no `source_type`/`source_ref`, and a quote may match in several sections.
   - Dependencies are not in the document at all, so Sketch 2 marks them `direct` structurally. That conflicts with "structural tagging alone is not sufficient".
   - *Default:* attribute by section offsets (`PROJECT BRIEF` / `OBJECTIVE BRIEF` / `TASK`). A quote matching several sections marks all of them `direct`. Hard dependencies stay structurally `direct`.
-- **OQ23 — What else is in `input_hash`?** T1-C v2's manifest also covered field-definition, preset and contract versions and the repo commit. After a preset or definition change, are fields hard-invalidated (as today), or flagged with `question_context`?
-- **OQ25 — Starvation and oscillation rules.** Q1 step 3 had:
+- **OQ23 — What else is in `input_hash`?** *(Resolved per R6 OQ23.)* T1-C v2's manifest also covered field-definition, preset and contract versions and the repo commit. After a preset or definition change, are fields hard-invalidated (as today), or flagged with `question_context`?
+- **OQ25 — Starvation and oscillation rules.** *(Resolved per R6 OQ25.)* Q1 step 3 had:
   - every m-th dispatch for the oldest eligible packet;
   - an incumbency margin;
   - epoch-frozen inputs.
   Do they stay, for dispatch order within `queued`, given that `Queued` is "purely relational"?
-- **OQ26 — Requirement F and CLAUDE.md Golden Rule 1.** Approve the reworded Requirement F (T1-C v3 §1)? Golden Rule 1 still says "Corrections create a new version (`supersedes_id`)".
-- **OQ28 — M3a's boundary.**
+- **OQ26 — Requirement F and CLAUDE.md Golden Rule 1.** *(Resolved per R6 OQ26.)* Approve the reworded Requirement F (T1-C v3 §1)? Golden Rule 1 still says "Corrections create a new version (`supersedes_id`)".
+- **OQ28 — M3a's boundary.** *(Resolved per R6 OQ28.)*
   - Directive D.7 calls M3a "kernel loop + CLI".
   - The CFO–Argon note B2 calls it "the genPacket loop and pause/branch working in SQL".
   - Step 3 lists only (a)–(e).
   - Confirm that the kernel tick loop, the CLI and pause/branch belong to a later M3a part or to M3b, and not to this spec.
 
-## Deviations from the directive
+## Deviations from the directive and R6
 
-None yet; nothing is built. The directive's file/line references (C.i) predate PR #3's final tree, and the table above uses the current approximate locations.
+Recorded in `docs/PROGRESS.md` and in the M3a PR description as they arise. The directive's file/line references (C.i) predate PR #3's final tree, and the table above uses the current approximate locations.

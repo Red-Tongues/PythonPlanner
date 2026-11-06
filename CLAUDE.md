@@ -15,7 +15,7 @@ K1 advances work unattended · K2 governed (recorded, scored, evidenced, gated b
 
 ## Golden rules
 
-1. **Completed work is immutable (Requirement F).** Never write code that updates or deletes locked packets, accepted artifacts, or any row in append-only tables (`evaluation_passes`, `events`). Corrections create a new version (`supersedes_id`). The DB triggers that enforce this must never be disabled, including in tests.
+1. **Completed work is immutable (Requirement F, reworded per R6 OQ26).** Developing packets and upstream context (projects, objectives) mutate in place, and every change of an audited field is captured by triggers into `field_revisions`. Completed runs seal their claim-time snapshot into `sealed_bundles` and spawn a child genPacket via `parent_id`/`root_id`; a sealed (locked) genPacket is never edited or re-opened. Never write code that updates or deletes locked packets, accepted artifacts, sealed bundles, field revisions or any row in append-only tables (`evaluation_passes`, `events`, …). The DB triggers that enforce this must never be disabled, including in tests.
 2. **LLMs propose, SQL/Python decide.** No decision may depend on LLM output that has not passed Pydantic validation and SQL aggregation.
 3. **Stateless LLM calls.** Every prompt is self-contained; no chat history between calls.
 4. **Tests need no network, GPU or real LLM.** Use `FakeProvider`. PostgreSQL tests are opt-in via `ORCH_TEST_POSTGRES_URL` (CI provides it).
