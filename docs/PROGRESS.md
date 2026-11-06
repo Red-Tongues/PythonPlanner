@@ -4,6 +4,15 @@ Newest entries first. Every agent session appends an entry: what changed, decisi
 
 ---
 
+## 2026-11-06 00:40-01:10 - R6: Argon rulings on M3a OQ1-OQ35 (PM)
+
+- The CFO delegated binding decisions on M3a OQ1-OQ35 to Argon, without further CFO sign-off.
+- Argon issued the rulings; PM verification led to corrections of OQ7 and OQ32 and a restatement of OQ24.
+- Flags F1 and F2 were left for the CFO and are not adopted.
+- Next: Claude Code implements M3a on a new branch.
+
+---
+
 ## 2026-11-06 00:05-00:40 - R5: independent audit of the CFO directive, PM decisions (PM)
 
 - Added the R5 audit: Argon directive findings, R&D queue-score critique and GitHub Copilot CI/branch report. Product decisions remain the CFO's; PM decisions are triage and recommendations.

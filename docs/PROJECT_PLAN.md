@@ -475,6 +475,8 @@ No prices are quoted here; obtain current quotes before purchase.
 | 2026-11-05 | **CFO decision Q7 — calculations never override a running generation; position 0–2 lockout (PM recommendation rejected).** A running generation is never cancelled, staled or discarded by background calculations, evaPackets or upstream edits; it completes and goes through `gen_eva`. evaPackets belonging to, or directly related to, a genPacket at `genQueue` positions 0, 1 or 2 are excluded from `evaQueue`. |
 | 2026-11-05 | **PM:** PR #3 was already merged (6b89a18) before the directive arrived, so the directive's Step 1 is satisfied. Steps 2–3 (T1-C v3, Q1 v2, M3a spec draft) done as docs only on branch `docs/t1c-v3-m3a-spec`; M3a code waits for the CFO's sign-off of the spec. |
 
+2026-11-06 - CFO delegated M3a OQ1-OQ35 to Argon; rulings in docs/reviews/R6_Argon_M3a_rulings.md are binding; implementation proceeds without CFO sign-off.
+
 ---
 
 ## 22. Handover notes for the next agent
